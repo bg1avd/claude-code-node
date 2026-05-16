@@ -1,0 +1,24 @@
+{
+  "name": "claude-code-node",
+  "version": "1.0.0",
+  "description": "Node.js 重构版 Claude Code CLI Agent 框架",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": {
+    "cc-node": "src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node --test src/__tests__/*.js",
+    "repl": "node src/index.js"
+  },
+  "keywords": ["claude", "code", "agent", "cli", "llm"],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "src/"
+  ]
+}
