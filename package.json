@@ -1,6 +1,6 @@
 {
   "name": "@raolin2025/claude-code-node",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Node.js AI Code Agent CLI - Zero dependencies, pure JavaScript, security hardened",
   "type": "module",
   "main": "src/index.js",

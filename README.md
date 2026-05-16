@@ -317,3 +317,63 @@ claude-code-node/              33 文件 · 4307 行
 
 *基于 Claude Code 架构的 OpenAI 兼容重构*  
 *零外部依赖 · DeepSeek 默认 · 安全加固 · MIT License*
+
+## 📡 通讯通道 (Notification Channels)
+
+cc-node 支持多平台消息推送，任务完成或出错时自动通知到手机。
+
+### 支持的通道
+
+| 通道 | 配置方式 | 说明 |
+|------|----------|------|
+| **Telegram** | Bot Token + Chat ID | 最推荐，支持 Markdown |
+| **企业微信** | Webhook URL | 群机器人 |
+| **飞书** | Webhook URL | 群机器人 |
+| **Discord** | Webhook URL | 服务器频道 |
+| **Slack** | Webhook URL | Incoming Webhook |
+| **自定义** | HTTP URL + Method | 任意 Webhook |
+
+### 快速配置 (Telegram 为例)
+
+```bash
+# 1. 在 Telegram 找 @BotFather 创建 Bot，拿到 Token
+# 2. 获取你的 Chat ID（给 Bot 发消息后访问 https://api.telegram.org/bot<TOKEN>/getUpdates）
+# 3. 设置环境变量
+export CC_NODE_CHANNEL_TELEGRAM_TOKEN=123456:ABC-DEF
+export CC_NODE_CHANNEL_TELEGRAM_CHAT_ID=78901234
+export CC_NODE_CHANNEL_DEFAULT=telegram
+
+# 4. 启动 cc-node，会自动加载
+cc-node
+```
+
+### 配置文件方式
+
+在 `.claude-code/config.json` 中：
+
+```json
+{
+  "channels": {
+    "telegram": {
+      "type": "telegram",
+      "token": "123456:ABC-DEF",
+      "chatId": "78901234"
+    }
+  },
+  "defaultChannel": "telegram"
+}
+```
+
+### REPL 命令
+
+```
+/channel list           — 列出已配置通道
+/channel test           — 测试通道连通性
+/channel send hello     — 手动发送消息
+```
+
+### 通知时机
+
+- ✅ **任务完成**（one-shot 模式自动通知）
+- ❌ **执行出错**（自动通知错误内容）
+- 🔄 **手动发送**（`/channel send` 命令）

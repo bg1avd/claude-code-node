@@ -9,28 +9,30 @@ import { SessionManager } from './session.js'
 import { Config } from './config.js'
 import { TokenBudget } from './token-budget.js'
 import { PermissionChecker } from '../permission/permission.js'
+import { ChannelManager } from '../channel/index.js'
 
 const BANNER = `
 ╔═══════════════════════════════════════════════╗
-║  AI Code Agent — Node.js Edition              ║
-║  OpenAI-Compatible · DeepSeek Default          ║
-║  Type '/help' for commands                     ║
-║  Type '/exit' or Ctrl+C to quit                ║
+║   AI Code Agent — Node.js Edition            ║
+║   OpenAI-Compatible · DeepSeek Default        ║
+║   Type '/help' for commands                   ║
+║   Type '/exit' or Ctrl+C to quit              ║
 ╚═══════════════════════════════════════════════╝
 `.trim()
 
 const HELP_TEXT = `
 Commands:
-  /help        — Show this help
-  /model NAME  — Switch model
-  /tools       — List available tools
-  /session     — Show session info
-  /sessions    — List all sessions
-  /clear       — Clear conversation
-  /config KEY  — Show config value
-  /budget      — Show token budget
-  /exit        — Exit (also Ctrl+C)
-  /quit        — Same as /exit
+  /help          — Show this help
+  /model NAME    — Switch model
+  /tools         — List available tools
+  /session       — Show session info
+  /sessions      — List all sessions
+  /clear         — Clear conversation
+  /config KEY    — Show config value
+  /budget        — Show token budget
+  /channel CMD   — Manage notification channels (list|send|test)
+  /exit          — Exit (also Ctrl+C)
+  /quit          — Same as /exit
 `
 
 /**
@@ -52,41 +54,16 @@ function parseArgs(argv) {
   while (i < argv.length) {
     const arg = argv[i]
     switch (arg) {
-      case '--model':
-      case '-m':
-        args.model = argv[++i]
-        break
-      case '--system-prompt':
-      case '-s':
-        args.systemPrompt = argv[++i]
-        break
-      case '--permission-mode':
-      case '-p':
-        args.permissionMode = argv[++i]
-        break
-      case '--max-turns':
-      case '-t':
-        args.maxTurns = parseInt(argv[++i], 10)
-        break
-      case '--api-key':
-        args.apiKey = argv[++i]
-        break
-      case '--api-base':
-        args.apiBase = argv[++i]
-        break
-      case '--resume':
-      case '-r':
-        args.resume = argv[++i]
-        break
-      case '--verbose':
-      case '-v':
-        args.verbose = true
-        break
-      case '--no-stream':
-        args.noStream = true
-        break
-      case '--help':
-      case '-h':
+      case '--model': case '-m': args.model = argv[++i]; break
+      case '--system-prompt': case '-s': args.systemPrompt = argv[++i]; break
+      case '--permission-mode': case '-p': args.permissionMode = argv[++i]; break
+      case '--max-turns': case '-t': args.maxTurns = parseInt(argv[++i], 10); break
+      case '--api-key': args.apiKey = argv[++i]; break
+      case '--api-base': args.apiBase = argv[++i]; break
+      case '--resume': case '-r': args.resume = argv[++i]; break
+      case '--verbose': case '-v': args.verbose = true; break
+      case '--no-stream': args.noStream = true; break
+      case '--help': case '-h':
         console.log(`Usage: cc-node [options]
 
 Options:
@@ -95,24 +72,33 @@ Options:
   -p, --permission-mode     Permission mode: ask|always-allow|deny (default: ask)
   -t, --max-turns N         Max tool loop turns (default: 100)
   --api-base URL            API base URL (default: https://api.deepseek.com/v1)
-  --api-key KEY             API key (or set LLM_API_KEY env)
+  --api-key ***             API key (or set LLM_API_KEY env)
   -r, --resume ID           Resume a session
   -v, --verbose             Verbose mode
   --no-stream               Disable streaming
   -h, --help                Show this help
 
 Environment variables:
-  LLM_API_KEY               Universal API key (recommended)
-  DEEPSEEK_API_KEY          DeepSeek API key (default)
-  OPENAI_API_KEY            OpenAI API key
-  QWEN_API_KEY              Qwen (DashScope) API key
-  GLM_API_KEY               Zhipu GLM API key
-  KIMI_API_KEY              Moonshot Kimi API key
-  LLM_API_BASE              API base URL (default: https://api.deepseek.com/v1)`)
+  LLM_API_KEY        Universal API key (recommended)
+  DEEPSEEK_API_KEY   DeepSeek API key (default)
+  OPENAI_API_KEY     OpenAI API key
+  QWEN_API_KEY       Qwen (DashScope) API key
+  GLM_API_KEY        Zhipu GLM API key
+  KIMI_API_KEY       Moonshot Kimi API key
+  LLM_API_BASE       API base URL (default: https://api.deepseek.com/v1)
+
+Channel environment variables:
+  CC_NODE_CHANNEL_DEFAULT              Default channel name
+  CC_NODE_CHANNEL_TELEGRAM_TOKEN       Telegram bot token
+  CC_NODE_CHANNEL_TELEGRAM_CHAT_ID     Telegram chat ID
+  CC_NODE_CHANNEL_WECOM_WEBHOOK_URL    WeCom webhook URL
+  CC_NODE_CHANNEL_FEISHU_WEBHOOK_URL   Feishu webhook URL
+  CC_NODE_CHANNEL_DISCORD_WEBHOOK_URL  Discord webhook URL
+  CC_NODE_CHANNEL_SLACK_WEBHOOK_URL    Slack webhook URL
+`)
         process.exit(0)
       default:
         if (!arg.startsWith('-')) {
-          // 非选项参数视为一次性输入
           args.oneShot = argv.slice(i).join(' ')
           i = argv.length
         }
@@ -120,7 +106,6 @@ Environment variables:
     }
     i++
   }
-
   return args
 }
 
@@ -191,10 +176,23 @@ export async function main() {
     maxTokens: config.get('maxBudgetTokens') || 200_000,
   })
 
+  // 初始化通讯通道
+  const channelManager = new ChannelManager({
+    channels: config.get('channels') || {},
+    defaultChannel: config.get('defaultChannel') || null,
+  })
+
   // 一次性输入模式
   if (cliArgs.oneShot) {
     const result = await engine.processMessage(cliArgs.oneShot)
     console.log(result.response)
+    // 一次性模式结束后发通知
+    if (channelManager.list().length > 0) {
+      await channelManager.sendTemplate('task-done', {
+        task: cliArgs.oneShot.slice(0, 80),
+        result: result.response.slice(0, 200),
+      })
+    }
     process.exit(0)
   }
 
@@ -207,16 +205,17 @@ export async function main() {
 
   console.log(BANNER)
   console.log(`Model: ${model} | Permission: ${permissionMode} | Tools: ${registry.getNames().join(', ')}`)
+  if (channelManager.list().length > 0) {
+    const chList = channelManager.list().join(', ')
+    const def = channelManager.defaultChannel ? ` (default: ${channelManager.defaultChannel})` : ''
+    console.log(`Channels: ${chList}${def}`)
+  }
   console.log()
-
   rl.prompt()
 
   rl.on('line', async (line) => {
     const input = line.trim()
-    if (!input) {
-      rl.prompt()
-      return
-    }
+    if (!input) { rl.prompt(); return }
 
     // 命令处理
     if (input.startsWith('/')) {
@@ -273,6 +272,41 @@ export async function main() {
         case 'budget':
           console.log(tokenBudget.format())
           break
+        case 'channel': {
+          const subCmd = rest.join(' ')
+          if (subCmd === 'list' || subCmd === '') {
+            const channels = channelManager.list()
+            if (channels.length === 0) {
+              console.log('No channels configured')
+              console.log('Setup options:')
+              console.log('  1. Environment: CC_NODE_CHANNEL_TELEGRAM_TOKEN=xxx CC_NODE_CHANNEL_TELEGRAM_CHAT_ID=xxx')
+              console.log('  2. Config: .claude-code/config.json -> { "channels": { "telegram": { ... } } }')
+            } else {
+              console.log('Channels:')
+              for (const ch of channels) {
+                const isDefault = channelManager.defaultChannel === ch ? ' (default)' : ''
+                console.log(`  - ${ch}${isDefault}`)
+              }
+            }
+          } else if (subCmd.startsWith('send ')) {
+            const text = subCmd.slice(5)
+            const results = await channelManager.send(text)
+            for (const r of results) {
+              console.log(r.ok ? `✅ ${r.channel}: sent` : `❌ ${r.channel}: ${r.error}`)
+            }
+          } else if (subCmd.startsWith('test')) {
+            const results = await channelManager.send('📡 cc-node channel test')
+            for (const r of results) {
+              console.log(r.ok ? `✅ ${r.channel}: test OK` : `❌ ${r.channel}: ${r.error}`)
+            }
+          } else {
+            console.log('Usage:')
+            console.log('  /channel list          — List configured channels')
+            console.log('  /channel send <msg>    — Send message to channels')
+            console.log('  /channel test          — Test channel connectivity')
+          }
+          break
+        }
         case 'exit':
         case 'quit':
           console.log('Goodbye!')
@@ -302,8 +336,14 @@ export async function main() {
       }
     } catch (err) {
       console.error(`\nError: ${err.message}\n`)
+      // 错误也通知
+      if (channelManager.list().length > 0) {
+        await channelManager.sendTemplate('error', {
+          task: input.slice(0, 80),
+          error: err.message.slice(0, 200),
+        }).catch(() => {}) // 通知失败不影响主流程
+      }
     }
-
     rl.prompt()
   })
 
