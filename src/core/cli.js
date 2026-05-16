@@ -6,24 +6,21 @@
  */
 import { createInterface } from 'readline'
 import { createServer as createNetServer } from 'net'
-import { writeFileSync, unlinkSync, existsSync, mkdirSync, appendFileSync } from 'fs'
+import { writeFileSync, unlinkSync, existsSync, mkdirSync } from 'fs'
 import { join } from 'path'
-import { homedir } from 'os'
 import { QueryEngine, QueryEngineConfig } from './query-engine.js'
 import { createDefaultRegistry } from '../tools/index.js'
 import { SessionManager } from './session.js'
 import { Config } from './config.js'
 import { TokenBudget } from './token-budget.js'
-import { PermissionChecker } from '../permission/permission.js'
 import { ChannelManager } from '../channel/index.js'
+import { SOCK_DIR, SOCK_PATH, CC_NODE_PID } from './paths.js'
 
 // ============================================================
 // Unix Socket — 让 cc-notify 能发现 cc-node
 // ============================================================
 
-const SOCK_DIR = join(homedir(), '.cc-node')
-const SOCK_PATH = join(SOCK_DIR, 'repl.sock')
-const PID_FILE = join(SOCK_DIR, 'cc-node.pid')
+
 
 /**
  * 启动 Unix socket 服务器
@@ -74,13 +71,13 @@ function startSocketServer(engine, session, sessionManager, channelManager, verb
 
   server.listen(SOCK_PATH, () => {
     // 写 PID 文件
-    writeFileSync(PID_FILE, String(process.pid))
+    writeFileSync(CC_NODE_PID, String(process.pid))
   })
 
   // 退出时清理
   const cleanup = () => {
     try { unlinkSync(SOCK_PATH) } catch {}
-    try { unlinkSync(PID_FILE) } catch {}
+    try { unlinkSync(CC_NODE_PID) } catch {}
   }
   process.on('SIGTERM', cleanup)
   process.on('SIGINT', cleanup)

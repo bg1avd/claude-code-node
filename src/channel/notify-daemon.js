@@ -1,3 +1,4 @@
+import { ChannelManager } from './index.js'
 /**
  * cc-notify — 通知守护进程（C方案：智能路由）
  * 
@@ -19,18 +20,14 @@ import { readFileSync, writeFileSync, unlinkSync, existsSync, appendFileSync, mk
 import { resolve, join } from 'path'
 import { homedir } from 'os'
 import { spawn } from 'child_process'
-import { createConnection, createServer as createNetServer } from 'net'
+import { createConnection } from 'net'
+import { SOCK_DIR, SOCK_PATH, CC_NODE_PID, CC_CC_NOTIFY_PID, CC_CC_NOTIFY_LOG, DEFAULT_HTTP_PORT } from '../core/paths.js'
 
 // ============================================================
 // 常量
 // ============================================================
 
-const SOCK_DIR = join(homedir(), '.cc-node')
-const SOCK_PATH = join(SOCK_DIR, 'repl.sock')     // cc-node 注册的 socket
-const PID_FILE = join(SOCK_DIR, 'cc-node.pid')
-const NOTIFY_PID = join(SOCK_DIR, 'cc-notify.pid')
-const NOTIFY_LOG = join(SOCK_DIR, 'cc-notify.log')
-const DEFAULT_PORT = 3456
+
 
 // ============================================================
 // 配置加载（同之前）
@@ -40,9 +37,9 @@ function loadConfig() {
   const config = {
     channels: {},
     defaultChannel: process.env.CC_NODE_CHANNEL_DEFAULT || null,
-    port: parseInt(process.env.CC_NOTIFY_PORT || String(DEFAULT_PORT), 10),
-    pidFile: process.env.CC_NOTIFY_PID_FILE || NOTIFY_PID,
-    logFile: process.env.CC_NOTIFY_LOG_FILE || NOTIFY_LOG,
+    port: parseInt(process.env.CC_NOTIFY_PORT || String(DEFAULT_HTTP_PORT), 10),
+    pidFile: process.env.CC_NOTIFY_CC_NODE_PID || CC_NOTIFY_PID,
+    logFile: process.env.CC_CC_NOTIFY_LOG_FILE || CC_NOTIFY_LOG,
     ccNodePath: process.env.CC_NODE_PATH || 'cc-node',
   }
 
@@ -78,44 +75,13 @@ function loadConfig() {
 // 通道发送
 // ============================================================
 
-async function sendTelegram(ch, text) {
-  const url = `https://api.telegram.org/bot${ch.token}/sendMessage`
-  return fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: ch.chatId, text, parse_mode: 'Markdown' }),
-  }).then(r => r.json())
-}
+// sendTelegram → 通过 ChannelManager 处理
 
-async function sendWebhook(url, text) {
-  return fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text }),
-  }).then(r => r.text())
-}
+// sendWebhook → 通过 ChannelManager 处理
 
 async function sendToChannel(channels, defaultChannel, text) {
-  const targets = defaultChannel ? [defaultChannel] : Object.keys(channels)
-  const results = []
-  for (const name of targets) {
-    const ch = channels[name]
-    if (!ch) { results.push({ channel: name, ok: false, error: 'not configured' }); continue }
-    try {
-      if (ch.type === 'telegram') {
-        const r = await sendTelegram(ch, text)
-        results.push({ channel: name, ok: !!r.ok, result: r })
-      } else if (ch.webhookUrl) {
-        const r = await sendWebhook(ch.webhookUrl, text)
-        results.push({ channel: name, ok: true, result: r })
-      } else {
-        results.push({ channel: name, ok: false, error: 'no webhookUrl or type mismatch' })
-      }
-    } catch (e) {
-      results.push({ channel: name, ok: false, error: e.message })
-    }
-  }
-  return results
+  const cm = new ChannelManager({ channels, defaultChannel })
+  return await cm.send(text)
 }
 
 // ============================================================
@@ -148,13 +114,13 @@ function findCcNode() {
   }
 
   // 2. 检查 PID 文件
-  if (existsSync(PID_FILE)) {
-    const pid = parseInt(readFileSync(PID_FILE, 'utf8').trim(), 10)
+  if (existsSync(CC_NODE_PID)) {
+    const pid = parseInt(readFileSync(CC_NODE_PID, 'utf8').trim(), 10)
     try {
       process.kill(pid, 0)
       return { running: true, pid }
     } catch {
-      try { unlinkSync(PID_FILE) } catch {}
+      try { unlinkSync(CC_NODE_PID) } catch {}
     }
   }
 
@@ -458,7 +424,7 @@ function log(msg) {
   const ts = new Date().toISOString().slice(11, 19)
   const line = `[${ts}] ${msg}\n`
   process.stdout.write(line)
-  try { appendFileSync(NOTIFY_LOG, line) } catch {}
+  try { appendFileSync(CC_NOTIFY_LOG, line) } catch {}
 }
 
 // ============================================================
@@ -522,7 +488,7 @@ async function main() {
       }
       // 回复到 Telegram
       if (config.channels.telegram?.token) {
-        await sendTelegram({ token: config.channels.telegram.token, chatId: msg.chatId }, reply)
+        await sendToChannel(config.channels, 'telegram', reply)
       }
       return
     }
@@ -531,7 +497,7 @@ async function main() {
     log(`[route] processing: "${text.slice(0, 50)}"`)
     const reply = await routeMessage(text, config)
     if (config.channels.telegram?.token) {
-      await sendTelegram({ token: config.channels.telegram.token, chatId: msg.chatId }, reply)
+      await sendToChannel(config.channels, 'telegram', reply)
     }
   })
 

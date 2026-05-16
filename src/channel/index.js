@@ -19,10 +19,6 @@
  *   await cm.send('⚠️ 警告', { channel: 'telegram' })
  */
 
-import { readFileSync, existsSync } from 'fs'
-import { resolve } from 'path'
-import { homedir } from 'os'
-import { execSync } from 'child_process'
 
 // ============================================================
 // 通道适配器
@@ -88,12 +84,20 @@ class FeishuChannel {
   get name() { return 'feishu' }
 
   async send(text, options = {}) {
+    const isMarkdown = options.parseMode === 'markdown'
     const body = {
-      msg_type: options.msgType || 'text',
-      content: options.parseMode === 'markdown'
-        ? JSON.stringify({ text: text })
+      msg_type: isMarkdown ? 'interactive' : 'text',
+      card: isMarkdown ? {
+        elements: [{ tag: 'markdown', content: text }]
+      } : undefined,
+      content: isMarkdown
+        ? undefined
         : JSON.stringify({ text: text }),
     }
+    // 清理 undefined 字段
+    if (body.card === undefined) delete body.card
+    if (body.content === undefined) delete body.content
+
     return fetch(this.webhookUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -310,52 +314,3 @@ export class ChannelManager {
     return this.send(text, options)
   }
 }
-
-// ============================================================
-// REPL 命令集成
-// ============================================================
-
-/** 注册 /channel 命令到 REPL */
-export function registerChannelCommands(repl, channelManager) {
-  if (!repl || !channelManager) return
-
-  repl.addCommand('/channel', {
-    description: '管理通讯通道',
-    handler: async (args) => {
-      const sub = args.trim()
-      if (sub === 'list' || sub === '') {
-        const channels = channelManager.list()
-        if (channels.length === 0) {
-          console.log('📭 没有配置通讯通道')
-          console.log('   设置方法：')
-          console.log('   1. 环境变量: CC_NODE_CHANNEL_TELEGRAM_TOKEN=xxx')
-          console.log('   2. 配置文件: .claude-code/config.json -> channels')
-        } else {
-          console.log('📬 已配置通道:')
-          channels.forEach(ch => {
-            const isDefault = channelManager.defaultChannel === ch ? ' (默认)' : ''
-            console.log(`   - ${ch}${isDefault}`)
-          })
-        }
-      } else if (sub.startsWith('send ')) {
-        const text = sub.slice(5)
-        const results = await channelManager.send(text)
-        results.forEach(r => {
-          console.log(r.ok ? `✅ ${r.channel}: 发送成功` : `❌ ${r.channel}: ${r.error}`)
-        })
-      } else if (sub.startsWith('test')) {
-        const results = await channelManager.send('📡 cc-node 通道测试消息')
-        results.forEach(r => {
-          console.log(r.ok ? `✅ ${r.channel}: 测试成功` : `❌ ${r.channel}: ${r.error}`)
-        })
-      } else {
-        console.log('用法:')
-        console.log('  /channel list       — 列出通道')
-        console.log('  /channel send <msg> — 发送消息')
-        console.log('  /channel test       — 测试通道')
-      }
-    }
-  })
-}
-
-export default ChannelManager

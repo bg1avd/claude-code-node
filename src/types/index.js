@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto'
 // ====== 消息类型 ======
 
 /** 消息角色 */
@@ -18,7 +19,7 @@ export class Message {
     this.role = role
     this.content = content
     this.timestamp = Date.now()
-    this.id = crypto.randomUUID()
+    this.id = randomUUID()
   }
 }
 

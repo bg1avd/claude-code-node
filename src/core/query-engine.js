@@ -13,6 +13,7 @@
  */
 import crypto from 'crypto'
 import { Message, UserMessage, AssistantMessage, SystemMessage, ToolCall, ToolResult, SessionState } from '../types/index.js'
+import { parseStream, parseNonStreamResponse } from './streaming.js'
 import { EnhancedPermissionChecker } from '../security/enhanced-permission.js'
 
 /**
@@ -237,69 +238,140 @@ export class QueryEngine {
     if (!apiKey) {
       throw new Error(
         `未设置 API Key。请设置以下环境变量之一:\n` +
-        `  LLM_API_KEY=xxx          (通用，推荐)\n` +
-        `  DEEPSEEK_API_KEY=xxx     (DeepSeek)\n` +
-        `  OPENAI_API_KEY=xxx       (OpenAI)\n` +
-        `  QWEN_API_KEY=xxx         (通义千问)\n` +
-        `  GLM_API_KEY=xxx          (智谱 GLM)\n` +
-        `  KIMI_API_KEY=xxx         (Moonshot Kimi)\n` +
+        `  LLM_API_KEY=xxx (通用，推荐)\n` +
+        `  DEEPSEEK_API_KEY=xxx (DeepSeek)\n` +
+        `  OPENAI_API_KEY=xxx (OpenAI)\n` +
+        `  QWEN_API_KEY=xxx (通义千问)\n` +
+        `  GLM_API_KEY=xxx (智谱 GLM)\n` +
+        `  KIMI_API_KEY=xxx (Moonshot Kimi)\n` +
         `或通过 --api-key 参数传入`
       )
     }
 
     if (!apiBase) {
       throw new Error(
-        `未设置 API Base URL。默认使用 https://api.deepseek.com/v1
-` +
-        `可通过 LLM_API_BASE 或 --api-base 参数切换其他提供商，例如:\n` +
-        `  --api-base https://dashscope.aliyuncs.com/compatible-mode/v1   (通义千问)\n` +
-        `  --api-base https://open.bigmodel.cn/api/paas/v4              (智谱 GLM)\n` +
-        `  --api-base https://api.moonshot.cn/v1                         (Moonshot Kimi)\n` +
-        `  --api-base http://localhost:11434/v1                          (Ollama 本地)\n` +
-        `  --api-base http://localhost:8000/v1                           (vLLM 本地)\n` +
-        `  --api-base https://api.openai.com/v1                          (OpenAI)`
+        `未设置 API Base URL。默认使用 https://api.deepseek.com/v1 ` +
+        `可通过 LLM_API_BASE 或 --api-base 参数切换其他提供商`
       )
     }
 
-    // 构建工具定义 — OpenAI function-calling 格式
+    // 构建工具定义
     const tools = this.config.tools.map(t => ({
       type: 'function',
-      function: {
-        name: t.name,
-        description: t.description,
-        parameters: t.parameters,
-      },
+      function: { name: t.name, description: t.description, parameters: t.parameters },
     }))
 
+    const useStream = !this.config.noStream
     const body = {
       model: this.config.model,
       messages,
       max_tokens: 4096,
       ...(tools.length && { tools }),
+      ...(useStream && { stream: true }),
     }
 
     const url = apiBase.replace(/\/+$/, '') + '/chat/completions'
 
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify(body),
-      signal: this.abortController?.signal,
-    })
+    // 带重试的 fetch
+    const maxRetries = 3
+    let lastError = null
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        if (this.abortController?.signal?.aborted) {
+          throw new Error('请求已取消')
+        }
 
-    if (!response.ok) {
-      const errText = await response.text()
-      throw new Error(`API 错误 ${response.status}: ${errText}`)
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify(body),
+          signal: this.abortController?.signal,
+        })
+
+        if (!response.ok) {
+          const errText = await response.text()
+          // 429/503 可重试
+          if ((response.status === 429 || response.status === 503) && attempt < maxRetries) {
+            const waitMs = response.status === 429 ? 2000 * attempt : 1000
+            if (this.config.verbose) {
+              console.error(`[retry] API ${response.status}, waiting ${waitMs}ms (attempt ${attempt}/${maxRetries})`)
+            }
+            await new Promise(r => setTimeout(r, waitMs))
+            continue
+          }
+          throw new Error(`API 错误 ${response.status}: ${errText}`)
+        }
+
+        // 流式或非流式处理
+        if (useStream && response.body) {
+          return await this._handleStreamResponse(response)
+        } else {
+          const data = await response.json()
+          return parseNonStreamResponse(data)
+        }
+      } catch (err) {
+        lastError = err
+        // 网络错误重试
+        if (err.name !== 'AbortError' && attempt < maxRetries && !err.message.startsWith('API 错误')) {
+          const waitMs = 1000 * attempt
+          if (this.config.verbose) {
+            console.error(`[retry] Network error: ${err.message}, waiting ${waitMs}ms (attempt ${attempt}/${maxRetries})`)
+          }
+          await new Promise(r => setTimeout(r, waitMs))
+          continue
+        }
+        throw err
+      }
     }
-
-    const data = await response.json()
-    return this._parseResponse(data)
+    throw lastError
   }
 
   /**
+   * 处理流式响应 — 逐 token 输出
+   */
+  async _handleStreamResponse(response) {
+    const result = { content: '', toolCalls: [], usage: {} }
+    let currentText = ''
+
+    try {
+      for await (const event of parseStream(response)) {
+        if (event.type === 'text') {
+          // 实时输出到终端
+          process.stdout.write(event.text)
+          currentText += event.text
+        } else if (event.type === 'tool_use') {
+          // 收集工具调用
+          result.toolCalls.push(new ToolCall(
+            event.toolCall.id,
+            event.toolCall.name,
+            event.toolCall.input
+          ))
+        } else if (event.type === 'done') {
+          result.content = event.result.content || currentText
+          result.toolCalls = event.result.toolCalls?.map(tc =>
+            new ToolCall(tc.id, tc.name, tc.input)
+          ) || result.toolCalls
+          result.usage = event.result.usage || {}
+        }
+      }
+    } catch (err) {
+      // 流中断 — 返回已收到的内容
+      result.content = currentText || ''
+      if (this.config.verbose) {
+        console.error(`[stream] interrupted: ${err.message}`)
+      }
+    }
+
+    // 流式输出后换行
+    if (currentText) process.stdout.write('\n')
+
+    return result
+  }
+
+    /**
    * 解析 OpenAI 兼容响应
    */
   _parseResponse(data) {
