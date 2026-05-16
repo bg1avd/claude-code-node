@@ -1,8 +1,14 @@
 /**
  * CLI 入口 — 命令行解析和 REPL 循环
  * 对应原版: src/cli/ + src/entrypoints/
+ * 
+ * v1.2: 增加 Unix socket 服务，让 cc-notify 能发现并转发消息
  */
 import { createInterface } from 'readline'
+import { createServer as createNetServer } from 'net'
+import { writeFileSync, unlinkSync, existsSync, mkdirSync, appendFileSync } from 'fs'
+import { join } from 'path'
+import { homedir } from 'os'
 import { QueryEngine, QueryEngineConfig } from './query-engine.js'
 import { createDefaultRegistry } from '../tools/index.js'
 import { SessionManager } from './session.js'
@@ -10,6 +16,82 @@ import { Config } from './config.js'
 import { TokenBudget } from './token-budget.js'
 import { PermissionChecker } from '../permission/permission.js'
 import { ChannelManager } from '../channel/index.js'
+
+// ============================================================
+// Unix Socket — 让 cc-notify 能发现 cc-node
+// ============================================================
+
+const SOCK_DIR = join(homedir(), '.cc-node')
+const SOCK_PATH = join(SOCK_DIR, 'repl.sock')
+const PID_FILE = join(SOCK_DIR, 'cc-node.pid')
+
+/**
+ * 启动 Unix socket 服务器
+ * cc-notify 通过此 socket 转发消息给已运行的 cc-node
+ */
+function startSocketServer(engine, session, sessionManager, channelManager, verbose) {
+  mkdirSync(SOCK_DIR, { recursive: true })
+
+  // 清理残留 socket 文件
+  if (existsSync(SOCK_PATH)) {
+    try { unlinkSync(SOCK_PATH) } catch {}
+  }
+
+  const server = createNetServer((client) => {
+    let buffer = ''
+
+    client.on('data', async (data) => {
+      buffer += data.toString()
+
+      // 按行解析 JSON 消息
+      const lines = buffer.split('\n')
+      buffer = lines.pop() // 保留不完整的行
+
+      for (const line of lines) {
+        if (!line.trim()) continue
+        try {
+          const msg = JSON.parse(line)
+          if (msg.type === 'user_input' && msg.text) {
+            // 转发到引擎处理
+            const result = await engine.processMessage(msg.text)
+            const reply = JSON.stringify({ type: 'reply', text: result.response }) + '\n'
+            client.write(reply)
+
+            // 保存到会话
+            await sessionManager.appendMessage({ role: 'user', content: msg.text })
+            await sessionManager.appendMessage({ role: 'assistant', content: result.response })
+          } else if (msg.type === 'ping') {
+            client.write(JSON.stringify({ type: 'pong', pid: process.pid }) + '\n')
+          }
+        } catch (e) {
+          client.write(JSON.stringify({ type: 'error', text: e.message }) + '\n')
+        }
+      }
+    })
+
+    client.on('error', () => {}) // 忽略连接断开
+  })
+
+  server.listen(SOCK_PATH, () => {
+    // 写 PID 文件
+    writeFileSync(PID_FILE, String(process.pid))
+  })
+
+  // 退出时清理
+  const cleanup = () => {
+    try { unlinkSync(SOCK_PATH) } catch {}
+    try { unlinkSync(PID_FILE) } catch {}
+  }
+  process.on('SIGTERM', cleanup)
+  process.on('SIGINT', cleanup)
+  process.on('exit', cleanup)
+
+  return server
+}
+
+// ============================================================
+// Banner & Help
+// ============================================================
 
 const BANNER = `
 ╔═══════════════════════════════════════════════╗
@@ -35,9 +117,10 @@ Commands:
   /quit          — Same as /exit
 `
 
-/**
- * 解析命令行参数
- */
+// ============================================================
+// 参数解析
+// ============================================================
+
 function parseArgs(argv) {
   const args = {
     model: 'deepseek-chat',
@@ -50,7 +133,7 @@ function parseArgs(argv) {
     noStream: false,
   }
 
-  let i = 2 // skip node and script name
+  let i = 2
   while (i < argv.length) {
     const arg = argv[i]
     switch (arg) {
@@ -64,14 +147,14 @@ function parseArgs(argv) {
       case '--verbose': case '-v': args.verbose = true; break
       case '--no-stream': args.noStream = true; break
       case '--help': case '-h':
-        console.log(`Usage: cc-node [options]
+        console.log(`Usage: cc-node [options] [prompt]
 
 Options:
-  -m, --model NAME          Model to use (required, e.g. deepseek-chat, qwen-plus, glm-4-flash)
+  -m, --model NAME          Model to use
   -s, --system-prompt TEXT  System prompt
-  -p, --permission-mode     Permission mode: ask|always-allow|deny (default: ask)
+  -p, --permission-mode     Permission mode: ask|always-allow|deny
   -t, --max-turns N         Max tool loop turns (default: 100)
-  --api-base URL            API base URL (default: https://api.deepseek.com/v1)
+  --api-base URL            API base URL
   --api-key ***             API key (or set LLM_API_KEY env)
   -r, --resume ID           Resume a session
   -v, --verbose             Verbose mode
@@ -79,22 +162,17 @@ Options:
   -h, --help                Show this help
 
 Environment variables:
-  LLM_API_KEY        Universal API key (recommended)
-  DEEPSEEK_API_KEY   DeepSeek API key (default)
-  OPENAI_API_KEY     OpenAI API key
-  QWEN_API_KEY       Qwen (DashScope) API key
-  GLM_API_KEY        Zhipu GLM API key
-  KIMI_API_KEY       Moonshot Kimi API key
-  LLM_API_BASE       API base URL (default: https://api.deepseek.com/v1)
+  LLM_API_KEY, DEEPSEEK_API_KEY, OPENAI_API_KEY,
+  QWEN_API_KEY, GLM_API_KEY, KIMI_API_KEY, LLM_API_BASE
 
 Channel environment variables:
-  CC_NODE_CHANNEL_DEFAULT              Default channel name
-  CC_NODE_CHANNEL_TELEGRAM_TOKEN       Telegram bot token
-  CC_NODE_CHANNEL_TELEGRAM_CHAT_ID     Telegram chat ID
-  CC_NODE_CHANNEL_WECOM_WEBHOOK_URL    WeCom webhook URL
-  CC_NODE_CHANNEL_FEISHU_WEBHOOK_URL   Feishu webhook URL
-  CC_NODE_CHANNEL_DISCORD_WEBHOOK_URL  Discord webhook URL
-  CC_NODE_CHANNEL_SLACK_WEBHOOK_URL    Slack webhook URL
+  CC_NODE_CHANNEL_DEFAULT, CC_NODE_CHANNEL_TELEGRAM_TOKEN,
+  CC_NODE_CHANNEL_TELEGRAM_CHAT_ID, CC_NODE_CHANNEL_WECOM_WEBHOOK_URL,
+  CC_NODE_CHANNEL_FEISHU_WEBHOOK_URL, CC_NODE_CHANNEL_DISCORD_WEBHOOK_URL,
+  CC_NODE_CHANNEL_SLACK_WEBHOOK_URL
+
+Unix Socket (for cc-notify):
+  ${SOCK_PATH}  — cc-notify 通过此 socket 转发消息
 `)
         process.exit(0)
       default:
@@ -109,17 +187,16 @@ Channel environment variables:
   return args
 }
 
-/**
- * 主入口
- */
+// ============================================================
+// 主入口
+// ============================================================
+
 export async function main() {
   const cliArgs = parseArgs(process.argv)
 
-  // 加载配置
   const config = new Config()
   await config.load(process.cwd())
 
-  // 合并 CLI 参数 > 项目配置 > 用户配置 > 默认值
   const model = cliArgs.model || config.get('model')
   const systemPrompt = cliArgs.systemPrompt || ''
   const permissionMode = cliArgs.permissionMode || config.get('permissionMode')
@@ -128,35 +205,19 @@ export async function main() {
   const apiKey = cliArgs.apiKey || config.get('apiKey') || ''
   const verbose = cliArgs.verbose || config.get('verbose')
 
-  // 创建工具注册表
   const registry = createDefaultRegistry()
+  const sessionManager = new SessionManager({ sessionsDir: config.get('sessionsDir') })
 
-  // 创建会话管理器
-  const sessionManager = new SessionManager({
-    sessionsDir: config.get('sessionsDir'),
-  })
-
-  // 恢复或创建会话
   let session
   if (cliArgs.resume) {
     session = await sessionManager.load(cliArgs.resume)
-    if (!session) {
-      console.error(`Session not found: ${cliArgs.resume}`)
-      process.exit(1)
-    }
+    if (!session) { console.error(`Session not found: ${cliArgs.resume}`); process.exit(1) }
   } else {
     session = await sessionManager.create()
   }
 
-  // 创建查询引擎
   const engineConfig = new QueryEngineConfig({
-    model,
-    systemPrompt,
-    permissionMode,
-    maxTurns,
-    apiBase,
-    apiKey,
-    verbose,
+    model, systemPrompt, permissionMode, maxTurns, apiBase, apiKey, verbose,
     tools: registry.getAll(),
   })
   const engine = new QueryEngine(engineConfig)
@@ -164,19 +225,13 @@ export async function main() {
   // 恢复会话历史
   if (session?.messages?.length) {
     for (const msg of session.messages) {
-      if (msg.role === 'user') {
-        engine.state.messages.push({ role: 'user', content: msg.content })
-      } else if (msg.role === 'assistant') {
-        engine.state.messages.push({ role: 'assistant', content: msg.content })
-      }
+      if (msg.role === 'user') engine.state.messages.push({ role: 'user', content: msg.content })
+      else if (msg.role === 'assistant') engine.state.messages.push({ role: 'assistant', content: msg.content })
     }
   }
 
-  const tokenBudget = new TokenBudget({
-    maxTokens: config.get('maxBudgetTokens') || 200_000,
-  })
+  const tokenBudget = new TokenBudget({ maxTokens: config.get('maxBudgetTokens') || 200_000 })
 
-  // 初始化通讯通道
   const channelManager = new ChannelManager({
     channels: config.get('channels') || {},
     defaultChannel: config.get('defaultChannel') || null,
@@ -186,25 +241,23 @@ export async function main() {
   if (cliArgs.oneShot) {
     const result = await engine.processMessage(cliArgs.oneShot)
     console.log(result.response)
-    // 一次性模式结束后发通知
     if (channelManager.list().length > 0) {
       await channelManager.sendTemplate('task-done', {
         task: cliArgs.oneShot.slice(0, 80),
         result: result.response.slice(0, 200),
-      })
+      }).catch(() => {})
     }
     process.exit(0)
   }
 
-  // REPL 模式
-  const rl = createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    prompt: '> ',
-  })
+  // REPL 模式 — 启动 Unix socket 让 cc-notify 能发现
+  startSocketServer(engine, session, sessionManager, channelManager, verbose)
+
+  const rl = createInterface({ input: process.stdin, output: process.stdout, prompt: '> ' })
 
   console.log(BANNER)
   console.log(`Model: ${model} | Permission: ${permissionMode} | Tools: ${registry.getNames().join(', ')}`)
+  console.log(`Socket: ${SOCK_PATH} (cc-notify can connect)`)
   if (channelManager.list().length > 0) {
     const chList = channelManager.list().join(', ')
     const def = channelManager.defaultChannel ? ` (default: ${channelManager.defaultChannel})` : ''
@@ -213,24 +266,22 @@ export async function main() {
   console.log()
   rl.prompt()
 
+  // 共享的消息处理函数（REPL 和 socket 都用）
+  async function processInput(input) {
+    return engine.processMessage(input)
+  }
+
   rl.on('line', async (line) => {
     const input = line.trim()
     if (!input) { rl.prompt(); return }
 
-    // 命令处理
     if (input.startsWith('/')) {
       const [cmd, ...rest] = input.slice(1).split(' ')
       switch (cmd) {
-        case 'help':
-          console.log(HELP_TEXT)
-          break
+        case 'help': console.log(HELP_TEXT); break
         case 'model':
-          if (rest[0]) {
-            engine.config.model = rest.join(' ')
-            console.log(`Model switched to: ${engine.config.model}`)
-          } else {
-            console.log(`Current model: ${engine.config.model}`)
-          }
+          if (rest[0]) { engine.config.model = rest.join(' '); console.log(`Model → ${engine.config.model}`) }
+          else console.log(`Model: ${engine.config.model}`)
           break
         case 'tools':
           console.log('Available tools:')
@@ -247,13 +298,8 @@ export async function main() {
           break
         case 'sessions': {
           const sessions = await sessionManager.list()
-          if (sessions.length === 0) {
-            console.log('No sessions found')
-          } else {
-            for (const s of sessions) {
-              console.log(`  ${s.id} — ${s.title} (${s.messageCount} msgs, ${s.updated})`)
-            }
-          }
+          if (sessions.length === 0) console.log('No sessions found')
+          else for (const s of sessions) console.log(`  ${s.id} — ${s.title} (${s.messageCount} msgs, ${s.updated})`)
           break
         }
         case 'clear':
@@ -269,18 +315,14 @@ export async function main() {
             console.log(JSON.stringify(config.toJSON(), null, 2))
           }
           break
-        case 'budget':
-          console.log(tokenBudget.format())
-          break
+        case 'budget': console.log(tokenBudget.format()); break
         case 'channel': {
           const subCmd = rest.join(' ')
           if (subCmd === 'list' || subCmd === '') {
             const channels = channelManager.list()
             if (channels.length === 0) {
               console.log('No channels configured')
-              console.log('Setup options:')
-              console.log('  1. Environment: CC_NODE_CHANNEL_TELEGRAM_TOKEN=xxx CC_NODE_CHANNEL_TELEGRAM_CHAT_ID=xxx')
-              console.log('  2. Config: .claude-code/config.json -> { "channels": { "telegram": { ... } } }')
+              console.log('Setup: CC_NODE_CHANNEL_TELEGRAM_TOKEN=xxx CC_NODE_CHANNEL_TELEGRAM_CHAT_ID=xxx')
             } else {
               console.log('Channels:')
               for (const ch of channels) {
@@ -291,24 +333,16 @@ export async function main() {
           } else if (subCmd.startsWith('send ')) {
             const text = subCmd.slice(5)
             const results = await channelManager.send(text)
-            for (const r of results) {
-              console.log(r.ok ? `✅ ${r.channel}: sent` : `❌ ${r.channel}: ${r.error}`)
-            }
+            for (const r of results) console.log(r.ok ? `✅ ${r.channel}: sent` : `❌ ${r.channel}: ${r.error}`)
           } else if (subCmd.startsWith('test')) {
             const results = await channelManager.send('📡 cc-node channel test')
-            for (const r of results) {
-              console.log(r.ok ? `✅ ${r.channel}: test OK` : `❌ ${r.channel}: ${r.error}`)
-            }
+            for (const r of results) console.log(r.ok ? `✅ ${r.channel}: test OK` : `❌ ${r.channel}: ${r.error}`)
           } else {
-            console.log('Usage:')
-            console.log('  /channel list          — List configured channels')
-            console.log('  /channel send <msg>    — Send message to channels')
-            console.log('  /channel test          — Test channel connectivity')
+            console.log('Usage: /channel list|send <msg>|test')
           }
           break
         }
-        case 'exit':
-        case 'quit':
+        case 'exit': case 'quit':
           console.log('Goodbye!')
           process.exit(0)
         default:
@@ -320,35 +354,23 @@ export async function main() {
 
     // 发送到引擎
     try {
-      const result = await engine.processMessage(input)
-
-      // 输出助手回复
+      const result = await processInput(input)
       console.log()
       console.log(result.response)
       console.log()
-
-      // 保存到会话
       await sessionManager.appendMessage({ role: 'user', content: input })
       await sessionManager.appendMessage({ role: 'assistant', content: result.response })
-
-      if (verbose) {
-        console.log(`[Turns: ${result.turns} | Tools: ${result.toolResults.length}]`)
-      }
+      if (verbose) console.log(`[Turns: ${result.turns} | Tools: ${result.toolResults.length}]`)
     } catch (err) {
       console.error(`\nError: ${err.message}\n`)
-      // 错误也通知
       if (channelManager.list().length > 0) {
         await channelManager.sendTemplate('error', {
-          task: input.slice(0, 80),
-          error: err.message.slice(0, 200),
-        }).catch(() => {}) // 通知失败不影响主流程
+          task: input.slice(0, 80), error: err.message.slice(0, 200),
+        }).catch(() => {})
       }
     }
     rl.prompt()
   })
 
-  rl.on('close', () => {
-    console.log('\nGoodbye!')
-    process.exit(0)
-  })
+  rl.on('close', () => { console.log('\nGoodbye!'); process.exit(0) })
 }
