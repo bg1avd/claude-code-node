@@ -1,9 +1,24 @@
 # AI Code Agent — Node.js Edition
 
+
 > 基于 OpenAI 兼容协议的轻量级 AI 编程助手  
 > 零外部依赖 · 纯 JavaScript · DeepSeek 默认 · 安全加固
 
+[![npm version](https://img.shields.io/npm/v/@raolin2025/claude-code-node.svg)](https://www.npmjs.com/package/@raolin2025/claude-code-node) [![GitHub](https://img.shields.io/badge/GitHub-bg1avd%2Fclaude--code--node-blue)](https://github.com/bg1avd/claude-code-node) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ---
+
+## 📦 安装
+
+```bash
+# npm 全局安装
+npm install -g @raolin2025/claude-code-node
+
+# 或 npx 直接运行（无需安装）
+npx @raolin2025/claude-code-node
+
+# 安装后使用 cc-node 命令
+cc-node
+```
 
 ## 🚀 快速开始
 
@@ -15,29 +30,29 @@
 
 ```bash
 # 进入项目目录
-cd ~/.openclaw/workspace/claude-code-node
 
 # 设置 API Key（DeepSeek 为默认）
-export DEEPSEEK_API_KEY=***
+export DEEPSEEK_API_KEY=your_key_here
 # 或通用方式
-export LLM_API_KEY=***
+export LLM_API_KEY=your_key_here
 
 # 启动 REPL（默认使用 DeepSeek）
-node src/index.js
+cc-node
 
 # 一次性执行
-node src/index.js "列出当前目录的文件"
+cc-node "列出当前目录的文件"
 
 # 指定模型
-node src/index.js --model deepseek-reasoner
+cc-node --model deepseek-reasoner
 
 # 切换其他提供商
-node src/index.js --model qwen-plus --api-base https://dashscope.aliyuncs.com/compatible-mode/v1
+cc-node --model qwen-plus --api-base https://dashscope.aliyuncs.com/compatible-mode/v1
 
 # 恢复上一次会话
-node src/index.js --resume session-1747000000000-abc123
+cc-node --resume session-1747000000000-abc123
 ```
 
+[![npm version](https://img.shields.io/npm/v/@raolin2025/claude-code-node.svg)](https://www.npmjs.com/package/@raolin2025/claude-code-node) [![GitHub](https://img.shields.io/badge/GitHub-bg1avd%2Fclaude--code--node-blue)](https://github.com/bg1avd/claude-code-node) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ---
 
 ## 📖 命令行参数
@@ -62,6 +77,7 @@ node src/index.js --resume session-1747000000000-abc123
 | `always-allow` | 自动允许所有工具调用（仍受安全策略约束） |
 | `deny` | 拒绝所有工具调用 |
 
+[![npm version](https://img.shields.io/npm/v/@raolin2025/claude-code-node.svg)](https://www.npmjs.com/package/@raolin2025/claude-code-node) [![GitHub](https://img.shields.io/badge/GitHub-bg1avd%2Fclaude--code--node-blue)](https://github.com/bg1avd/claude-code-node) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ---
 
 ## 💬 REPL 内置命令
@@ -80,6 +96,7 @@ node src/index.js --resume session-1747000000000-abc123
 | `/budget` | 查看 Token 预算使用情况 |
 | `/exit` `/quit` | 退出（Ctrl+C 也可以） |
 
+[![npm version](https://img.shields.io/npm/v/@raolin2025/claude-code-node.svg)](https://www.npmjs.com/package/@raolin2025/claude-code-node) [![GitHub](https://img.shields.io/badge/GitHub-bg1avd%2Fclaude--code--node-blue)](https://github.com/bg1avd/claude-code-node) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ---
 
 ## 🛠️ 内置工具（9 个）
@@ -96,6 +113,7 @@ node src/index.js --resume session-1747000000000-abc123
 | **WebSearch** | 网页搜索 | `ask` | 需要 API Key |
 | **AskUserQuestion** | 向用户提问 | `always-allow` | — |
 
+[![npm version](https://img.shields.io/npm/v/@raolin2025/claude-code-node.svg)](https://www.npmjs.com/package/@raolin2025/claude-code-node) [![GitHub](https://img.shields.io/badge/GitHub-bg1avd%2Fclaude--code--node-blue)](https://github.com/bg1avd/claude-code-node) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ---
 
 ## 🔒 安全架构
@@ -161,35 +179,37 @@ graph TD
 - **审计日志** — 记录到 `.claude-code/audit.log`
 - **安全一票否决** — 即使规则允许，安全检查不通过仍拒绝
 
+[![npm version](https://img.shields.io/npm/v/@raolin2025/claude-code-node.svg)](https://www.npmjs.com/package/@raolin2025/claude-code-node) [![GitHub](https://img.shields.io/badge/GitHub-bg1avd%2Fclaude--code--node-blue)](https://github.com/bg1avd/claude-code-node) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ---
 
 ## 🌐 API — OpenAI 兼容协议（全行业通用）
 
 ### DeepSeek（默认）
 ```bash
-export DEEPSEEK_API_KEY=***
-node src/index.js
+export DEEPSEEK_API_KEY=your_key_here
+cc-node
 ```
 
 ### 其他 OpenAI 兼容提供商
 ```bash
 # 通义千问
-export LLM_API_KEY=***
-node src/index.js --model qwen-plus --api-base https://dashscope.aliyuncs.com/compatible-mode/v1
+export LLM_API_KEY=your_key_here
+cc-node --model qwen-plus --api-base https://dashscope.aliyuncs.com/compatible-mode/v1
 
 # 智谱 GLM
-node src/index.js --model glm-4-flash --api-base https://open.bigmodel.cn/api/paas/v4
+cc-node --model glm-4-flash --api-base https://open.bigmodel.cn/api/paas/v4
 
 # Moonshot Kimi
-node src/index.js --model kimi-k2-0711 --api-base https://api.moonshot.cn/v1
+cc-node --model kimi-k2-0711 --api-base https://api.moonshot.cn/v1
 
 # OpenAI
-node src/index.js --model gpt-4o --api-base https://api.openai.com/v1
+cc-node --model gpt-4o --api-base https://api.openai.com/v1
 
 # Ollama 本地
-node src/index.js --model qwen2.5 --api-base http://localhost:11434/v1
+cc-node --model qwen2.5 --api-base http://localhost:11434/v1
 ```
 
+[![npm version](https://img.shields.io/npm/v/@raolin2025/claude-code-node.svg)](https://www.npmjs.com/package/@raolin2025/claude-code-node) [![GitHub](https://img.shields.io/badge/GitHub-bg1avd%2Fclaude--code--node-blue)](https://github.com/bg1avd/claude-code-node) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ---
 
 ## 📂 配置文件
@@ -219,6 +239,7 @@ node src/index.js --model qwen2.5 --api-base http://localhost:11434/v1
 }
 ```
 
+[![npm version](https://img.shields.io/npm/v/@raolin2025/claude-code-node.svg)](https://www.npmjs.com/package/@raolin2025/claude-code-node) [![GitHub](https://img.shields.io/badge/GitHub-bg1avd%2Fclaude--code--node-blue)](https://github.com/bg1avd/claude-code-node) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ---
 
 ## 🔌 MCP 服务器
@@ -239,6 +260,7 @@ await registry.connectAll()
 const tools = registry.getAllTools()
 ```
 
+[![npm version](https://img.shields.io/npm/v/@raolin2025/claude-code-node.svg)](https://www.npmjs.com/package/@raolin2025/claude-code-node) [![GitHub](https://img.shields.io/badge/GitHub-bg1avd%2Fclaude--code--node-blue)](https://github.com/bg1avd/claude-code-node) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ---
 
 ## 📊 项目结构
@@ -257,6 +279,7 @@ claude-code-node/              33 文件 · 4307 行
 └── package.json
 ```
 
+[![npm version](https://img.shields.io/npm/v/@raolin2025/claude-code-node.svg)](https://www.npmjs.com/package/@raolin2025/claude-code-node) [![GitHub](https://img.shields.io/badge/GitHub-bg1avd%2Fclaude--code--node-blue)](https://github.com/bg1avd/claude-code-node) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ---
 
 ## ⚠️ 安全注意事项
@@ -267,6 +290,7 @@ claude-code-node/              33 文件 · 4307 行
 4. **审计日志定期审查** — 检查 `.claude-code/audit.log` 中的 DENY 记录
 5. **安全规则可持久化** — 使用 `/allow` 命令添加会话级规则
 
+[![npm version](https://img.shields.io/npm/v/@raolin2025/claude-code-node.svg)](https://www.npmjs.com/package/@raolin2025/claude-code-node) [![GitHub](https://img.shields.io/badge/GitHub-bg1avd%2Fclaude--code--node-blue)](https://github.com/bg1avd/claude-code-node) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ---
 
 ## 🔧 与原 Claude Code 的对比
@@ -288,6 +312,7 @@ claude-code-node/              33 文件 · 4307 行
 | 会话管理 | ✅ | ✅ |
 | UI | Ink (React CLI) | 纯 readline |
 
+[![npm version](https://img.shields.io/npm/v/@raolin2025/claude-code-node.svg)](https://www.npmjs.com/package/@raolin2025/claude-code-node) [![GitHub](https://img.shields.io/badge/GitHub-bg1avd%2Fclaude--code--node-blue)](https://github.com/bg1avd/claude-code-node) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ---
 
 *基于 Claude Code 架构的 OpenAI 兼容重构*  
