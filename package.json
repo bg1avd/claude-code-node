@@ -1,5 +1,5 @@
 {
-  "name": "claude-code-node",
+  "name": "@raolin2025/claude-code-node",
   "version": "1.0.0",
   "description": "Node.js 重构版 Claude Code CLI Agent 框架",
   "type": "module",
