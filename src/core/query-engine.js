@@ -14,6 +14,8 @@
 import crypto from 'crypto'
 import { Message, UserMessage, AssistantMessage, SystemMessage, ToolCall, ToolResult, SessionState } from '../types/index.js'
 import { parseStream, parseNonStreamResponse } from './streaming.js'
+import { autoCompact } from './compact.js'
+import { CostTracker } from './cost-tracker.js'
 import { EnhancedPermissionChecker } from '../security/enhanced-permission.js'
 
 /**
@@ -36,6 +38,9 @@ export class QueryEngineConfig {
     this.apiKey = options.apiKey || process.env.LLM_API_KEY || process.env.DEEPSEEK_API_KEY || process.env.OPENAI_API_KEY || process.env.QWEN_API_KEY || process.env.GLM_API_KEY || process.env.KIMI_API_KEY || ''
     // API Base — DeepSeek 为默认
     this.apiBase = options.apiBase || process.env.LLM_API_BASE || 'https://api.deepseek.com/v1'
+    this.noStream = options.noStream || false
+    this.costTracker = options.costTracker || null
+    this.tokenBudget = options.tokenBudget || null
     this.initialMessages = options.initialMessages || []
   }
 }
@@ -52,6 +57,8 @@ export class QueryEngine {
       projectDir: this.config.cwd,
     })
     this.abortController = null
+    this.costTracker = this.config.costTracker || new CostTracker({ model: this.config.model })
+    this.tokenBudget = this.config.tokenBudget || null
   }
 
   /**
@@ -66,6 +73,15 @@ export class QueryEngine {
     this.abortController = new AbortController()
     const userMsg = new UserMessage(userInput)
     this.state.messages.push(userMsg)
+
+    // M3: 自动上下文压缩
+    if (this.tokenBudget) {
+      const { compacted, messages } = autoCompact(this.state.messages, this.tokenBudget)
+      if (compacted) {
+        this.state.messages = messages
+        if (this.config.verbose) console.error('[compact] Context compressed to fit token budget')
+      }
+    }
 
     try {
       const result = await this._runToolLoop(userMsg)
@@ -310,7 +326,15 @@ export class QueryEngine {
           return await this._handleStreamResponse(response)
         } else {
           const data = await response.json()
-          return parseNonStreamResponse(data)
+          const result = parseNonStreamResponse(data)
+          // M4: 记录非流式响应费用
+          if (result.usage && this.costTracker) {
+            this.costTracker.recordUsage(result.usage)
+          }
+          if (this.tokenBudget && result.usage) {
+            this.tokenBudget.recordUsage(result.usage)
+          }
+          return result
         }
       } catch (err) {
         lastError = err
@@ -392,6 +416,14 @@ export class QueryEngine {
         input = { _raw: tc.function.arguments }
       }
       result.toolCalls.push(new ToolCall(tc.id, tc.function.name, input))
+    }
+
+    // M4: 记录 API 调用费用
+    if (result.usage && this.costTracker) {
+      this.costTracker.recordUsage(result.usage)
+    }
+    if (this.tokenBudget && result.usage) {
+      this.tokenBudget.recordUsage(result.usage)
     }
 
     return result

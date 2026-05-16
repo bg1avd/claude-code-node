@@ -14,6 +14,8 @@ import { SessionManager } from './session.js'
 import { Config } from './config.js'
 import { TokenBudget } from './token-budget.js'
 import { ChannelManager } from '../channel/index.js'
+import { CostTracker } from './cost-tracker.js'
+import { autoCompact } from './compact.js'
 import { SOCK_DIR, SOCK_PATH, CC_NODE_PID } from './paths.js'
 
 // ============================================================
@@ -57,6 +59,11 @@ function startSocketServer(engine, session, sessionManager, channelManager, verb
             // 保存到会话
             await sessionManager.appendMessage({ role: 'user', content: msg.text })
             await sessionManager.appendMessage({ role: 'assistant', content: result.response })
+      // M5: 保存 engine state 到 session
+      session.state = session.state || {}
+      session.state.turnCount = engine.state.turnCount
+      session.state.costHistory = engine.costTracker.history.slice(-50) // 只保留最近50条
+      await sessionManager.save(session)
           } else if (msg.type === 'ping') {
             client.write(JSON.stringify({ type: 'pong', pid: process.pid }) + '\n')
           }
@@ -110,6 +117,8 @@ Commands:
   /config KEY    — Show config value
   /budget        — Show token budget
   /channel CMD   — Manage notification channels (list|send|test)
+  /cost          — Show API cost report
+  /compact       — Manually compact conversation context
   /exit          — Exit (also Ctrl+C)
   /quit          — Same as /exit
 `
@@ -213,17 +222,30 @@ export async function main() {
     session = await sessionManager.create()
   }
 
+  const costTracker = new CostTracker({ model })
+
   const engineConfig = new QueryEngineConfig({
     model, systemPrompt, permissionMode, maxTurns, apiBase, apiKey, verbose,
     tools: registry.getAll(),
+    noStream: cliArgs.noStream,
+    costTracker,
+    tokenBudget,
   })
   const engine = new QueryEngine(engineConfig)
 
-  // 恢复会话历史
+  // M5: 恢复会话历史和状态
   if (session?.messages?.length) {
     for (const msg of session.messages) {
       if (msg.role === 'user') engine.state.messages.push({ role: 'user', content: msg.content })
       else if (msg.role === 'assistant') engine.state.messages.push({ role: 'assistant', content: msg.content })
+    }
+    // 恢复 turn count
+    if (session.state?.turnCount) engine.state.turnCount = session.state.turnCount
+    // 恢复费用记录
+    if (session.state?.costHistory) {
+      for (const record of session.state.costHistory) {
+        engine.costTracker.recordUsage(record)
+      }
     }
   }
 
@@ -358,6 +380,10 @@ export async function main() {
       await sessionManager.appendMessage({ role: 'user', content: input })
       await sessionManager.appendMessage({ role: 'assistant', content: result.response })
       if (verbose) console.log(`[Turns: ${result.turns} | Tools: ${result.toolResults.length}]`)
+      // 显示费用（即使非 verbose 也显示）
+      if (engine.costTracker && engine.costTracker.totalApiCalls > 0) {
+        console.log(engine.costTracker.formatShort())
+      }
     } catch (err) {
       console.error(`\nError: ${err.message}\n`)
       if (channelManager.list().length > 0) {
