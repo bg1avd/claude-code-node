@@ -1,0 +1,55 @@
+# cc-notify — 通知守护进程 systemd 服务
+# 
+# 安装：
+#   sudo cp cc-notify.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable cc-notify    # 开机自启
+#   sudo systemctl start cc-notify     # 立即启动
+#
+# 管理：
+#   sudo systemctl status cc-notify
+#   sudo systemctl stop cc-notify
+#   sudo systemctl restart cc-notify
+#   journalctl -u cc-notify -f         # 查看日志
+
+[Unit]
+Description=cc-notify — AI Code Agent Notification Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=raolin
+Group=raolin
+WorkingDirectory=/home/raolin
+
+# cc-notify 可执行文件路径（npm install -g 后可用）
+ExecStart=/usr/local/bin/cc-notify
+
+# 环境变量
+Environment=CC_NODE_CHANNEL_DEFAULT=telegram
+Environment=CC_NODE_CHANNEL_TELEGRAM_TOKEN=YOUR_BOT_TOKEN
+Environment=CC_NODE_CHANNEL_TELEGRAM_CHAT_ID=YOUR_CHAT_ID
+Environment=CC_NOTIFY_PORT=3456
+Environment=CC_NOTIFY_LOG_FILE=/home/raolin/.cc-notify.log
+Environment=CC_NODE_PATH=/usr/local/bin/cc-node
+
+# 安全配置
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/raolin/.cc-notify.log /home/raolin/.cc-notify.pid /tmp
+
+# 重启策略
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=3
+StartLimitIntervalSec=60
+
+# 日志
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cc-notify
+
+[Install]
+WantedBy=multi-user.target

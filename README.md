@@ -377,3 +377,55 @@ cc-node
 - ✅ **任务完成**（one-shot 模式自动通知）
 - ❌ **执行出错**（自动通知错误内容）
 - 🔄 **手动发送**（`/channel send` 命令）
+
+## 🔔 后台运行 (cc-notify)
+
+cc-notify 是独立的通知守护进程，**不需要 cc-node 在前台运行**，开机自启后随时可用。
+
+### 三种运行方式
+
+| 方式 | 命令 | 说明 |
+|------|------|------|
+| **前台** | `cc-notify` | 调试用，Ctrl+C 退出 |
+| **后台守护** | `cc-notify --daemon` | 脱离终端后台运行 |
+| **系统服务** | `systemctl start cc-notify` | 开机自启，最推荐 |
+
+### 手机交互
+
+在 Telegram 上给 Bot 发消息：
+
+```
+你好                     → 当作一次性任务发给 cc-node 执行
+/ping                    → 检查服务是否在线
+/run ls -la              → 执行 shell 命令
+/notify 任务完成！        → 向所有通道广播通知
+/status                  → 查看服务状态
+```
+
+### HTTP API（守护模式可用）
+
+```bash
+# 发送通知
+curl -X POST http://localhost:3456/send \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"构建完成 ✅"}'
+
+# 查看状态
+curl http://localhost:3456/status
+```
+
+### systemd 开机自启
+
+```bash
+# 安装服务
+sudo cp cc-notify.service /etc/systemd/system/
+# 编辑 Token
+sudo vim /etc/systemd/system/cc-notify.service
+# 启用
+sudo systemctl daemon-reload
+sudo systemctl enable cc-notify
+sudo systemctl start cc-notify
+
+# 查看日志
+journalctl -u cc-notify -f
+```
