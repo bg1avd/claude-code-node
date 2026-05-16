@@ -3,8 +3,7 @@
  * 对应原版: src/services/mcp/mcpServerApproval.tsx + 配置加载
  */
 import { readFile, writeFile, mkdir } from 'fs/promises'
-import { resolve, join } from 'path'
-import { existsSync } from 'fs'
+import { resolve } from 'path'
 import { MCPClient } from './client.js'
 
 /**

@@ -12,7 +12,7 @@
  * 适用于: OpenAI / DeepSeek / Qwen / GLM / Kimi / Ollama / vLLM / LM Studio / 任何兼容接口
  */
 import crypto from 'crypto'
-import { Message, UserMessage, AssistantMessage, SystemMessage, ToolCall, ToolResult, SessionState } from '../types/index.js'
+import { UserMessage, AssistantMessage, ToolCall, ToolResult, SessionState } from '../types/index.js'
 import { parseStream, parseNonStreamResponse } from './streaming.js'
 import { autoCompact } from './compact.js'
 import { CostTracker } from './cost-tracker.js'
@@ -98,12 +98,11 @@ export class QueryEngine {
    * 最多跑 maxTurns 次
    */
   async _runToolLoop(userMessage) {
-    let currentMessages = [...this.state.messages]
     let finalResponse = ''
 
     for (let turn = 0; turn < this.config.maxTurns; turn++) {
-      const requestMessages = this._buildRequest(currentMessages)
-      const response = await this._callLLM(requestMessages, currentMessages)
+      const requestMessages = this._buildRequest(this.state.messages)
+      const response = await this._callLLM(requestMessages, this.state.messages)
 
       if (this.abortController.signal.aborted) {
         throw new Error('操作已取消')
@@ -112,40 +111,22 @@ export class QueryEngine {
       // 没有工具调用 → 最终回复
       if (!response.toolCalls || response.toolCalls.length === 0) {
         finalResponse = response.content
-        const assistantMsg = new AssistantMessage(response.content)
-        this.state.messages.push(assistantMsg)
+        this.state.messages.push(new AssistantMessage(response.content))
         break
       }
 
-      // 有工具调用 → 记录助手消息
-      const assistantMsg = new AssistantMessage(response.content, response.toolCalls)
-      this.state.messages.push(assistantMsg)
+      // 有工具调用 → 记录 assistant 消息（含 tool_calls）
+      this.state.messages.push(new AssistantMessage(response.content, response.toolCalls))
 
       // 执行工具
       const toolResults = await this._executeToolCalls(response.toolCalls)
 
-      // 工具结果加入消息流（OpenAI 兼容格式）
+      // 工具结果加入 state.messages（OpenAI 兼容格式）
       for (const result of toolResults) {
-        // 先加 assistant 的 tool_calls 消息
-        currentMessages.push({
-          role: 'assistant',
-          content: null,
-          tool_calls: [{
-            id: result.toolCallId,
-            type: 'function',
-            function: {
-              name: result.toolName || '',
-              arguments: '{}',
-            },
-          }],
-        })
-        // 再加 tool 结果消息
-        currentMessages.push({
+        this.state.messages.push({
           role: 'tool',
           tool_call_id: result.toolCallId,
-          content: result.isError
-            ? `[ERROR] ${result.content}`
-            : result.content,
+          content: result.isError ? `[ERROR] ${result.content}` : result.content,
         })
         this.state.toolResults.set(result.toolCallId, result)
       }
@@ -167,7 +148,7 @@ export class QueryEngine {
   }
 
   /**
-   * 构建 LLM 请求消息列表
+   * 构建 LLM 请求消息列表 — 统一 OpenAI 兼容格式
    */
   _buildRequest(messages) {
     const request = []
@@ -177,26 +158,41 @@ export class QueryEngine {
       request.push({ role: 'system', content: this.config.systemPrompt })
     }
 
-    // 历史消息
+    // 历史消息 — 转换为 OpenAI 兼容格式
     for (const msg of messages) {
       if (msg.role === 'system') {
         request.push({ role: 'system', content: msg.content })
       } else if (msg.role === 'user') {
         request.push({ role: 'user', content: this._formatContent(msg.content) })
       } else if (msg.role === 'assistant') {
-        const content = []
-        if (msg.content) content.push({ type: 'text', text: msg.content })
-        if (msg.toolCalls) {
-          for (const tc of msg.toolCalls) {
-            content.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.input })
-          }
+        // 带 tool_calls 的 assistant 消息：OpenAI 格式
+        if (msg.toolCalls && msg.toolCalls.length > 0) {
+          request.push({
+            role: 'assistant',
+            content: msg.content || null,
+            tool_calls: msg.toolCalls.map(tc => ({
+              id: tc.id,
+              type: 'function',
+              function: { name: tc.name, arguments: typeof tc.input === 'string' ? tc.input : JSON.stringify(tc.input) },
+            })),
+          })
+        } else {
+          // 纯文本 assistant 消息
+          request.push({ role: 'assistant', content: this._formatContent(msg.content) })
         }
-        request.push({ role: 'assistant', content })
+      } else if (msg.role === 'tool') {
+        // tool 结果消息 — 直接透传
+        request.push({
+          role: 'tool',
+          tool_call_id: msg.tool_call_id,
+          content: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
+        })
       }
     }
 
     return request
   }
+
 
   /**
    * 执行工具调用
@@ -204,10 +200,11 @@ export class QueryEngine {
   async _executeToolCalls(toolCalls) {
     const results = []
     for (const tc of toolCalls) {
-      // 安全检查（一票否决）
+      // 安全检查
       const permResult = await this.permissionChecker.check(tc.name, tc.input)
       if (!permResult.allowed) {
-        results.push(new ToolResult(tc.id, `工具调用被安全策略拒绝: ${tc.name} — ${permResult.reason || ''}`, true))
+        results.push(new ToolResult(tc.id, `工具调用被安全策略拒绝: ${tc.name} — ${permResult.reason || ""}`, true))
+        results[results.length - 1].toolName = tc.name
         continue
       }
 
@@ -215,6 +212,7 @@ export class QueryEngine {
       const tool = this.config.tools.find(t => t.name === tc.name)
       if (!tool) {
         results.push(new ToolResult(tc.id, `未找到工具: ${tc.name}`, true))
+        results[results.length - 1].toolName = tc.name
         continue
       }
 
@@ -223,7 +221,6 @@ export class QueryEngine {
         const content = await tool.handler(tc.input, { cwd: this.config.cwd, engine: this })
         tc.status = 'done'
         results.push(new ToolResult(tc.id, typeof content === 'string' ? content : JSON.stringify(content), false))
-        // 记录工具名用于消息构建
         results[results.length - 1].toolName = tc.name
       } catch (err) {
         tc.status = 'error'
@@ -234,19 +231,6 @@ export class QueryEngine {
     return results
   }
 
-  /**
-   * 调用 LLM API — OpenAI 兼容协议（全行业通用）
-   *
-   * 支持的提供商（举例）:
-   * - DeepSeek:      https://api.deepseek.com/v1
-   * - 通义千问:       https://dashscope.aliyuncs.com/compatible-mode/v1
-   * - 智谱 GLM:       https://open.bigmodel.cn/api/paas/v4
-   * - Moonshot Kimi:  https://api.moonshot.cn/v1
-   * - Ollama 本地:    http://localhost:11434/v1
-   * - vLLM:          http://localhost:8000/v1
-   * - LM Studio:     http://localhost:1234/v1
-   * - OpenAI:        https://api.openai.com/v1
-   */
   async _callLLM(messages, contextMessages) {
     const apiKey = this.config.apiKey
     const apiBase = this.config.apiBase

@@ -4,8 +4,6 @@
  */
 import { readFile, writeFile, mkdir, readdir, rm } from 'fs/promises'
 import { resolve, join } from 'path'
-import { existsSync } from 'fs'
-import { SessionState } from '../types/index.js'
 
 const DEFAULT_SESSIONS_DIR = '.claude-code/sessions'
 
@@ -109,11 +107,28 @@ export class SessionManager {
   /** 追加消息到当前会话 */
   async appendMessage(message) {
     if (!this.currentSession) await this.getOrCreate()
-    this.currentSession.messages.push({
+
+    const entry = {
       role: message.role,
       content: typeof message.content === 'string' ? message.content : JSON.stringify(message.content),
       timestamp: new Date().toISOString(),
-    })
+    }
+
+    // 保存 tool_calls 信息（assistant 消息可能包含工具调用）
+    if (message.toolCalls && message.toolCalls.length > 0) {
+      entry.toolCalls = message.toolCalls.map(tc => ({
+        id: tc.id,
+        name: tc.name,
+        input: tc.input,
+      }))
+    }
+
+    // 保存 tool_call_id（tool 结果消息）
+    if (message.tool_call_id) {
+      entry.tool_call_id = message.tool_call_id
+    }
+
+    this.currentSession.messages.push(entry)
     await this.save(this.currentSession)
     return this.currentSession
   }

@@ -34,118 +34,15 @@ class TelegramChannel {
   get name() { return 'telegram' }
 
   async send(text, options = {}) {
-    const url = `https://api.telegram.org/bot${this.token}/sendMessage`
-    const body = {
-      chat_id: this.chatId,
-      text,
-      parse_mode: options.parseMode || 'Markdown',
-      disable_notification: options.silent || false,
-    }
-    return fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    }).then(r => r.json())
-  }
-}
-
-/** 企业微信 Webhook 适配器 */
-class WeComChannel {
-  constructor({ webhookUrl }) {
-    this.webhookUrl = webhookUrl
-  }
-
-  get name() { return 'wecom' }
-
-  async send(text, options = {}) {
-    const body = {
-      msgtype: options.msgType || 'text',
-      text: { content: text },
-      markdown: options.parseMode === 'markdown' ? { content: text } : undefined,
-    }
-    // 清理 undefined 字段
-    if (body.markdown === undefined) delete body.markdown
-    if (body.msgtype === 'markdown') delete body.text
-
-    return fetch(this.webhookUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    }).then(r => r.json())
-  }
-}
-
-/** 飞书 Webhook 适配器 */
-class FeishuChannel {
-  constructor({ webhookUrl }) {
-    this.webhookUrl = webhookUrl
-  }
-
-  get name() { return 'feishu' }
-
-  async send(text, options = {}) {
-    const isMarkdown = options.parseMode === 'markdown'
-    const body = {
-      msg_type: isMarkdown ? 'interactive' : 'text',
-      card: isMarkdown ? {
-        elements: [{ tag: 'markdown', content: text }]
-      } : undefined,
-      content: isMarkdown
-        ? undefined
-        : JSON.stringify({ text: text }),
-    }
-    // 清理 undefined 字段
-    if (body.card === undefined) delete body.card
-    if (body.content === undefined) delete body.content
-
-    return fetch(this.webhookUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    }).then(r => r.json())
-  }
-}
-
-/** Discord Webhook 适配器 */
-class DiscordChannel {
-  constructor({ webhookUrl }) {
-    this.webhookUrl = webhookUrl
-  }
-
-  get name() { return 'discord' }
-
-  async send(text, options = {}) {
-    const body = {
-      content: text,
-      username: options.username || 'cc-node',
-    }
-    return fetch(this.webhookUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    }).then(r => r.json())
-  }
-}
-
-/** Slack Webhook 适配器 */
-class SlackChannel {
-  constructor({ webhookUrl }) {
-    this.webhookUrl = webhookUrl
-  }
-
-  get name() { return 'slack' }
-
-  async send(text, options = {}) {
-    const body = {
-      text,
-      username: options.username || 'cc-node',
-      mrkdwn: options.parseMode !== 'plain',
-    }
-    return fetch(this.webhookUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    }).then(r => r.text())
+    const body = this.bodyTemplate
+      ? this.bodyTemplate.replace('{text}', text)
+      : JSON.stringify({ text, ...options })
+    const r = await fetch(this.url, {
+      method: this.method,
+      headers: { 'Content-Type': 'application/json', ...this.headers },
+      body,
+    })
+    return r.text()
   }
 }
 
@@ -159,17 +56,16 @@ class WebhookChannel {
   }
 
   get name() { return 'webhook' }
-
   async send(text, options = {}) {
     const body = this.bodyTemplate
       ? this.bodyTemplate.replace('{text}', text)
       : JSON.stringify({ text, ...options })
-    
-    return fetch(this.url, {
+    const r = await fetch(this.url, {
       method: this.method,
       headers: { 'Content-Type': 'application/json', ...this.headers },
       body,
-    }).then(r => r.text())
+    })
+    return r.text()
   }
 }
 

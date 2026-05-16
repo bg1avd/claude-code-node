@@ -21,7 +21,7 @@ import { resolve, join } from 'path'
 import { homedir } from 'os'
 import { spawn } from 'child_process'
 import { createConnection } from 'net'
-import { SOCK_DIR, SOCK_PATH, CC_NODE_PID, CC_CC_NOTIFY_PID, CC_CC_NOTIFY_LOG, DEFAULT_HTTP_PORT } from '../core/paths.js'
+import { SOCK_DIR, SOCK_PATH, CC_NODE_PID, CC_NOTIFY_PID, CC_NOTIFY_LOG, DEFAULT_HTTP_PORT } from '../core/paths.js'
 
 // ============================================================
 // 常量
@@ -39,7 +39,7 @@ function loadConfig() {
     defaultChannel: process.env.CC_NODE_CHANNEL_DEFAULT || null,
     port: parseInt(process.env.CC_NOTIFY_PORT || String(DEFAULT_HTTP_PORT), 10),
     pidFile: process.env.CC_NOTIFY_CC_NODE_PID || CC_NOTIFY_PID,
-    logFile: process.env.CC_CC_NOTIFY_LOG_FILE || CC_NOTIFY_LOG,
+    logFile: process.env.CC_NOTIFY_LOG_FILE || CC_NOTIFY_LOG,
     ccNodePath: process.env.CC_NODE_PATH || 'cc-node',
   }
 

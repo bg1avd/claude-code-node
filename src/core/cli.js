@@ -361,6 +361,23 @@ export async function main() {
           }
           break
         }
+        case 'cost':
+          console.log(engine.costTracker.formatReport())
+          break
+        case 'compact': {
+          if (engine.tokenBudget) {
+            const { compacted, messages } = autoCompact(engine.state.messages, engine.tokenBudget, { keepRecentTurns: 4 })
+            if (compacted) {
+              engine.state.messages = messages
+              console.log('✅ Context compressed')
+            } else {
+              console.log('ℹ️  No compression needed')
+            }
+          } else {
+            console.log('Token budget not configured')
+          }
+          break
+        }
         case 'exit': case 'quit':
           console.log('Goodbye!')
           process.exit(0)

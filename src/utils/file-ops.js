@@ -2,9 +2,8 @@
  * 文件操作工具
  * 对应原版: src/utils/file.ts + src/utils/fsOperations.ts
  */
-import { readFile, writeFile, stat, mkdir, rm, rename, copyFile } from 'fs/promises'
-import { resolve, dirname, basename, isAbsolute } from 'path'
-import { existsSync } from 'fs'
+import { readFile, writeFile, stat, mkdir, rm } from 'fs/promises'
+import { resolve, dirname, isAbsolute } from 'path'
 
 /**
  * 安全读取文件（带大小限制）

@@ -2,7 +2,7 @@
  * Glob 工具 — 文件模式搜索
  * 对应原版: src/tools/GlobTool/
  */
-import { readdir, stat } from 'fs/promises'
+import { readdir } from 'fs/promises'
 import { resolve, join, isAbsolute } from 'path'
 import { ToolDef } from '../types/index.js'
 

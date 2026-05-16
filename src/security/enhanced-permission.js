@@ -3,7 +3,7 @@
  * 对应原版: src/hooks/toolPermission/ + src/utils/permissions/
  */
 import { readFile, writeFile, mkdir } from 'fs/promises'
-import { resolve, join } from 'path'
+import { join } from 'path'
 import { checkBashSafety } from './bash-guard.js'
 import { checkPathSafety, checkWritePathSafety } from './path-guard.js'
 import { checkUrlSafety } from './ssrf-guard.js'

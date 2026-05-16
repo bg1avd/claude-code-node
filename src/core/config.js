@@ -3,8 +3,7 @@
  * 对应原版: src/query/config.ts + src/utils/config.ts
  */
 import { readFile, writeFile, mkdir } from 'fs/promises'
-import { resolve, join } from 'path'
-import { existsSync } from 'fs'
+import { join } from 'path'
 import { homedir } from 'os'
 
 const PROJECT_CONFIG_FILE = '.claude-code/config.json'
