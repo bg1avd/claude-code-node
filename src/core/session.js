@@ -2,7 +2,7 @@
  * 会话管理
  * 对应原版: src/utils/sessionState.ts + src/utils/sessionStorage.ts
  */
-import { readFile, writeFile, mkdir, readdir, rm } from 'fs/promises'
+import { readFile, writeFile, mkdir, readdir, rm, chmod } from 'fs/promises'
 import { resolve, join } from 'path'
 
 const DEFAULT_SESSIONS_DIR = '.claude-code/sessions'
@@ -13,9 +13,9 @@ export class SessionManager {
     this.currentSession = null
   }
 
-  /** 确保会话目录存在 */
+  /** 确保会话目录存在（v1.1: 目录权限 0700） */
   async ensureDir() {
-    await mkdir(this.sessionsDir, { recursive: true })
+    await mkdir(this.sessionsDir, { recursive: true, mode: 0o700 })
   }
 
   /** 创建新会话 */
@@ -35,12 +35,12 @@ export class SessionManager {
     return session
   }
 
-  /** 保存会话 */
+  /** 保存会话（v1.1: 文件权限 0600，防止其他用户读取敏感对话内容） */
   async save(session) {
     await this.ensureDir()
     session.updated = new Date().toISOString()
     const filePath = join(this.sessionsDir, `${session.id}.json`)
-    await writeFile(filePath, JSON.stringify(session, null, 2), 'utf-8')
+    await writeFile(filePath, JSON.stringify(session, null, 2), { encoding: 'utf-8', mode: 0o600 })
     return session
   }
 

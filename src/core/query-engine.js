@@ -17,6 +17,7 @@ import { parseStream, parseNonStreamResponse } from './streaming.js'
 import { autoCompact } from './compact.js'
 import { CostTracker } from './cost-tracker.js'
 import { EnhancedPermissionChecker } from '../security/enhanced-permission.js'
+import { checkHostSafety } from '../security/ssrf-guard.js'
 
 /**
  * 配置选项
@@ -271,6 +272,20 @@ export class QueryEngine {
     }
 
     const url = apiBase.replace(/\/+$/, '') + '/chat/completions'
+
+    // H3 修复：SSRF 防护 — 在 fetch 之前检查 API 主机名
+    try {
+      const parsedUrl = new URL(url)
+      const hostResult = await checkHostSafety(parsedUrl.hostname)
+      if (!hostResult.allowed) {
+        throw new Error(`SSRF blocked: ${hostResult.reason}`)
+      }
+    } catch (err) {
+      if (err.message.startsWith('SSRF blocked:')) {
+        throw err
+      }
+      // URL 解析错误忽略，让 fetch 自己处理
+    }
 
     // 带重试的 fetch
     const maxRetries = 3

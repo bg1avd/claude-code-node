@@ -6,7 +6,7 @@
  */
 import { createInterface } from 'readline'
 import { createServer as createNetServer } from 'net'
-import { writeFileSync, unlinkSync, existsSync, mkdirSync } from 'fs'
+import { writeFileSync, unlinkSync, existsSync, mkdirSync, readFileSync, chmodSync } from 'fs'
 import { join } from 'path'
 import { QueryEngine, QueryEngineConfig } from './query-engine.js'
 import { createDefaultRegistry } from '../tools/index.js'
@@ -31,12 +31,29 @@ import { SOCK_DIR, SOCK_PATH, CC_NODE_PID } from './paths.js'
 function startSocketServer(engine, session, sessionManager, channelManager, verbose) {
   mkdirSync(SOCK_DIR, { recursive: true })
 
-  // 清理残留 socket 文件
+  // v1.1 修复: 安全清理残留 socket — 检查 PID 文件确认进程已死
   if (existsSync(SOCK_PATH)) {
-    try { unlinkSync(SOCK_PATH) } catch {}
+    let shouldClean = true
+    if (existsSync(CC_NODE_PID)) {
+      try {
+        const oldPid = parseInt(readFileSync(CC_NODE_PID, 'utf8').trim(), 10)
+        // 检查旧进程是否还活着
+        process.kill(oldPid, 0) // 如果进程存在且活着，这不会抛出
+        shouldClean = false // 旧进程还活着，不要清理
+        console.error(`cc-node already running (PID ${oldPid}). Use /exit first or kill ${oldPid}`)
+        process.exit(1)
+      } catch {
+        // 旧进程已死，安全清理
+      }
+    }
+    if (shouldClean) {
+      try { unlinkSync(SOCK_PATH) } catch {}
+    }
   }
 
   const server = createNetServer((client) => {
+    // v1.1: socket 连接来源验证 — 只允许同用户连接
+    // Unix socket 本身通过文件系统权限保护
     let buffer = ''
 
     client.on('data', async (data) => {
@@ -77,8 +94,10 @@ function startSocketServer(engine, session, sessionManager, channelManager, verb
   })
 
   server.listen(SOCK_PATH, () => {
-    // 写 PID 文件
-    writeFileSync(CC_NODE_PID, String(process.pid))
+    // v1.1 修复: socket 文件权限 0600（仅所有者可读写），阻止其他用户连接
+    try { chmodSync(SOCK_PATH, 0o600) } catch {}
+    // 写 PID 文件（权限 0644）
+    writeFileSync(CC_NODE_PID, String(process.pid), { mode: 0o644 })
   })
 
   // 退出时清理

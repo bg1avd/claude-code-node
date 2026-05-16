@@ -1,8 +1,8 @@
 /**
  * 权限系统增强版 — 规则持久化 + 审计日志
- * 对应原版: src/hooks/toolPermission/ + src/utils/permissions/
+ * 对应原版：src/hooks/toolPermission/ + src/utils/permissions/
  */
-import { readFile, writeFile, mkdir } from 'fs/promises'
+import { readFile, writeFile, mkdir, stat, rename } from 'fs/promises'
 import { join } from 'path'
 import { checkBashSafety } from './bash-guard.js'
 import { checkPathSafety, checkWritePathSafety } from './path-guard.js'
@@ -10,6 +10,8 @@ import { checkUrlSafety } from './ssrf-guard.js'
 
 const PERMISSIONS_FILE = '.claude-code/permissions.json'
 const AUDIT_LOG_FILE = '.claude-code/audit.log'
+const AUDIT_LOG_MAX_SIZE = 10 * 1024 * 1024 // 10MB 审计日志上限
+const AUDIT_LOG_MAX_BACKUPS = 3 // 最多保留 3 个轮转备份
 
 /**
  * 权限决策类型
@@ -25,10 +27,10 @@ export const PermissionDecision = {
  */
 export class PermissionRule {
   constructor({ tool, pattern, decision, reason, expiresAt = null }) {
-    this.tool = tool          // 工具名或 '*'（所有工具）
-    this.pattern = pattern    // 匹配模式（glob 或 regex 字符串）
-    this.decision = decision  // allow / deny / ask
-    this.reason = reason      // 规则原因
+    this.tool = tool // 工具名或 '*'（所有工具）
+    this.pattern = pattern // 匹配模式（glob 或 regex 字符串）
+    this.decision = decision // allow / deny / ask
+    this.reason = reason // 规则原因
     this.createdAt = Date.now()
     this.expiresAt = expiresAt // 过期时间（会话级规则）
   }
@@ -41,21 +43,17 @@ export class PermissionRule {
   /** 检查输入是否匹配此规则 */
   matches(input) {
     if (this.isExpired) return false
-
     // 简单 glob 匹配
     const pattern = this.pattern
     if (pattern === '*') return true
-
     // 路径模式
     if (typeof input === 'string' && input.includes('/')) {
       return this._globMatch(pattern, input)
     }
-
     // 命令模式
     if (typeof input === 'string') {
       return input.startsWith(pattern) || this._globMatch(pattern, input)
     }
-
     return false
   }
 
@@ -74,8 +72,8 @@ export class PermissionRule {
 export class EnhancedPermissionChecker {
   constructor(mode = 'ask', options = {}) {
     this.mode = mode
-    this.rules = []            // PermissionRule 列表
-    this.auditLog = []         // 审计日志
+    this.rules = [] // PermissionRule 列表
+    this.auditLog = [] // 审计日志
     this.cwd = options.cwd || process.cwd()
     this.projectDir = options.projectDir || process.cwd()
     this._maxAuditEntries = 1000
@@ -117,7 +115,7 @@ export class EnhancedPermissionChecker {
    * 综合权限检查
    * @param {string} toolName — 工具名
    * @param {object} input — 工具输入参数
-   * @returns {Promise<{allowed: boolean, reason?: string, securityCheck?: object}>}
+   * @returns {Promise<{allowed: boolean, reason?: string, requiresConfirmation?: boolean, securityCheck?: object}>}
    */
   async check(toolName, input = {}) {
     // 1. 模式级检查
@@ -125,6 +123,7 @@ export class EnhancedPermissionChecker {
       this._log(toolName, input, false, '全局拒绝模式')
       return { allowed: false, reason: '全局拒绝模式' }
     }
+
     if (this.mode === 'always-allow') {
       const securityResult = await this._securityCheck(toolName, input)
       if (!securityResult.safe) {
@@ -141,7 +140,7 @@ export class EnhancedPermissionChecker {
       if (rule.tool === toolName || rule.tool === '*') {
         if (rule.matches(this._extractPattern(toolName, input))) {
           if (rule.decision === PermissionDecision.DENY) {
-            this._log(toolName, input, false, `规则拒绝: ${rule.reason}`)
+            this._log(toolName, input, false, `规则拒绝：${rule.reason}`)
             return { allowed: false, reason: rule.reason }
           }
           if (rule.decision === PermissionDecision.ALLOW) {
@@ -151,7 +150,7 @@ export class EnhancedPermissionChecker {
               this._log(toolName, input, false, securityResult.reason)
               return { allowed: false, reason: securityResult.reason, securityCheck: securityResult }
             }
-            this._log(toolName, input, true, `规则允许: ${rule.reason}`)
+            this._log(toolName, input, true, `规则允许：${rule.reason}`)
             return { allowed: true }
           }
         }
@@ -166,9 +165,12 @@ export class EnhancedPermissionChecker {
     }
 
     // 4. ask 模式 — 需要用户确认
+    // 返回 requiresConfirmation=true，让调用方处理确认逻辑
     this._log(toolName, input, true, 'ask 模式 — 等待用户确认')
     return {
-      allowed: true, // 简化版直接允许（完整版应弹出确认对话框）
+      allowed: false, // ask 模式下先拒绝，等待用户确认
+      requiresConfirmation: true, // 标记需要用户确认
+      reason: 'ask 模式需要用户确认',
       securityCheck: securityResult,
     }
   }
@@ -188,7 +190,6 @@ export class EnhancedPermissionChecker {
           detail: result,
         }
       }
-
       case 'Read': {
         const filePath = input.file_path || ''
         if (!filePath) return { safe: true }
@@ -199,7 +200,6 @@ export class EnhancedPermissionChecker {
           detail: result,
         }
       }
-
       case 'Edit':
       case 'Write': {
         const filePath = input.file_path || ''
@@ -212,7 +212,6 @@ export class EnhancedPermissionChecker {
           detail: result,
         }
       }
-
       case 'WebFetch': {
         const url = input.url || ''
         if (!url) return { safe: true }
@@ -222,7 +221,6 @@ export class EnhancedPermissionChecker {
           reason: result.reason,
         }
       }
-
       default:
         return { safe: true }
     }
@@ -231,15 +229,20 @@ export class EnhancedPermissionChecker {
   /** 提取规则匹配用的模式字符串 */
   _extractPattern(toolName, input) {
     switch (toolName) {
-      case 'Bash': return input.command || ''
+      case 'Bash':
+        return input.command || ''
       case 'Read':
       case 'Edit':
-      case 'Write': return input.file_path || ''
+      case 'Write':
+        return input.file_path || ''
       case 'Glob':
-      case 'Grep': return input.path || input.pattern || ''
+      case 'Grep':
+        return input.path || input.pattern || ''
       case 'WebFetch':
-      case 'WebSearch': return input.url || input.query || ''
-      default: return JSON.stringify(input)
+      case 'WebSearch':
+        return input.url || input.query || ''
+      default:
+        return JSON.stringify(input)
     }
   }
 
@@ -252,7 +255,6 @@ export class EnhancedPermissionChecker {
       allowed,
       reason,
     })
-
     // 限制审计日志大小
     if (this.auditLog.length > this._maxAuditEntries) {
       this.auditLog = this.auditLog.slice(-this._maxAuditEntries)
@@ -271,7 +273,11 @@ export class EnhancedPermissionChecker {
         decision: r.decision,
         reason: r.reason,
       }))
-    await writeFile(join(dir, 'permissions.json'), JSON.stringify(data, null, 2), 'utf-8')
+    // v1.1 修复：文件权限 0600（仅所有者可读写），防止其他用户读取权限规则
+    await writeFile(join(dir, 'permissions.json'), JSON.stringify(data, null, 2), {
+      encoding: 'utf-8',
+      mode: 0o600,
+    })
   }
 
   /** 加载权限规则 */
@@ -287,19 +293,51 @@ export class EnhancedPermissionChecker {
     }
   }
 
-  /** 保存审计日志 */
+  /** 保存审计日志（v1.1: 增加轮转，防止磁盘耗尽） */
   async saveAuditLog() {
     const dir = join(this.projectDir, '.claude-code')
     await mkdir(dir, { recursive: true })
-    const lines = this.auditLog.map(e =>
-      `${e.timestamp} | ${e.tool} | ${e.allowed ? 'ALLOW' : 'DENY'} | ${e.reason} | ${e.inputSnippet}`
-    ).join('\n')
-    await writeFile(join(dir, 'audit.log'), lines, 'utf-8')
+    const logPath = join(dir, 'audit.log')
+
+    // 检查现有日志大小，超过上限则轮转
+    try {
+      const logStat = await stat(logPath)
+      if (logStat.size >= AUDIT_LOG_MAX_SIZE) {
+        // 轮转：audit.log → audit.log.1 → audit.log.2 → audit.log.3（最老的删除）
+        for (let i = AUDIT_LOG_MAX_BACKUPS; i >= 1; i--) {
+          const src = i === 1 ? logPath : join(dir, `audit.log.${i - 1}`)
+          const dst = join(dir, `audit.log.${i}`)
+          try {
+            if (i === AUDIT_LOG_MAX_BACKUPS) {
+              // 最老的备份直接删除
+              const { unlink } = await import('fs/promises')
+              await unlink(dst).catch(() => {})
+            }
+            await rename(src, dst).catch(() => {})
+          } catch {
+            /* 忽略轮转错误 */
+          }
+        }
+      }
+    } catch {
+      /* 日志文件不存在，首次写入 */
+    }
+
+    const lines = this.auditLog
+      .map(e => `${e.timestamp} | ${e.tool} | ${e.allowed ? 'ALLOW' : 'DENY'} | ${e.reason} | ${e.inputSnippet}`)
+      .join('\n')
+    // v1.1 修复：文件权限 0600
+    await writeFile(logPath, lines, { encoding: 'utf-8', mode: 0o600 })
   }
 
   /** 获取审计摘要 */
   getAuditSummary() {
-    const summary = { total: this.auditLog.length, allowed: 0, denied: 0, byTool: {} }
+    const summary = {
+      total: this.auditLog.length,
+      allowed: 0,
+      denied: 0,
+      byTool: {},
+    }
     for (const entry of this.auditLog) {
       if (entry.allowed) summary.allowed++
       else summary.denied++
