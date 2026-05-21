@@ -35,6 +35,8 @@ function htmlToText(html) {
   return text
 }
 
+const VERSION = '2.0.0'
+
 export const webFetchTool = new ToolDef(
   'WebFetch',
   `Fetch and extract content from a URL.
@@ -69,7 +71,7 @@ Usage:
     try {
       const response = await fetch(url, {
         headers: {
-          'User-Agent': 'ClaudeCode-Node/1.0',
+          'User-Agent': `ClaudeCode-Node/${VERSION}`,
           'Accept': 'text/html,application/json,text/plain,*/*',
         },
         signal: AbortSignal.timeout(30000),

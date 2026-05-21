@@ -138,6 +138,7 @@ Commands:
   /channel CMD   — Manage notification channels (list|send|test)
   /cost          — Show API cost report
   /compact       — Manually compact conversation context
+  /allow [tool]  — Allow a tool for the current session (default: all)
   /exit          — Exit (also Ctrl+C)
   /quit          — Same as /exit
 `
@@ -241,6 +242,8 @@ export async function main() {
     session = await sessionManager.create()
   }
 
+  // M1 fix: tokenBudget 必须在 engineConfig 之前定义，否则 TDZ ReferenceError
+  const tokenBudget = new TokenBudget({ maxTokens: config.get('maxBudgetTokens') || 200_000 })
   const costTracker = new CostTracker({ model })
 
   const engineConfig = new QueryEngineConfig({
@@ -252,11 +255,17 @@ export async function main() {
   })
   const engine = new QueryEngine(engineConfig)
 
-  // M5: 恢复会话历史和状态
+  // M5: 恢复会话历史和状态 — 完整恢复所有角色（含 tool_calls、tool 结果）
   if (session?.messages?.length) {
     for (const msg of session.messages) {
-      if (msg.role === 'user') engine.state.messages.push({ role: 'user', content: msg.content })
-      else if (msg.role === 'assistant') engine.state.messages.push({ role: 'assistant', content: msg.content })
+      const entry = { role: msg.role, content: msg.content }
+      if (msg.role === 'assistant' && msg.toolCalls?.length > 0) {
+        entry.toolCalls = msg.toolCalls
+      }
+      if (msg.role === 'tool' && msg.tool_call_id) {
+        entry.tool_call_id = msg.tool_call_id
+      }
+      engine.state.messages.push(entry)
     }
     // 恢复 turn count
     if (session.state?.turnCount) engine.state.turnCount = session.state.turnCount
@@ -268,7 +277,6 @@ export async function main() {
     }
   }
 
-  const tokenBudget = new TokenBudget({ maxTokens: config.get('maxBudgetTokens') || 200_000 })
 
   const channelManager = new ChannelManager({
     channels: config.get('channels') || {},
@@ -277,8 +285,16 @@ export async function main() {
 
   // 一次性输入模式
   if (cliArgs.oneShot) {
+    // 一次性模式下用户已明确表达了执行意图，自动批准所有工具调用
+    if (engine.permissionChecker.mode === 'ask') {
+      engine.config.onConfirmTool = async () => true
+    }
     const result = await engine.processMessage(cliArgs.oneShot)
     console.log(result.response)
+    // 保存会话
+    session = await sessionManager.create(`one-shot: ${cliArgs.oneShot.slice(0, 50)}`)
+    await sessionManager.appendMessage({ role: 'user', content: cliArgs.oneShot })
+    await sessionManager.appendMessage({ role: 'assistant', content: result.response })
     if (channelManager.list().length > 0) {
       await channelManager.sendTemplate('task-done', {
         task: cliArgs.oneShot.slice(0, 80),
@@ -293,6 +309,19 @@ export async function main() {
 
   const rl = createInterface({ input: process.stdin, output: process.stdout, prompt: '> ' })
 
+  // 将 readline 注入引擎配置，用于 ask 模式确认和 AskUserQuestion 工具
+  if (permissionMode === 'ask') {
+    engine.config.onConfirmTool = async (toolName, input) => {
+      return new Promise((resolve) => {
+        const snippet = JSON.stringify(input).slice(0, 120) || '(no params)'
+        rl.question(`\n⚠️  Allow tool "${toolName}"?\n   Input: ${snippet}\n   (y/N) `, (answer) => {
+          resolve(answer.toLowerCase().startsWith('y'))
+        })
+      })
+    }
+  }
+  engine.config.readline = rl
+
   console.log(BANNER)
   console.log(`Model: ${model} | Permission: ${permissionMode} | Tools: ${registry.getNames().join(', ')}`)
   console.log(`Socket: ${SOCK_PATH} (cc-notify can connect)`)
@@ -304,7 +333,7 @@ export async function main() {
   console.log()
   rl.prompt()
 
-  // 共享的消息处理函数（REPL 和 socket 都用）
+  // REPL 消息处理包装（留作扩展点）
   async function processInput(input) {
     return engine.processMessage(input)
   }
@@ -380,6 +409,12 @@ export async function main() {
           }
           break
         }
+        case 'allow': {
+          const allowTool = rest.join(' ') || '*'
+          engine.permissionChecker.allowForSession(allowTool, '*')
+          console.log(`✅ Tool "${allowTool}" allowed for this session`)
+          break
+        }
         case 'cost':
           console.log(engine.costTracker.formatReport())
           break
@@ -415,6 +450,11 @@ export async function main() {
       console.log()
       await sessionManager.appendMessage({ role: 'user', content: input })
       await sessionManager.appendMessage({ role: 'assistant', content: result.response })
+      // 保存引擎状态到会话
+      session.state = session.state || {}
+      session.state.turnCount = engine.state.turnCount
+      session.state.costHistory = engine.costTracker.history.slice(-50)
+      await sessionManager.save(session)
       if (verbose) console.log(`[Turns: ${result.turns} | Tools: ${result.toolResults.length}]`)
       // 显示费用（即使非 verbose 也显示）
       if (engine.costTracker && engine.costTracker.totalApiCalls > 0) {

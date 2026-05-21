@@ -43,6 +43,8 @@ export class QueryEngineConfig {
     this.costTracker = options.costTracker || null
     this.tokenBudget = options.tokenBudget || null
     this.initialMessages = options.initialMessages || []
+    this.onConfirmTool = options.onConfirmTool || null  // ask 模式确认回调
+    this.readline = options.readline || null              // 用于 AskUserQuestion 工具
   }
 }
 
@@ -196,39 +198,61 @@ export class QueryEngine {
 
 
   /**
-   * 执行工具调用
+   * 执行工具调用 — 两阶段策略
+   * 阶段1（串行）：安全检查 + ask 模式确认（需要用户交互，必须串行）
+   * 阶段2（并行）：批准后的工具并行执行，互不依赖的工具同时跑
    */
   async _executeToolCalls(toolCalls) {
-    const results = []
+    // 阶段1：串行安全检查
+    const approved = []
     for (const tc of toolCalls) {
-      // 安全检查
       const permResult = await this.permissionChecker.check(tc.name, tc.input)
       if (!permResult.allowed) {
-        results.push(new ToolResult(tc.id, `工具调用被安全策略拒绝: ${tc.name} — ${permResult.reason || ""}`, true))
-        results[results.length - 1].toolName = tc.name
-        continue
+        if (permResult.requiresConfirmation && this.config.onConfirmTool) {
+          const confirmed = await this.config.onConfirmTool(tc.name, tc.input)
+          if (!confirmed) {
+            approved.push({ tc, error: '用户未确认' })
+            continue
+          }
+        } else {
+          approved.push({ tc, error: `安全策略拒绝: ${permResult.reason || ""}` })
+          continue
+        }
       }
 
-      // 查找工具
       const tool = this.config.tools.find(t => t.name === tc.name)
       if (!tool) {
-        results.push(new ToolResult(tc.id, `未找到工具: ${tc.name}`, true))
-        results[results.length - 1].toolName = tc.name
+        approved.push({ tc, error: `未找到工具: ${tc.name}` })
         continue
       }
 
+      approved.push({ tc, tool })
+    }
+
+    // 阶段2：并行执行已批准的工具
+    const execPromises = approved.map(async (item) => {
+      if (item.error) {
+        const r = new ToolResult(item.tc.id, item.error, true)
+        r.toolName = item.tc.name
+        return r
+      }
+      const { tc, tool } = item
+      tc.status = 'running'
       try {
-        tc.status = 'running'
-        const content = await tool.handler(tc.input, { cwd: this.config.cwd, engine: this })
+        const content = await tool.handler(tc.input, { cwd: this.config.cwd, engine: this, readline: this.config.readline })
         tc.status = 'done'
-        results.push(new ToolResult(tc.id, typeof content === 'string' ? content : JSON.stringify(content), false))
-        results[results.length - 1].toolName = tc.name
+        const r = new ToolResult(tc.id, typeof content === 'string' ? content : JSON.stringify(content), false)
+        r.toolName = tc.name
+        return r
       } catch (err) {
         tc.status = 'error'
-        results.push(new ToolResult(tc.id, `工具执行错误: ${err.message}`, true))
-        results[results.length - 1].toolName = tc.name
+        const r = new ToolResult(tc.id, `工具执行错误: ${err.message}`, true)
+        r.toolName = tc.name
+        return r
       }
-    }
+    })
+
+    const results = await Promise.all(execPromises)
     return results
   }
 
@@ -289,6 +313,12 @@ export class QueryEngine {
 
     // 带重试的 fetch
     const maxRetries = 3
+    // Jitter 退避 — 指数退避 + 随机 ±50%，防止惊群效应
+    const retryDelay = (baseMs, attempt) => {
+      const ms = baseMs * Math.pow(2, attempt - 1)
+      const jitter = ms * (0.5 + Math.random() * 0.5) // 50%-100% of base
+      return Math.round(jitter)
+    }
     let lastError = null
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
@@ -310,7 +340,7 @@ export class QueryEngine {
           const errText = await response.text()
           // 429/503 可重试
           if ((response.status === 429 || response.status === 503) && attempt < maxRetries) {
-            const waitMs = response.status === 429 ? 2000 * attempt : 1000
+            const waitMs = retryDelay(response.status === 429 ? 2000 : 1000, attempt)
             if (this.config.verbose) {
               console.error(`[retry] API ${response.status}, waiting ${waitMs}ms (attempt ${attempt}/${maxRetries})`)
             }
@@ -322,11 +352,17 @@ export class QueryEngine {
 
         // 流式或非流式处理
         if (useStream && response.body) {
-          return await this._handleStreamResponse(response)
+          const result = await this._handleStreamResponse(response)
+          if (result.usage && this.costTracker) {
+            this.costTracker.recordUsage(result.usage)
+          }
+          if (this.tokenBudget && result.usage) {
+            this.tokenBudget.recordUsage(result.usage)
+          }
+          return result
         } else {
           const data = await response.json()
           const result = parseNonStreamResponse(data)
-          // M4: 记录非流式响应费用
           if (result.usage && this.costTracker) {
             this.costTracker.recordUsage(result.usage)
           }
@@ -339,7 +375,7 @@ export class QueryEngine {
         lastError = err
         // 网络错误重试
         if (err.name !== 'AbortError' && attempt < maxRetries && !err.message.startsWith('API 错误')) {
-          const waitMs = 1000 * attempt
+          const waitMs = retryDelay(1000, attempt)
           if (this.config.verbose) {
             console.error(`[retry] Network error: ${err.message}, waiting ${waitMs}ms (attempt ${attempt}/${maxRetries})`)
           }
@@ -394,42 +430,9 @@ export class QueryEngine {
     return result
   }
 
-    /**
-   * 解析 OpenAI 兼容响应
-   */
-  _parseResponse(data) {
-    const result = { content: '', toolCalls: [] }
-    const choice = data.choices?.[0]
-    if (!choice) return result
-
-    const message = choice.message
-    if (message.content) {
-      result.content = message.content
-    }
-
-    for (const tc of (message.tool_calls || [])) {
-      let input = {}
-      try {
-        input = JSON.parse(tc.function.arguments || '{}')
-      } catch {
-        input = { _raw: tc.function.arguments }
-      }
-      result.toolCalls.push(new ToolCall(tc.id, tc.function.name, input))
-    }
-
-    // M4: 记录 API 调用费用
-    if (result.usage && this.costTracker) {
-      this.costTracker.recordUsage(result.usage)
-    }
-    if (this.tokenBudget && result.usage) {
-      this.tokenBudget.recordUsage(result.usage)
-    }
-
-    return result
-  }
-
   /** 格式化内容 */
   _formatContent(content) {
+    if (content == null) return ''
     if (typeof content === 'string') return content
     if (typeof content === 'object') return JSON.stringify(content)
     return String(content)

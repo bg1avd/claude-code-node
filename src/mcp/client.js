@@ -212,7 +212,7 @@ export class MCPClient {
   }
 
   /** 发送 JSON-RPC 请求 */
-  _sendRequest(method, params) {
+  _sendRequest(method, params, timeoutMs = 30000) {
     return new Promise((resolve, reject) => {
       const id = nextId()
       const message = JSON.stringify({
@@ -222,11 +222,19 @@ export class MCPClient {
         params,
       })
 
-      this.pending.set(id, { resolve, reject })
+      // M8 fix: 请求超时保护，防止 MCP 服务器无响应时永远挂起
+      const timer = setTimeout(() => {
+        if (this.pending.has(id)) {
+          this.pending.delete(id)
+          reject(new Error(`MCP request timeout: ${method} (${timeoutMs}ms)`))
+        }
+      }, timeoutMs)
+      this.pending.set(id, { resolve, reject, timer })
 
       // 每条消息以换行符分隔
       this.process.stdin.write(message + '\n', (err) => {
         if (err) {
+          clearTimeout(timer)
           this.pending.delete(id)
           reject(new Error(`Failed to send message: ${err.message}`))
         }
@@ -255,8 +263,10 @@ export class MCPClient {
         const message = JSON.parse(line)
 
         if (message.id && this.pending.has(message.id)) {
-          const { resolve, reject } = this.pending.get(message.id)
+          const { resolve, reject, timer } = this.pending.get(message.id)
           this.pending.delete(message.id)
+          // M8 fix: 清除超时定时器
+          if (timer) clearTimeout(timer)
 
           if (message.error) {
             reject(new Error(message.error.message || 'MCP error'))

@@ -4,6 +4,7 @@
  */
 import { readFile, writeFile, mkdir, readdir, rm, chmod } from 'fs/promises'
 import { resolve, join } from 'path'
+import { randomBytes } from 'crypto'
 
 const DEFAULT_SESSIONS_DIR = '.claude-code/sessions'
 
@@ -21,7 +22,8 @@ export class SessionManager {
   /** 创建新会话 */
   async create(title = '') {
     await this.ensureDir()
-    const id = `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    // M4 fix: 使用 crypto.randomBytes 生成不可预测的会话 ID
+    const id = `session-${Date.now()}-${randomBytes(8).toString('hex')}`
     const session = {
       id,
       title: title || `Session ${new Date().toISOString().slice(0, 19)}`,

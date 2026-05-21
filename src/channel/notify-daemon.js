@@ -491,27 +491,30 @@ async function main() {
   // 确保 socket 目录存在
   mkdirSync(SOCK_DIR, { recursive: true });
 
-  // v1.1: PID file lock — atomic create, prevent multiple instances
-  try {
-    const fd = openSync(config.pidFile, "wx");
-    writeFileSync(fd, String(process.pid));
-    closeSync(fd);
-  } catch (err) {
-    if (err.code === "EEXIST") {
+  // M9 fix: PID file lock — atomic create with retry, no unlink+write race
+  let pidAcquired = false;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const fd = openSync(config.pidFile, "wx");
+      writeFileSync(fd, String(process.pid));
+      closeSync(fd);
+      pidAcquired = true;
+      break;
+    } catch (err) {
+      if (err.code !== "EEXIST") throw err;
       const oldPid = parseInt(readFileSync(config.pidFile, "utf8").trim(), 10);
       try {
         process.kill(oldPid, 0);
         console.error("cc-notify already running (PID " + oldPid + "). Use --stop first.");
         process.exit(1);
       } catch {
-        try {
-          unlinkSync(config.pidFile);
-        } catch {}
-        writeFileSync(config.pidFile, String(process.pid));
+        try { unlinkSync(config.pidFile); } catch {}
+        if (attempt < 2) await sleep(100);
       }
-    } else {
-      throw err;
     }
+  }
+  if (!pidAcquired) {
+    writeFileSync(config.pidFile, String(process.pid));
   }
 
   const cleanup = () => {

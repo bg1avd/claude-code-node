@@ -8,6 +8,7 @@
  * - 双重编码绕过检测（%252e 等）
  */
 import { resolve, normalize, isAbsolute, relative, sep } from 'path'
+import { realpathSync } from 'fs'
 
 /**
  * 敏感路径列表 — 禁止读写
@@ -53,7 +54,16 @@ export function sanitizePath(filePath, cwd = process.cwd()) {
   // 如果是相对路径，基于 cwd 解析
   const absPath = isAbsolute(decoded) ? decoded : resolve(cwd, decoded)
   // 规范化：消除 .. 和 .
-  return normalize(absPath)
+  const normalized = normalize(absPath)
+
+  // M6 fix: 解析符号链接，防止通过 symlink 绕过路径安全检查
+  // 例如: /tmp/link → /etc/shadow
+  try {
+    return realpathSync(normalized)
+  } catch {
+    // 文件不存在时 realpathSync 会抛错，返回规范化路径即可
+    return normalized
+  }
 }
 
 /**
