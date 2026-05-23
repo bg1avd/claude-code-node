@@ -143,7 +143,42 @@ Commands:
   /allow [tool]  — Allow a tool for the current session (default: all)
   /exit          — Exit (also Ctrl+C)
   /quit          — Same as /exit
+
+  Use "/help <cmd>" for detailed help on a specific command.
 `
+
+const DETAILED_HELP = {
+  help:    "/help [command]\n  Show help. Without argument: list all commands.\n  With a command name: show detailed help for that command.\n\n  Example: /help model",
+
+  model:   "/model <model_name>\n  Switch the LLM model in real-time.\n  The change takes effect immediately for the next message.\n  You can use any model name supported by your current API provider.\n\n  Example: /model deepseek-chat\n  Example: /model gpt-4o",
+
+  models:  "/models\n  Fetch and display all available models from the current API provider.\n  Shows a numbered list, then prompts you to select by number or name.\n  Requires a configured API key (the one you used to start cc-node).\n  Uses the endpoint: <apiBase>/models",
+
+  tools:   "/tools\n  List all available tools that cc-node can use.\n  Shows tool names with their short descriptions.\n\n  Tools include: Bash, Read, Edit, Write, Glob, Grep,\n  WebFetch, WebSearch, AskUserQuestion, GitTool",
+
+  session: "/session\n  Show current session information:\n  - Session ID\n  - Session title\n  - Number of messages\n  - Number of tool call turns",
+
+  sessions:"/sessions\n  List all saved sessions.\n  Shows session ID, title, message count, and last update time.",
+
+  clear:   "/clear\n  Clear the current conversation context.\n  Starts a fresh session. Previous messages are not sent to the API anymore.\n\n  Note: Does not delete saved sessions.",
+
+  config:  "/config [key]\n  Without key: show the entire config as JSON.\n  With a key path: show the value for that specific path.\n\n  Example: /config\n  Example: /config model",
+
+  budget:  "/budget\n  Show token budget usage for the current session.\n  Displays how many tokens have been used vs the limit.",
+
+  channel: "/channel <list|send|test>\n  Manage notification channels.\n\n  Subcommands:\n    list       — List all configured notification channels\n    send <msg> — Send a message via all channels\n    test       — Send a test message to verify channels\n\n  Requires channel environment variables to be set at startup.",
+
+  cost:    "/cost\n  Show API cost report.\n  Displays total tokens used and estimated cost in USD.\n  Supports pricing for: DeepSeek, OpenAI, Qwen, GLM, Kimi.",
+
+  compact: "/compact\n  Manually trigger context compression.\n  Compresses the conversation history to fit within the token budget.\n  Keeps recent turns intact, compresses older ones.\n\n  Typically triggered automatically at 80% budget usage.",
+
+  cd:      "/cd <path>\n  Change the working directory of cc-node.\n  Affects all subsequent tool executions (Bash, Read, Write, etc.).\n\n  Without path: show the current working directory.\n\n  Example: /cd /home/raolin/projects\n  Example: /cd ..",
+
+  allow:   "/allow [tool_name]\n  Allow a tool to execute without confirmation for this session.\n  Without tool name: allows ALL tools.\n\n  Example: /allow\n  Example: /allow Bash",
+
+  exit:    "/exit\n  Exit cc-node. Same as Ctrl+C or /quit.",
+  quit:    "/quit\n  Exit cc-node. Same as Ctrl+C or /exit.",
+}
 
 // ============================================================
 // 参数解析
@@ -352,7 +387,15 @@ export async function main() {
     if (input.startsWith('/')) {
       const [cmd, ...rest] = input.slice(1).split(' ')
       switch (cmd) {
-        case 'help': console.log(HELP_TEXT); break
+        case 'help':
+          if (rest[0]) {
+            const detail = DETAILED_HELP[rest[0].toLowerCase()]
+            if (detail) console.log(detail)
+            else console.log(`No detailed help for /${rest[0]}. Type /help for all commands.`)
+          } else {
+            console.log(HELP_TEXT)
+          }
+          break
         case 'model':
           if (rest[0]) { engine.config.model = rest.join(' '); console.log(`Model → ${engine.config.model}`) }
           else console.log(`Model: ${engine.config.model}`)
