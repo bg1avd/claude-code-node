@@ -407,7 +407,7 @@ export class QueryEngine {
    * 处理流式响应 — 逐 token 输出
    */
   async _handleStreamResponse(response) {
-    const result = { content: '', toolCalls: [], usage: {} }
+    const result = { content: '', reasoningContent: '', toolCalls: [], usage: {} }
     let currentText = ''
 
     try {

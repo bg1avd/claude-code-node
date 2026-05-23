@@ -172,6 +172,10 @@ function parseArgs(argv) {
       case '--resume': case '-r': args.resume = argv[++i]; break
       case '--verbose': case '-v': args.verbose = true; break
       case '--no-stream': args.noStream = true; break
+      case '--version':
+        const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+        console.log(pkg.version)
+        process.exit(0)
       case '--help': case '-h':
         console.log(`Usage: cc-node [options] [prompt]
 
@@ -183,6 +187,7 @@ Options:
   --api-base URL            API base URL
   --api-key ***             API key (or set LLM_API_KEY env)
   -r, --resume ID           Resume a session
+  --version                 Show version
   -v, --verbose             Verbose mode
   --no-stream               Disable streaming
   -h, --help                Show this help
