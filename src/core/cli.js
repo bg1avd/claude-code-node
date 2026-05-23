@@ -138,6 +138,7 @@ Commands:
   /channel CMD   — Manage notification channels (list|send|test)
   /cost          — Show API cost report
   /compact       — Manually compact conversation context
+  /cd PATH       — Change working directory
   /allow [tool]  — Allow a tool for the current session (default: all)
   /exit          — Exit (also Ctrl+C)
   /quit          — Same as /exit
@@ -422,6 +423,21 @@ export async function main() {
         }
         case 'cost':
           console.log(engine.costTracker.formatReport())
+          break
+        case 'cd':
+          if (rest.length === 0) {
+            console.log(`Current directory: ${process.cwd()}`)
+          } else {
+            const target = rest.join(' ')
+            try {
+              process.chdir(target)
+              const newCwd = process.cwd()
+              engine.config.cwd = newCwd
+              console.log(`📂 ${newCwd}`)
+            } catch (err) {
+              console.log(`❌ ${err.message}`)
+            }
+          }
           break
         case 'compact': {
           if (engine.tokenBudget) {
