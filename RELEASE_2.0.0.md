@@ -30,7 +30,7 @@ npx @raolin2025/claude-code-node@2.0.0
 **修复**: 
 - 添加 API Key 认证（`CC_NOTIFY_API_KEY` 环境变量）
 - API Key 自动生成并保存到 `.claude-code/notify-api-key.txt`
-- 支持 `X-API-Key` header 或 `?api_key=xxx` 查询参数
+- 支持 `X-API-Key` header 或 `?api_key=***
 - `/status` 端点保持免认证（用于健康检查）
 
 **影响**: ⚠️ **Breaking Change** - 所有 HTTP API 调用现在需要携带 API Key

@@ -111,6 +111,7 @@ cc-node --resume session-1747000000000-abc123
 | **Grep** | 内容搜索（rg/grep） | `always-allow` | — |
 | **WebFetch** | 抓取网页内容 | `ask` | ✅ SSRF 防护 |
 | **WebSearch** | 网页搜索 | `ask` | 需要 API Key |
+| **GitTool** | GitHub PR 自动化（审查/合并/评论） | `high` | ✅ 预检查 |
 | **AskUserQuestion** | 向用户提问 | `always-allow` | — |
 
 [![npm version](https://img.shields.io/npm/v/@raolin2025/claude-code-node.svg)](https://www.npmjs.com/package/@raolin2025/claude-code-node) [![GitHub](https://img.shields.io/badge/GitHub-bg1avd%2Fclaude--code--node-blue)](https://github.com/bg1avd/claude-code-node) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -429,3 +430,119 @@ sudo systemctl start cc-notify
 # 查看日志
 journalctl -u cc-notify -f
 ```
+
+## 🔧 GitTool - PR 自动化管理
+
+GitTool 是 GitHub PR 自动化管理工具，支持查看、审查、合并 PR，以及批量操作和智能分析。
+
+### 前置配置
+
+```bash
+# 1. 创建 GitHub Personal Access Token (classic, 有 repo 权限)
+export GITHUB_TOKEN=ghp_xxx
+
+# 2. 设置仓库信息
+export GITHUB_OWNER=your_org
+export GITHUB_REPO=your_repo
+
+# 可选：启用 LLM 智能分析
+export DEEPSEEK_API_KEY=sk-xxx
+export DEEPSEEK_API_BASE=https://api.deepseek.com/v1
+```
+
+或在 `~/.claude-code/config.json` 中配置：
+
+```json
+{
+  "github": {
+    "owner": "your_org",
+    "repo": "your_repo"
+  },
+  "llm": {
+    "apiKey": "sk-xxx",
+    "apiBase": "https://api.deepseek.com/v1",
+    "model": "deepseek-chat"
+  },
+  "reviewRules": {
+    "checks": {
+      "codeQuality": true,
+      "security": true,
+      "tests": true,
+      "docs": true
+    }
+  }
+}
+```
+
+### 使用示例
+
+在 REPL 中调用 GitTool：
+
+```
+/GitTool list-prs
+/GitTool review-pr 123 --auto-comment false
+/GitTool check-mergeable 123
+/GitTool approve 123 "Looks good"
+/GitTool merge-pr 123 --method squash
+```
+
+命令行脚本（`test-git-tool.mjs`）:
+
+```bash
+# 列出 PR
+node test-git-tool.mjs list
+
+# 审查 PR（规则检查，无 LLM）
+node test-git-tool.mjs review 123
+
+# 使用 LLM 智能分析
+DEEPSEEK_API_KEY=sk-xxx node test-git-tool.mjs review-llm 123
+
+# 检查可合并性
+node test-git-tool.mjs check-mergeable 123
+
+# Approve PR
+node test-git-tool.mjs approve 123 "Approved"
+
+# 提交审查意见
+node test-git-tool.mjs comment 123 "Please add tests"
+
+# 行级评论（自动计算 diff position）
+node test-git-tool.mjs comment 123 "Fix needed" --path src/index.js --line 42
+```
+
+### 自动化工作流
+
+- **每日自动审查**: 设置 cron 运行 `auto-review-all`
+- **自动合并**: 为满足条件的 PR 添加 `auto-merge` 标签，运行 `auto-merge-eligible`
+- **集成 OpenClaw Heartbeat**: 通过 `cron` 工具定期执行
+
+```bash
+# 每天 10:00 自动审查所有 PR
+cron add "0 10 * * *" "session:git-automation" \
+  --payload '{"kind":"agentTurn","message":"/GitTool auto-review-all"}'
+```
+
+### 合并策略
+
+PRMergePolicy 支持以下检查（可配置）：
+
+- ✅ 最少 Approvals 数量
+- ✅ CI 状态全部通过
+- ✅ 无 `changes_requested`
+- ✅ 分支保护规则
+- ✅ 自动合并标签（如 `auto-merge`）
+- ✅ 合并冲突检测
+
+### 安全与权限
+
+- GitTool 工具注册为 `high` 权限级别（合并操作需要确认）
+- 操作会被记录在审计日志中
+- 禁止合并到受保护分支（main/master）
+
+### 与 OpenClaw 集成
+
+- GitTool 已内置到 cc-node 工具集中
+- 可通过 `/tools` 查看
+- 审查结果可与 QQ/Telegram 通道集成，发送通知
+

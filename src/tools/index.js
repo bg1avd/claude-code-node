@@ -10,6 +10,7 @@ import { grepTool } from './grep.js'
 import { webFetchTool } from './web-fetch.js'
 import { webSearchTool } from './web-search.js'
 import { askUserTool } from './ask-user.js'
+import { gitTool } from './git-tool.js'
 
 /**
  * 所有内置工具列表
@@ -24,6 +25,7 @@ export const builtinTools = [
   webFetchTool,
   webSearchTool,
   askUserTool,
+  gitTool,
 ]
 
 /**
