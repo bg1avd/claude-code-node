@@ -16,6 +16,7 @@ export async function* parseStream(response) {
 
   const result = {
     content: '',
+    reasoningContent: '',
     toolCalls: [],
     usage: { input_tokens: 0, output_tokens: 0 },
   }
@@ -39,6 +40,11 @@ export async function* parseStream(response) {
           const delta = chunk.choices?.[0]?.delta
 
           if (!delta) continue
+
+          // reasoning_content (DeepSeek thinking mode)
+          if (delta.reasoning_content) {
+            result.reasoningContent += delta.reasoning_content
+          }
 
           // 文本
           if (delta.content) {
@@ -95,11 +101,15 @@ export async function* parseStream(response) {
  * 解析非流式响应
  */
 export function parseNonStreamResponse(data) {
-  const result = { content: '', toolCalls: [], usage: {} }
+  const result = { content: '', reasoningContent: '', toolCalls: [], usage: {} }
   const choice = data.choices?.[0]
 
   if (choice?.message?.content) {
     result.content = choice.message.content
+  }
+
+  if (choice?.message?.reasoning_content) {
+    result.reasoningContent = choice.message.reasoning_content
   }
 
   for (const tc of (choice?.message?.tool_calls || [])) {

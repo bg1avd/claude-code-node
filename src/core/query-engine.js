@@ -114,12 +114,12 @@ export class QueryEngine {
       // 没有工具调用 → 最终回复
       if (!response.toolCalls || response.toolCalls.length === 0) {
         finalResponse = response.content
-        this.state.messages.push(new AssistantMessage(response.content))
+        this.state.messages.push(new AssistantMessage(response.content, [], response.reasoningContent))
         break
       }
 
       // 有工具调用 → 记录 assistant 消息（含 tool_calls）
-      this.state.messages.push(new AssistantMessage(response.content, response.toolCalls))
+      this.state.messages.push(new AssistantMessage(response.content, response.toolCalls, response.reasoningContent))
 
       // 执行工具
       const toolResults = await this._executeToolCalls(response.toolCalls)
@@ -168,21 +168,27 @@ export class QueryEngine {
       } else if (msg.role === 'user') {
         request.push({ role: 'user', content: this._formatContent(msg.content) })
       } else if (msg.role === 'assistant') {
-        // 带 tool_calls 的 assistant 消息：OpenAI 格式
-        if (msg.toolCalls && msg.toolCalls.length > 0) {
-          request.push({
-            role: 'assistant',
-            content: msg.content || null,
-            tool_calls: msg.toolCalls.map(tc => ({
-              id: tc.id,
-              type: 'function',
-              function: { name: tc.name, arguments: typeof tc.input === 'string' ? tc.input : JSON.stringify(tc.input) },
-            })),
-          })
-        } else {
-          // 纯文本 assistant 消息
-          request.push({ role: 'assistant', content: this._formatContent(msg.content) })
+        // 构建 assistant 消息基础
+        const asstMsg = {
+          role: 'assistant',
+          content: msg.content || null,
         }
+
+        // DeepSeek thinking mode: 必须传回 reasoning_content (tool call 场景)
+        if (msg.reasoningContent) {
+          asstMsg.reasoning_content = msg.reasoningContent
+        }
+
+        // tool_calls
+        if (msg.toolCalls && msg.toolCalls.length > 0) {
+          asstMsg.tool_calls = msg.toolCalls.map(tc => ({
+            id: tc.id,
+            type: 'function',
+            function: { name: tc.name, arguments: typeof tc.input === 'string' ? tc.input : JSON.stringify(tc.input) },
+          }))
+        }
+
+        request.push(asstMsg)
       } else if (msg.role === 'tool') {
         // tool 结果消息 — 直接透传
         request.push({

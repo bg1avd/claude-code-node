@@ -31,9 +31,11 @@ export class UserMessage extends Message {
 
 export class AssistantMessage extends Message {
   toolCalls
-  constructor(content, toolCalls = []) {
+  reasoningContent
+  constructor(content, toolCalls = [], reasoningContent = '') {
     super(Role.ASSISTANT, content)
     this.toolCalls = toolCalls
+    this.reasoningContent = reasoningContent
   }
 }
 
