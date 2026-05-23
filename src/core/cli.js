@@ -173,7 +173,7 @@ function parseArgs(argv) {
       case '--verbose': case '-v': args.verbose = true; break
       case '--no-stream': args.noStream = true; break
       case '--version':
-        const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+        const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'))
         console.log(pkg.version)
         process.exit(0)
       case '--help': case '-h':
