@@ -129,6 +129,7 @@ const HELP_TEXT = `
 Commands:
   /help          — Show this help
   /model NAME    — Switch model
+  /models        — List available models from current API
   /tools         — List available tools
   /session       — Show session info
   /sessions      — List all sessions
@@ -356,6 +357,41 @@ export async function main() {
           if (rest[0]) { engine.config.model = rest.join(' '); console.log(`Model → ${engine.config.model}`) }
           else console.log(`Model: ${engine.config.model}`)
           break
+        case 'models': {
+          const apiBase = engine.config.apiBase
+          const apiKey = engine.config.apiKey
+          if (!apiKey) { console.log('❌ API key not configured'); break }
+          const modelsUrl = apiBase.replace(/\/+$/, '') + '/models'
+          console.log(`📡 Fetching models from ${modelsUrl}...`)
+          try {
+            const res = await fetch(modelsUrl, { headers: { 'Authorization': `Bearer ${apiKey}` } })
+            if (!res.ok) { console.log(`❌ API error: ${res.status}`); break }
+            const data = await res.json()
+            const models = data.data || []
+            if (models.length === 0) { console.log('No models returned'); break }
+            console.log(`\nAvailable models (${models.length}):`)
+            models.forEach((m, i) => {
+              const id = m.id || m
+              console.log(`  ${(i + 1).toString().padStart(2)}. ${id}`)
+            })
+            console.log('\nType a number to select, or model name directly:')
+            const answer = await new Promise(resolve => rl.question('> ', resolve))
+            const num = parseInt(answer, 10)
+            let selected
+            if (!isNaN(num) && num >= 1 && num <= models.length) {
+              selected = models[num - 1].id || models[num - 1]
+            } else if (answer.trim()) {
+              selected = answer.trim()
+            }
+            if (selected) {
+              engine.config.model = selected
+              console.log(`Model → ${selected}`)
+            }
+          } catch (err) {
+            console.log(`❌ ${err.message}`)
+          }
+          break
+        }
         case 'tools':
           console.log('Available tools:')
           for (const name of registry.getNames()) {
