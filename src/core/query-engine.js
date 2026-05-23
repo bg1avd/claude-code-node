@@ -293,12 +293,21 @@ export class QueryEngine {
     }))
 
     const useStream = !this.config.noStream
+    const modelLower = this.config.model.toLowerCase()
+
     const body = {
       model: this.config.model,
       messages,
       max_tokens: 4096,
       ...(tools.length && { tools }),
       ...(useStream && { stream: true }),
+    }
+
+    // DeepSeek V4: 默认启用 thinking mode → 要求回传 reasoning_content
+    // 这里显式关闭，避免 tool call 场景下的 400 错误
+    // thinking 参数是 DeepSeek 私有扩展，直接放在 body 顶层
+    if (modelLower.startsWith('deepseek-v')) {
+      body.thinking = { type: 'disabled' }
     }
 
     const url = apiBase.replace(/\/+$/, '') + '/chat/completions'
