@@ -232,6 +232,7 @@ Commands:
   /allow all   — automatically allow all subsequent tools
   /allow reset — reset to ask mode
   /allow <tool> — allow specific tool (e.g. Bash)
+  /resume <session-id> — Resume a saved conversation
   /exit          — Exit (also Ctrl+C)
   /quit          — Same as /exit
 
@@ -249,9 +250,11 @@ const DETAILED_HELP = {
 
   session: "/session\n  Show current session information:\n  - Session ID\n  - Session title\n  - Number of messages\n  - Number of tool call turns",
 
-  sessions:"/sessions\n  List all saved sessions.\n  Shows session ID, title, message count, and last update time.",
+  sessions:"/sessions\n  List all saved sessions.\n  Shows session ID, title, message count, and last update time.\n\n  Use /resume <session-id> to restore a saved conversation.",
 
-  clear:   "/clear\n  Clear the current conversation context.\n  Starts a fresh session. Previous messages are not sent to the API anymore.\n\n  Note: Does not delete saved sessions.",
+  resume:  "/resume <session-id>\n  Restore a saved conversation by session ID.\n  Session ID can be the full ID or the numeric index from /sessions list.\n\n  Example: /resume session-1779605332906-52da0706986efa67\n  Example: /resume 1 (resume the first session in the list)",
+
+  clear:  "/clear\n  Clear the current conversation context.\n  Starts a fresh session. Previous messages are not sent to the API anymore.\n\n  Note: Does not delete saved sessions.",
 
   config:  "/config [key]\n  Without key: show the entire config as JSON.\n  With a key path: show the value for that specific path.\n\n  Example: /config\n  Example: /config model",
 
@@ -548,6 +551,49 @@ export async function main() {
           console.log(`Messages: ${session.messages?.length || 0}`)
           console.log(`Turns: ${engine.state.turnCount}`)
           break
+        case 'resume': {
+          if (rest.length === 0) {
+            console.log('Usage: /resume <session-id> (from /sessions list)')
+            break
+          }
+          const target = rest.join(' ')
+          let sessionId = target
+          // 支持数字序号选择（从 /sessions 列表中）
+          if (/^\d+$/.test(target)) {
+            const idx = parseInt(target, 10) - 1
+            const list = await sessionManager.list()
+            if (idx < 0 || idx >= list.length) {
+              console.log(`❌ Session index out of range (1-${list.length})`)
+              break
+            }
+            sessionId = list[idx].id
+          }
+          const loaded = await sessionManager.load(sessionId)
+          if (!loaded) {
+            console.log(`❌ Session not found: ${sessionId}`)
+            break
+          }
+          // 恢复会话内容
+          session.id = loaded.id
+          session.title = loaded.title
+          session.messages = loaded.messages
+          session.state = loaded.state || {}
+          // 恢复引擎消息历史
+          engine.state.messages = loaded.messages.map(m => ({
+            role: m.role,
+            content: m.content,
+            toolCalls: m.toolCalls,
+            toolCallId: m.toolCallId,
+          }))
+          // 恢复计数和预算
+          engine.state.turnCount = loaded.state?.turnCount || 0
+          if (engine.tokenBudget && loaded.state?.budgetUsed != null) {
+            engine.tokenBudget.used = loaded.state.budgetUsed
+          }
+          console.log(`✅ Resumed session: ${loaded.title} (${loaded.id})`)
+          console.log(`\n💡 Tip: Use /sessions to list, /resume <id> to switch.`)
+          break
+        }
         case 'sessions': {
           const sessions = await sessionManager.list()
           if (sessions.length === 0) console.log('No sessions found')
