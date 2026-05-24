@@ -116,18 +116,102 @@ function startSocketServer(engine, session, sessionManager, channelManager, verb
 // Banner & Help
 // ============================================================
 
-const BANNER = `
-╭ CC-Node v2.2.7 ──────────────────────────────────────────────────────────────────────────────────────╮
-│                                                                                                      │
-│       ╭───────╮       │            AI Code Agent             │                                       │
-│ ┌───────────────────┐ │           Node.js Edition            │                                       │
-│ │    ██       ██    │ │                                      │                                       │
-│ │                   │ │ ──────────────────────────────────── │                                       │
-│ │      ██████       │ │   /help — commands · /exit — quit    │                                       │
-│ └───────────────────┘ │                                      │                                       │
-│                                                                                                      │
-╰──────────────────────────────────────────────────────────────────────────────────────────────────────╯
-`.trim()
+// ============================================================
+// Banner & Help
+// ============================================================
+
+// 版本号（从 package.json 读取或手动更新）
+let CC_NODE_VERSION = '2.2.7'
+try {
+  const pkgPath = new URL('../../package.json', import.meta.url)
+  const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'))
+  CC_NODE_VERSION = pkg.version || CC_NODE_VERSION
+} catch {}
+
+// 生成 Claude Code 风格的三栏 Banner
+function buildBanner({ model, permissionMode, session, maxTokens }) {
+  const width = 112
+  const inner = width - 2
+  const leftLabel = ` CC-Node v${CC_NODE_VERSION} `
+  const top = `╭${leftLabel}${'─'.repeat(inner - leftLabel.length)}╮`
+  const bottom = `╰${'─'.repeat(inner)}╯`
+
+  const col1 = 30 // 机器人列
+  const col2 = 42 // 标题列
+  const col3 = inner - col1 - col2 - 2 // 信息列
+
+  // ANSI 颜色
+  const BLUE = '\x1b[34m'
+  const CYAN = '\x1b[36m'
+  const RESET = '\x1b[0m'
+
+  // 原始机器人（宽21）
+  const robotRaw = [
+    '      ╭───────╮      ',
+    '┌───────────────────┐',
+    '│    ██       ██    │',
+    '│                   │',
+    '│      ██████       │',
+    '└───────────────────┘'
+  ]
+
+  // 颜色化：边框蓝，眼睛/嘴巴青
+  const colorize = (line) =>
+    line
+      .replace(/[┌└─╭╮]/g, BLUE + '$&' + RESET)
+      .replace(/[█]/g, CYAN + '$&' + RESET)
+
+  const robotColored = robotRaw.map(colorize)
+
+  // 在 col1 内居中（考虑 ESC 序列不看长度，按可见长度21 计算）
+  const leftPad = 4 // (30 - 21) / 2 = 4.5 => 4 left, 5 right
+  const rightPad = 5
+  const robotLines = robotColored.map(line => ' '.repeat(leftPad) + line + ' '.repeat(rightPad))
+
+  // 标题列（居中）
+  const pad = (s, w, align = 'center') => {
+    if (s.length >= w) return s
+    const sp = w - s.length
+    if (align === 'center') {
+      const l = Math.floor(sp / 2)
+      return ' '.repeat(l) + s + ' '.repeat(sp - l)
+    }
+    return s + ' '.repeat(sp)
+  }
+
+  const titleLines = [
+    pad('AI Code Agent', col2, 'center'),
+    pad('Node.js Edition', col2, 'center'),
+    pad('', col2, 'center'),
+    pad('─'.repeat(col2 - 2), col2, 'center'),
+    pad('/help — commands · /exit — quit', col2, 'center'),
+    pad('', col2, 'center')
+  ]
+
+  // 信息列（右对齐）
+  const sessionId = session?.id || '??????'
+  const infoLines = [
+    pad(`Turns: ${session?.state?.turnCount ?? 0}  •  Tools: 0`, col3, 'right'),
+    pad(`Model: ${model}`, col3, 'right'),
+    pad(`Permission: ${permissionMode}`, col3, 'right'),
+    pad(`Budget: 0 / ${maxTokens ?? 200000}`, col3, 'right'),
+    pad(`Session: ${sessionId?.toString().slice(-6)}`, col3, 'right'),
+    pad('', col3, 'right')
+  ]
+
+  // 构建每行：│ col1 │ col2 │ col3 │
+  const lines = [top]
+  const empty = `│${' '.repeat(inner)}│`
+  lines.push(empty)
+
+  for (let i = 0; i < robotLines.length; i++) {
+    lines.push(`│${robotLines[i]}│${titleLines[i]}│${infoLines[i]}│`)
+  }
+
+  lines.push(empty)
+  lines.push(bottom)
+  return lines.join('\n')
+}
 
 const HELP_TEXT = `
 Commands:
@@ -368,7 +452,7 @@ export async function main() {
   }
   engine.config.readline = rl
 
-  console.log(BANNER)
+  console.log(buildBanner({ model, permissionMode, session, maxTokens: tokenBudget.maxTokens }))
   console.log(`Model: ${model} | Permission: ${permissionMode} | Tools: ${registry.getNames().join(', ')}`)
   console.log(`Socket: ${SOCK_PATH} (cc-notify can connect)`)
   if (channelManager.list().length > 0) {
