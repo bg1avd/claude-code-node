@@ -136,8 +136,8 @@ function buildBanner({ model, permissionMode, session, maxTokens }) {
   const top = `╭${leftLabel}${'─'.repeat(inner - leftLabel.length)}╮`
   const bottom = `╰${'─'.repeat(inner)}╯`
 
-  const col1 = 28 // 左侧机器人列宽度
-  const col2 = 44 // 标题列
+  const col1 = 24 // 左侧机器人列（19字符+边距）
+  const col2 = 50 // 标题列
   const col3 = inner - col1 - col2 - 2 // 信息列
 
   // ANSI 颜色
@@ -145,47 +145,68 @@ function buildBanner({ model, permissionMode, session, maxTokens }) {
   const CYAN = '\x1b[36m'
   const RESET = '\x1b[0m'
 
-  // 像素风格 CC 机器人（19x13 字符，带颜色）
+  // 像素风格 CC 机器人（19字符宽，带颜色边框）
   const robotRaw = [
-    ' ┌─────────────────┐ ',
-    ' │  ██         ██  │ ',
-    ' │    ██████       │ ',
-    ' │  ██         ██  │ ',
-    ' │                 │ ',
-    ' │     ███████     │ ',
-    ' │  ██         ██  │ ',
-    ' │    ██████       │ ',
-    ' │  ██    ██    ██ │ ',
-    ' └─────────────────┘ ',
+    '  ┌───────────────┐  ',
+    '  │  ██       ██  │  ',
+    '  │    ██████     │  ',
+    '  │  ██       ██  │  ',
+    '  │              │  ',
+    '  │    ███████   │  ',
+    '  │  ██       ██  │  ',
+    '  │    ██████     │  ',
+    '  │  ██   ██   ██ │  ',
+    '  └───────────────┘  ',
   ]
 
   // 颜色化：边框蓝，眼睛/嘴巴青
   const colorize = (line) =>
     line
-      .replace(/[┌└─╭╮]/g, BLUE + '$&' + RESET)
+      .replace(/[┌└─╭╮┐┘│]/g, BLUE + '$&' + RESET)
       .replace(/[█]/g, CYAN + '$&' + RESET)
 
   const robotColored = robotRaw.map(colorize)
 
-  // 在 col1 内居中（按可见长度约 19 计算）
+  // 机器人列：先去掉 ANSI（保证 pad 长度准确），再填充
+  const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*m/g, '')
+  const robotPlain = robotColored.map(line => stripAnsi(line))
+
+  // 在 col1 内居中（按可见长度 19 计算）
   const visibleWidth = 19
-  const totalCol1 = 28
+  const totalCol1 = 24
   const leftPad = Math.floor((totalCol1 - visibleWidth) / 2)
   const rightPad = totalCol1 - visibleWidth - leftPad
-  const robotLines = robotColored.map(line => ' '.repeat(leftPad) + line + ' '.repeat(rightPad))
+  const robotLines = robotPlain.map(line => ' '.repeat(leftPad) + line + ' '.repeat(rightPad))
 
-  // 辅助函数：字符串填充
+  // 辅助函数：字符串填充（忽略 ANSI 颜色码计算真实长度，正确处理嵌入在字符串中的 ANSI）
+  const realLen = (s) => stripAnsi(s).length
+
   const pad = (s, w, align = 'left') => {
-    if (s.length > w) return s.substring(0, w)
-    const spaces = w - s.length
+    const rlen = realLen(s)
+    if (rlen >= w) {
+      // 需要截断，但保留 ANSI 序列
+      const result = stripAnsi(s).substring(0, w)
+      // 把截断后的字符对应的 ANSI 序列加回去（简化处理：只保留前导 ANSI）
+      const leadingAnsi = s.match(/^(\x1b\[[0-9;]*m)*/)?.[0] || ''
+      return leadingAnsi + result
+    }
+    const spaces = w - rlen
+    const afterAnsi = stripAnsi(s) // 纯文本
+    let result
     if (align === 'center') {
       const l = Math.floor(spaces / 2)
-      return ' '.repeat(l) + s + ' '.repeat(spaces - l)
+      result = ' '.repeat(l) + afterAnsi + ' '.repeat(spaces - l)
+    } else if (align === 'right') {
+      result = ' '.repeat(spaces) + afterAnsi
+    } else {
+      result = afterAnsi + ' '.repeat(spaces)
     }
-    return s + ' '.repeat(spaces)
+    // 加回前导 ANSI
+    const leadingAnsi = s.match(/^(\x1b\[[0-9;]*m)*/)?.[0] || ''
+    return leadingAnsi + result
   }
 
-  // 标题列（居中，行数匹配 robotLines）
+  // 标题列（居中，行数匹配 robotLines，内容放在中间行）
   const baseTitleLines = [
     pad('AI Code Agent', col2, 'center'),
     pad('Node.js Edition', col2, 'center'),
@@ -193,12 +214,19 @@ function buildBanner({ model, permissionMode, session, maxTokens }) {
     pad('─'.repeat(col2 - 2), col2, 'center'),
     pad('/help — commands · /exit — quit', col2, 'center')
   ]
+  // 内容放在中间位置（21行中，从第8行开始放5行内容）
+  const titleStart = Math.floor((robotLines.length - baseTitleLines.length) / 2)
   const titleLines = []
   for (let i = 0; i < robotLines.length; i++) {
-    titleLines.push(i < baseTitleLines.length ? baseTitleLines[i] : pad('', col2, 'center'))
+    const ti = i - titleStart
+    if (ti >= 0 && ti < baseTitleLines.length) {
+      titleLines.push(baseTitleLines[ti])
+    } else {
+      titleLines.push(pad('', col2, 'center'))
+    }
   }
 
-  // 信息列（右对齐，填充到 robotLines 长度）
+  // 信息列（右对齐，内容放在中间行）
   const sessionId = session?.id || '??????'
   const baseInfoLines = [
     pad(`Turns: ${session?.state?.turnCount ?? 0}  •  Tools: 0`, col3, 'right'),
@@ -207,9 +235,15 @@ function buildBanner({ model, permissionMode, session, maxTokens }) {
     pad(`Budget: 0 / ${maxTokens ?? 200000}`, col3, 'right'),
     pad(`Session: ${sessionId?.toString().slice(-6)}`, col3, 'right')
   ]
+  const infoStart = Math.floor((robotLines.length - baseInfoLines.length) / 2)
   const infoLines = []
   for (let i = 0; i < robotLines.length; i++) {
-    infoLines.push(i < baseInfoLines.length ? baseInfoLines[i] : pad('', col3, 'right'))
+    const ti = i - infoStart
+    if (ti >= 0 && ti < baseInfoLines.length) {
+      infoLines.push(baseInfoLines[ti])
+    } else {
+      infoLines.push(pad('', col3, 'right'))
+    }
   }
 
   // 构建每行：│ col1 │ col2 │ col3 │
