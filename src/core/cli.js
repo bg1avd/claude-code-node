@@ -228,7 +228,10 @@ Commands:
   /cost          — Show API cost report
   /compact       — Manually compact conversation context
   /cd PATH       — Change working directory
-  /allow [tool]  — Allow a tool for the current session (default: all)
+  /allow [tool|all|reset] — Allow tools for this session (default: all)
+  /allow all   — automatically allow all subsequent tools
+  /allow reset — reset to ask mode
+  /allow <tool> — allow specific tool (e.g. Bash)
   /exit          — Exit (also Ctrl+C)
   /quit          — Same as /exit
 
@@ -262,7 +265,7 @@ const DETAILED_HELP = {
 
   cd:      "/cd <path>\n  Change the working directory of cc-node.\n  Affects all subsequent tool executions (Bash, Read, Write, etc.).\n\n  Without path: show the current working directory.\n\n  Example: /cd /home/raolin/projects\n  Example: /cd ..",
 
-  allow:   "/allow [tool_name]\n  Allow a tool to execute without confirmation for this session.\n  Without tool name: allows ALL tools.\n\n  Example: /allow\n  Example: /allow Bash",
+  allow:   "/allow [tool|all|reset]\n  Manage tool permissions for this session.\n\n  Options:\n    <tool>   — allow a specific tool (e.g. Bash, Write, Read)\n    all      — automatically allow ALL remaining tools for this session\n    reset    — reset to ask mode (ask for each tool)\n    (no arg) — same as /allow all\n\n  When asked to confirm a tool, you can also type:\n    y — allow this once\n    a — allow all for the rest of the session\n\n  Example: /allow Bash\n  Example: /allow all\n  Example: /allow reset",
 
   exit:    "/exit\n  Exit cc-node. Same as Ctrl+C or /quit.",
   quit:    "/quit\n  Exit cc-node. Same as Ctrl+C or /exit.",
@@ -442,10 +445,19 @@ export async function main() {
   // 将 readline 注入引擎配置，用于 ask 模式确认和 AskUserQuestion 工具
   if (permissionMode === 'ask') {
     engine.config.onConfirmTool = async (toolName, input) => {
+      // 如果已经启用会话全局自动允许，直接通过
+      if (engine.permissionChecker.sessionAllowAll) return true
+
+      const snippet = JSON.stringify(input).slice(0, 120) || '(no params)'
       return new Promise((resolve) => {
-        const snippet = JSON.stringify(input).slice(0, 120) || '(no params)'
-        rl.question(`\n⚠️  Allow tool "${toolName}"?\n   Input: ${snippet}\n   (y/N) `, (answer) => {
-          resolve(answer.toLowerCase().startsWith('y'))
+        rl.question(`\n⚠️  Allow tool "${toolName}"?\n   Input: ${snippet}\n   (y/N/a) a=all session `, (answer) => {
+          const a = answer.toLowerCase()
+          if (a === 'a') {
+            engine.permissionChecker.allowAllForSession()
+            resolve(true)
+          } else {
+            resolve(a === 'y')
+          }
         })
       })
     }
@@ -583,9 +595,18 @@ export async function main() {
           break
         }
         case 'allow': {
-          const allowTool = rest.join(' ') || '*'
-          engine.permissionChecker.allowForSession(allowTool, '*')
-          console.log(`✅ Tool "${allowTool}" allowed for this session`)
+          const arg = rest.join(' ').toLowerCase()
+          if (arg === 'all') {
+            engine.permissionChecker.allowAllForSession()
+            console.log('✅ All tools allowed for the rest of this session')
+          } else if (arg === 'reset') {
+            engine.permissionChecker.resetSessionAllow()
+            console.log('✅ Session permission reset to normal (ask mode)')
+          } else {
+            const tool = arg || '*'
+            engine.permissionChecker.allow(tool)
+            console.log(`✅ Tool "${tool}" allowed for this session`)
+          }
           break
         }
         case 'cost':

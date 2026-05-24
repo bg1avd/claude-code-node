@@ -9,21 +9,20 @@ export class PermissionChecker {
     this.alwaysAllow = new Set()
     this.alwaysDeny = new Set()
     this.askRules = new Set()
+    this.sessionAllowAll = false // 整个会话自动允许
   }
 
   /**
    * 检查工具调用是否被允许
    */
   async check(toolName, input = {}) {
-    if (this.mode === 'always-allow') return true
+    if (this.mode === 'always-allow' || this.sessionAllowAll) return true
     if (this.mode === 'deny') return false
 
     if (this.alwaysAllow.has(toolName)) return true
     if (this.alwaysDeny.has(toolName)) return false
 
-    // 'ask' 模式 — 需要用户确认（简化版直接允许）
-    // 完整版应该在终端显示确认对话框
-    return true
+    return true // 'ask' 模式下由 onConfirmTool 决定
   }
 
   allow(toolName) {
@@ -32,6 +31,16 @@ export class PermissionChecker {
 
   deny(toolName) {
     this.alwaysDeny.add(toolName)
+  }
+
+  // 会话剩余时间全部工具自动允许
+  allowAllForSession() {
+    this.sessionAllowAll = true
+  }
+
+  // 重置会话允许状态
+  resetSessionAllow() {
+    this.sessionAllowAll = false
   }
 }
 
