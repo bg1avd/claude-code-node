@@ -76,6 +76,7 @@ export class EnhancedPermissionChecker {
     this.auditLog = [] // 审计日志
     this.cwd = options.cwd || process.cwd()
     this.projectDir = options.projectDir || process.cwd()
+    this.sessionAllowAll = false // 新增：会话剩余时间全部自动允许
     this._maxAuditEntries = 1000
   }
 
@@ -111,6 +112,26 @@ export class EnhancedPermissionChecker {
     })
   }
 
+  // 会话剩余时间全部工具自动允许
+  allowAllForSession() {
+    this.sessionAllowAll = true
+  }
+
+  // 重置会话允许状态
+  resetSessionAllow() {
+    this.sessionAllowAll = false
+  }
+
+  // 允许指定工具（会话级规则）
+  allow(tool, pattern = '*') {
+    return this.addRule({
+      tool,
+      pattern,
+      decision: PermissionDecision.ALLOW,
+      reason: '用户手动允许',
+    })
+  }
+
   /**
    * 综合权限检查
    * @param {string} toolName — 工具名
@@ -118,6 +139,16 @@ export class EnhancedPermissionChecker {
    * @returns {Promise<{allowed: boolean, reason?: string, requiresConfirmation?: boolean, securityCheck?: object}>}
    */
   async check(toolName, input = {}) {
+    // 1. 会话全局允许功能 (skip ask)
+    if (this.sessionAllowAll) {
+      const securityResult = await this._securityCheck(toolName, input)
+      if (!securityResult.safe) {
+        this._log(toolName, input, false, securityResult.reason)
+        return { allowed: false, reason: securityResult.reason, securityCheck: securityResult }
+      }
+      this._log(toolName, input, true, '会话全局自动允许')
+      return { allowed: true }
+    }
     // 1. 模式级检查
     if (this.mode === 'deny') {
       this._log(toolName, input, false, '全局拒绝模式')
