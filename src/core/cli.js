@@ -117,12 +117,16 @@ function startSocketServer(engine, session, sessionManager, channelManager, verb
 // ============================================================
 
 const BANNER = `
-╔═══════════════════════════════════════════════╗
-║   AI Code Agent — Node.js Edition            ║
-║   OpenAI-Compatible · DeepSeek Default        ║
-║   Type '/help' for commands                   ║
-║   Type '/exit' or Ctrl+C to quit              ║
-╚═══════════════════════════════════════════════╝
+╭ CC-Node v2.2.7 ──────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                      │
+│       ╭───────╮       │            AI Code Agent             │                                       │
+│ ┌───────────────────┐ │           Node.js Edition            │                                       │
+│ │    ██       ██    │ │                                      │                                       │
+│ │                   │ │ ──────────────────────────────────── │                                       │
+│ │      ██████       │ │   /help — commands · /exit — quit    │                                       │
+│ └───────────────────┘ │                                      │                                       │
+│                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────╯
 `.trim()
 
 const HELP_TEXT = `
