@@ -136,8 +136,8 @@ function buildBanner({ model, permissionMode, session, maxTokens }) {
   const top = `╭${leftLabel}${'─'.repeat(inner - leftLabel.length)}╮`
   const bottom = `╰${'─'.repeat(inner)}╯`
 
-  const col1 = 30 // 机器人列
-  const col2 = 42 // 标题列
+  const col1 = 28 // 左侧机器人列宽度
+  const col2 = 44 // 标题列
   const col3 = inner - col1 - col2 - 2 // 信息列
 
   // ANSI 颜色
@@ -145,14 +145,18 @@ function buildBanner({ model, permissionMode, session, maxTokens }) {
   const CYAN = '\x1b[36m'
   const RESET = '\x1b[0m'
 
-  // 原始机器人（宽21）
+  // 像素风格 CC 机器人（19x13 字符，带颜色）
   const robotRaw = [
-    '      ╭───────╮      ',
-    '┌───────────────────┐',
-    '│    ██       ██    │',
-    '│                   │',
-    '│      ██████       │',
-    '└───────────────────┘'
+    ' ┌─────────────────┐ ',
+    ' │  ██         ██  │ ',
+    ' │    ██████       │ ',
+    ' │  ██         ██  │ ',
+    ' │                 │ ',
+    ' │     ███████     │ ',
+    ' │  ██         ██  │ ',
+    ' │    ██████       │ ',
+    ' │  ██    ██    ██ │ ',
+    ' └─────────────────┘ ',
   ]
 
   // 颜色化：边框蓝，眼睛/嘴巴青
@@ -163,41 +167,50 @@ function buildBanner({ model, permissionMode, session, maxTokens }) {
 
   const robotColored = robotRaw.map(colorize)
 
-  // 在 col1 内居中（考虑 ESC 序列不看长度，按可见长度21 计算）
-  const leftPad = 4 // (30 - 21) / 2 = 4.5 => 4 left, 5 right
-  const rightPad = 5
+  // 在 col1 内居中（按可见长度约 19 计算）
+  const visibleWidth = 19
+  const totalCol1 = 28
+  const leftPad = Math.floor((totalCol1 - visibleWidth) / 2)
+  const rightPad = totalCol1 - visibleWidth - leftPad
   const robotLines = robotColored.map(line => ' '.repeat(leftPad) + line + ' '.repeat(rightPad))
 
-  // 标题列（居中）
-  const pad = (s, w, align = 'center') => {
-    if (s.length >= w) return s
-    const sp = w - s.length
+  // 辅助函数：字符串填充
+  const pad = (s, w, align = 'left') => {
+    if (s.length > w) return s.substring(0, w)
+    const spaces = w - s.length
     if (align === 'center') {
-      const l = Math.floor(sp / 2)
-      return ' '.repeat(l) + s + ' '.repeat(sp - l)
+      const l = Math.floor(spaces / 2)
+      return ' '.repeat(l) + s + ' '.repeat(spaces - l)
     }
-    return s + ' '.repeat(sp)
+    return s + ' '.repeat(spaces)
   }
 
-  const titleLines = [
+  // 标题列（居中，行数匹配 robotLines）
+  const baseTitleLines = [
     pad('AI Code Agent', col2, 'center'),
     pad('Node.js Edition', col2, 'center'),
     pad('', col2, 'center'),
     pad('─'.repeat(col2 - 2), col2, 'center'),
-    pad('/help — commands · /exit — quit', col2, 'center'),
-    pad('', col2, 'center')
+    pad('/help — commands · /exit — quit', col2, 'center')
   ]
+  const titleLines = []
+  for (let i = 0; i < robotLines.length; i++) {
+    titleLines.push(i < baseTitleLines.length ? baseTitleLines[i] : pad('', col2, 'center'))
+  }
 
-  // 信息列（右对齐）
+  // 信息列（右对齐，填充到 robotLines 长度）
   const sessionId = session?.id || '??????'
-  const infoLines = [
+  const baseInfoLines = [
     pad(`Turns: ${session?.state?.turnCount ?? 0}  •  Tools: 0`, col3, 'right'),
     pad(`Model: ${model}`, col3, 'right'),
     pad(`Permission: ${permissionMode}`, col3, 'right'),
     pad(`Budget: 0 / ${maxTokens ?? 200000}`, col3, 'right'),
-    pad(`Session: ${sessionId?.toString().slice(-6)}`, col3, 'right'),
-    pad('', col3, 'right')
+    pad(`Session: ${sessionId?.toString().slice(-6)}`, col3, 'right')
   ]
+  const infoLines = []
+  for (let i = 0; i < robotLines.length; i++) {
+    infoLines.push(i < baseInfoLines.length ? baseInfoLines[i] : pad('', col3, 'right'))
+  }
 
   // 构建每行：│ col1 │ col2 │ col3 │
   const lines = [top]
