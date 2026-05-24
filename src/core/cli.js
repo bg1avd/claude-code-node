@@ -171,8 +171,8 @@ function buildBanner({ model, permissionMode, session, maxTokens }) {
   const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*m/g, '')
   const robotPlain = robotColored.map(line => stripAnsi(line))
 
-  // 在 col1 内居中（按可见长度 19 计算）
-  const visibleWidth = 19
+  // 在 col1 内居中（按最大可见长度 21 计算，短的自动靠右）
+  const visibleWidth = 21
   const totalCol1 = 24
   const leftPad = Math.floor((totalCol1 - visibleWidth) / 2)
   const rightPad = totalCol1 - visibleWidth - leftPad
@@ -214,8 +214,8 @@ function buildBanner({ model, permissionMode, session, maxTokens }) {
     pad('─'.repeat(col2 - 2), col2, 'center'),
     pad('/help — commands · /exit — quit', col2, 'center')
   ]
-  // 内容放在中间位置（21行中，从第8行开始放5行内容）
-  const titleStart = Math.floor((robotLines.length - baseTitleLines.length) / 2)
+  // 内容从第2行开始（让分隔线与机器人中间横线对齐）
+  const titleStart = 1
   const titleLines = []
   for (let i = 0; i < robotLines.length; i++) {
     const ti = i - titleStart
@@ -235,7 +235,7 @@ function buildBanner({ model, permissionMode, session, maxTokens }) {
     pad(`Budget: 0 / ${maxTokens ?? 200000}`, col3, 'right'),
     pad(`Session: ${sessionId?.toString().slice(-6)}`, col3, 'right')
   ]
-  const infoStart = Math.floor((robotLines.length - baseInfoLines.length) / 2)
+  const infoStart = 1
   const infoLines = []
   for (let i = 0; i < robotLines.length; i++) {
     const ti = i - infoStart
