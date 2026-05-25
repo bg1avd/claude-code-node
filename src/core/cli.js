@@ -144,6 +144,7 @@ function buildBanner({ model, permissionMode, session, maxTokens }) {
   const BLUE = '\x1b[34m'
   const CYAN = '\x1b[36m'
   const RESET = '\x1b[0m'
+  const RED = '\x1b[31m'
 
   // 像素风格 CC 机器人（19字符宽，带颜色边框）
   const robotRaw = [
@@ -163,7 +164,7 @@ function buildBanner({ model, permissionMode, session, maxTokens }) {
   const colorize = (line) =>
     line
       .replace(/[┌└─╭╮┐┘│]/g, BLUE + '$&' + RESET)
-      .replace(/[█]/g, CYAN + '$&' + RESET)
+      .replace(/[█]/g, RED + '$&' + RESET)
 
   const robotColored = robotRaw.map(colorize)
 
