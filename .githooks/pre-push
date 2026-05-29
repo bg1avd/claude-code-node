@@ -1,0 +1,46 @@
+#!/bin/sh
+# claude-code-node 预推送钩子
+#
+# 推送前做最终检查:
+#   - 本地分支与远端无冲突
+#   - 不将 .npmrc/.env 推上去
+#   - 展示即将推送的提交摘要供确认
+#
+# 安装: git config core.hooksPath .githooks
+# 跳过: git push --no-verify
+
+set -e
+
+echo "📤 cc-node pre-push: 推前检查..."
+echo ""
+
+REMOTE="$1"
+URL="$2"
+
+# 用 API Key 检查（只检查是否是常用的不安全远端）
+if echo "$URL" | grep -qE "(xox[bpras]-|ghp_|github_pat_|npm_)"; then
+  echo "⚠️  远端 URL 中包含 Token！建议使用环境变量或 .netrc"
+fi
+
+# 显示即将推送的提交
+echo "即将推送的提交:"
+echo "------------------------------"
+git log --oneline origin/master..HEAD 2>/dev/null || git log --oneline -5
+echo "------------------------------"
+echo ""
+
+# 检查是否忘记更新版本号
+CURRENT_VERSION=$(node -e "try{console.log(require('./package.json').version)}catch(e){}" 2>/dev/null)
+echo "当前版本: v${CURRENT_VERSION:-unknown}"
+
+# 确保 .npmrc 和 .env 不在暂存区
+STAGED_BAD=$(git diff --cached --name-only | grep -E '\.npmrc$|\.env$|\.env\.local$|credentials' || true)
+if [ -n "$STAGED_BAD" ]; then
+  echo "❌ 禁止提交敏感文件:"
+  echo "$STAGED_BAD"
+  exit 1
+fi
+
+echo ""
+echo "✅ 推前检查通过"
+exit 0

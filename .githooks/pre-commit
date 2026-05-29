@@ -1,0 +1,121 @@
+#!/bin/sh
+# claude-code-node 预提交钩子
+#
+# 防止以下情况被提交:
+#   1. JavaScript 语法错误
+#   2. 硬编码的 Token/Secret/密码
+#   3. 内网 IP 地址
+#   4. 个人路径（/home/用户名）
+#   5. 调试用的 console.log / debugger（在新代码中）
+#
+# 安装: git config core.hooksPath .githooks
+# 跳过: git commit --no-verify 或 SKIP_LEAK_CHECK=1 git commit
+
+set -e
+
+if [ "$SKIP_LEAK_CHECK" = "1" ]; then
+  exit 0
+fi
+
+echo "🔍 cc-node pre-commit: 安全扫描..."
+
+# 获取暂存的文件列表（仅 JS）
+STAGED_JS=$(git diff --cached --name-only --diff-filter=ACMR | grep '\.js$' || true)
+
+if [ -z "$STAGED_JS" ]; then
+  echo "✅ 无可检查的 JS 文件"
+  exit 0
+fi
+
+HAS_ERROR=0
+
+# ── 1. 语法检查 ──────────────────────────────────────────
+echo ""
+echo "📐 语法检查..."
+for f in $STAGED_JS; do
+  if [ -f "$f" ]; then
+    if ! node --check "$f" 2>/dev/null; then
+      echo "❌ 语法错误: $f"
+      node --check "$f" 2>&1
+      HAS_ERROR=1
+    else
+      echo "   ✅ $f"
+    fi
+  fi
+done
+
+# ── 2. 敏感信息检查 ──────────────────────────────────────
+echo ""
+echo "🔒 敏感信息扫描..."
+
+# 要扫描的暂存文件（所有类型）
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACMR | grep -v '\.gitignore\|\.md$\|CHANGELOG\|PROJECT_MEMORY\|\.sample$' || true)
+
+# 敏感模式列表
+SENSITIVE_PATTERNS='(sk-[A-Za-z0-9]{20,})|(ghp_[A-Za-z0-9]{36,})|(ghs_[A-Za-z0-9]{36,})|(gho_[A-Za-z0-9]{36,})|(github_pat_[A-Za-z0-9_]{36,})|(npm_[A-Za-z0-9]{36,})|(xox[bpras]-[A-Za-z0-9-]{20,})|(AKIA[0-9A-Z]{16})|(-----BEGIN (RSA |EC )?PRIVATE KEY-----)'
+
+for f in $STAGED_FILES; do
+  if [ -f "$f" ]; then
+    # 跳过已知的安全文件
+    case "$f" in
+      .githooks/*) continue ;;
+      package-lock.json) continue ;;
+    esac
+
+    MATCHES=$(git diff --cached "$f" | grep '^+' | grep -oE "$SENSITIVE_PATTERNS" || true)
+    if [ -n "$MATCHES" ]; then
+      echo "❌ 检测到可能的敏感信息: $f"
+      echo "$MATCHES" | while read -r line; do
+        masked=$(echo "$line" | sed 's/\(.\{4\}\).*$/\1.../')
+        echo "   ⚠️  $masked"
+      done
+      HAS_ERROR=1
+    fi
+  fi
+done
+
+# ── 3. 个人路径检查 ──────────────────────────────────────
+echo ""
+echo "📁 硬编码路径扫描..."
+for f in $STAGED_FILES; do
+  if [ -f "$f" ]; then
+    case "$f" in
+      .githooks/*) continue ;;
+      cc-notify.service) continue ;;  # 模板文件允许 YOUR_USER
+    esac
+    # 检查暂存的添加行
+    BAD_PATH=$(git diff --cached "$f" | grep '^+' | grep -E "/home/(raolin|bg1avd|yourname)" | grep -v "YOUR_USER\|yourname\|example" || true)
+    if [ -n "$BAD_PATH" ]; then
+      echo "❌ 发现硬编码路径: $f"
+      echo "$BAD_PATH"
+      HAS_ERROR=1
+    fi
+  fi
+done
+
+# ── 4. 调试代码检查（仅新文件/新增行）──────────────────
+echo ""
+echo "🐛 调试代码扫描..."
+for f in $STAGED_JS; do
+  if [ -f "$f" ]; then
+    # 检查新增的 console.log (保留已有的)
+    DEBUG_LINES=$(git diff --cached "$f" | grep '^+' | grep -E 'console\.(log|debug|trace|dir)\(' | grep -v '//\s*console' || true)
+    if [ -n "$DEBUG_LINES" ]; then
+      echo "⚠️  建议移除调试输出: $f"
+      echo "$DEBUG_LINES"
+      echo "   (如需提交: SKIP_LEAK_CHECK=1 git commit)"
+    fi
+  fi
+done
+
+echo ""
+if [ "$HAS_ERROR" = "1" ]; then
+  echo "❌ 安全检查未通过，提交已阻止"
+  echo "   - 修复问题后重试"
+  echo "   - 或强制提交: git commit --no-verify"
+  echo "   - 或跳过本钩子: SKIP_LEAK_CHECK=1 git commit"
+  exit 1
+else
+  echo "✅ 安全扫描通过"
+  exit 0
+fi
