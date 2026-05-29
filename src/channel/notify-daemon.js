@@ -413,11 +413,23 @@ function createMessageHandler(config) {
     // 发送"处理中"提示
     if (isTelegram && config.channels.telegram?.token) {
       try {
-        await fetch(`https://api.telegram.org/bot${config.channels.telegram.token}/sendChatAction`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ chat_id: chatId, action: 'typing' }),
-        })
+        const proxyAddr = config.channels.telegram.proxy || process.env.CC_NODE_CHANNEL_TELEGRAM_PROXY || ''
+        const apiBase = config.channels.telegram.apiBase || `https://api.telegram.org`
+        const url = `${apiBase}/bot${config.channels.telegram.token}/sendChatAction`
+        if (proxyAddr) {
+          const { fetchViaSocks5 } = await import('./tg-proxy.js')
+          await fetchViaSocks5(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: chatId, action: 'typing' }),
+          }, proxyAddr)
+        } else {
+          await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: chatId, action: 'typing' }),
+          })
+        }
       } catch {}
     }
     if (isQQBot) {

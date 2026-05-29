@@ -35,9 +35,18 @@ class TelegramChannel {
   constructor({ token, chatId }) {
     this.token = token
     this.chatId = chatId
-    this.apiBase = `https://api.telegram.org/bot${token}`
+    this.proxyAddr = process.env.CC_NODE_CHANNEL_TELEGRAM_PROXY || ''
+    const customBase = process.env.CC_NODE_CHANNEL_TELEGRAM_API_BASE || ''
+    this.apiBase = customBase || `https://api.telegram.org/bot${token}`
     this.lastCall = 0
     this.callInterval = 50  // 20 calls/sec max
+  }
+
+  /** 带代理支持的 fetch */
+  async _fetch(url, options = {}) {
+    if (!this.proxyAddr) return fetch(url, options)
+    const { fetchViaSocks5 } = await import('./tg-proxy.js')
+    return fetchViaSocks5(url, options, this.proxyAddr)
   }
 
   get name() { return 'telegram' }
@@ -92,7 +101,7 @@ class TelegramChannel {
     // Telegram HTML 安全编码（只保留基本标签）
     body.text = this._safeHTML(body.text)
 
-    const r = await fetch(`${this.apiBase}/sendMessage`, {
+    const r = await this._fetch(`${this.apiBase}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -160,7 +169,7 @@ class TelegramChannel {
   /** 编辑消息 */
   async edit(messageId, text, options = {}) {
     await this._rateLimit()
-    const r = await fetch(`${this.apiBase}/editMessageText`, {
+    const r = await this._fetch(`${this.apiBase}/editMessageText`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -176,7 +185,7 @@ class TelegramChannel {
   /** 删除消息 */
   async delete(messageId) {
     await this._rateLimit()
-    const r = await fetch(`${this.apiBase}/deleteMessage`, {
+    const r = await this._fetch(`${this.apiBase}/deleteMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat_id: this.chatId, message_id: messageId }),

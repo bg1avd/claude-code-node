@@ -92,10 +92,20 @@ class RateLimiter {
 // ============================================================
 
 class TelegramBotClient {
-  constructor(token) {
+  constructor(token, opts = {}) {
     this.token = token
-    this.apiBase = API_BASE(token)
+    this.apiBase = opts.apiBase || API_BASE(token)
+    this.proxyAddr = opts.proxy || ''  // SOCKS5 代理地址, 如 "127.0.0.1:1080" 或 "socks5://user:pass@host:port"
     this.rateLimiter = new RateLimiter()
+  }
+
+  /** 带代理支持的 fetch */
+  async _fetch(url, options = {}) {
+    if (!this.proxyAddr) {
+      return fetch(url, options)
+    }
+    const { fetchViaSocks5 } = await import('./tg-proxy.js')
+    return fetchViaSocks5(url, options, this.proxyAddr)
   }
 
   /** 发送消息（带自动重试和速率限制） */
@@ -115,7 +125,7 @@ class TelegramBotClient {
     if (replyTo) body.reply_parameters = { message_id: replyTo }
     if (keyboard) body.reply_markup = JSON.stringify(keyboard)
 
-    const res = await fetch(`${this.apiBase}/sendMessage`, {
+    const res = await this._fetch(`${this.apiBase}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -147,7 +157,7 @@ class TelegramBotClient {
       text: text.slice(0, 4096),
       parse_mode: parseMode || 'HTML',
     }
-    const res = await fetch(`${this.apiBase}/editMessageText`, {
+    const res = await this._fetch(`${this.apiBase}/editMessageText`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     })
     const data = await res.json()
@@ -157,7 +167,7 @@ class TelegramBotClient {
 
   /** 删除消息 */
   async deleteMessage(chatId, messageId) {
-    const res = await fetch(`${this.apiBase}/deleteMessage`, {
+    const res = await this._fetch(`${this.apiBase}/deleteMessage`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat_id: chatId, message_id: messageId }),
     })
@@ -167,7 +177,7 @@ class TelegramBotClient {
   /** 发送聊天动作（typing/upload_photo 等） */
   async sendChatAction(chatId, action = 'typing') {
     try {
-      await fetch(`${this.apiBase}/sendChatAction`, {
+      await this._fetch(`${this.apiBase}/sendChatAction`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chat_id: chatId, action }),
       })
@@ -176,7 +186,7 @@ class TelegramBotClient {
 
   /** 获取文件下载链接 */
   async getFile(fileId) {
-    const res = await fetch(`${this.apiBase}/getFile`, {
+    const res = await this._fetch(`${this.apiBase}/getFile`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ file_id: fileId }),
     })
@@ -187,7 +197,7 @@ class TelegramBotClient {
 
   /** 设置机器人命令菜单 */
   async setMyCommands(commands) {
-    await fetch(`${this.apiBase}/setMyCommands`, {
+    await this._fetch(`${this.apiBase}/setMyCommands`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ commands }),
     })
@@ -255,7 +265,9 @@ export class TelegramListener {
     this.config = config
     const ch = config.channels?.telegram || {}
     this.token = ch.token
-    this.bot = this.token ? new TelegramBotClient(this.token) : null
+    this.proxyAddr = ch.proxy || process.env.CC_NODE_CHANNEL_TELEGRAM_PROXY || ''
+    this.apiBase = ch.apiBase || ''
+    this.bot = this.token ? new TelegramBotClient(this.token, { proxy: this.proxyAddr, apiBase: this.apiBase }) : null
     this.lastUpdateId = 0
     this.running = false
     this._pollTimer = null
@@ -269,6 +281,13 @@ export class TelegramListener {
   /** 注册消息处理器 */
   on(event, handler) {
     this._handlers[event] = handler
+  }
+
+  /** 带代理的 fetch（供类内部使用） */
+  async _fetch(url, options = {}) {
+    if (!this.proxyAddr) return fetch(url, options)
+    const { fetchViaSocks5 } = await import('./tg-proxy.js')
+    return fetchViaSocks5(url, options, this.proxyAddr)
   }
 
   /** 启动监听 */
@@ -421,7 +440,7 @@ export class TelegramListener {
 
     // 确认收到回调（去除loading状态）
     try {
-      await fetch(`${this.bot.apiBase}/answerCallbackQuery`, {
+      await this._fetch(`${this.bot.apiBase}/answerCallbackQuery`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ callback_query_id: cb.id }),
       })

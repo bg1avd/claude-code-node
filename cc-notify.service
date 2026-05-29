@@ -42,6 +42,9 @@ Environment=CC_NODE_PATH=/usr/local/bin/cc-node
 Environment=CC_NODE_CHANNEL_DEFAULT=telegram
 Environment=CC_NODE_CHANNEL_TELEGRAM_TOKEN=YOUR_BOT_TOKEN
 Environment=CC_NODE_CHANNEL_TELEGRAM_CHAT_ID=YOUR_CHAT_ID
+# SOCKS5 代理（国内使用，可选）
+# 格式: 127.0.0.1:1080 或 socks5://user:pass@host:port
+# Environment=CC_NODE_CHANNEL_TELEGRAM_PROXY=127.0.0.1:1080
 
 # ========== QQ Bot 配置（独立 API v2） ==========
 # QQ 机器人凭证 — 在 QQ 开放平台 https://q.qq.com 获取
