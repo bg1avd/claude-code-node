@@ -1,7 +1,11 @@
-# cc-notify — 通知守护进程 systemd 服务
-# 
+# cc-notify — 通知守护进程 systemd 服务模板 (v2.0 增强版)
+#
 # 安装：
 #   sudo cp cc-notify.service /etc/systemd/system/
+#   # 编辑替换 YOUR_USER 为你的系统用户名
+#   sudo sed -i 's/YOUR_USER/你的用户名/g' /etc/systemd/system/cc-notify.service
+#   # 编辑填入 Token
+#   sudo vim /etc/systemd/system/cc-notify.service
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable cc-notify    # 开机自启
 #   sudo systemctl start cc-notify     # 立即启动
@@ -11,42 +15,55 @@
 #   sudo systemctl stop cc-notify
 #   sudo systemctl restart cc-notify
 #   journalctl -u cc-notify -f         # 查看日志
+#
+# 支持通道：Telegram（推荐）、QQ Bot
 
 [Unit]
-Description=cc-notify — AI Code Agent Notification Daemon
+Description=cc-notify — AI Code Agent Notification Daemon (v2.0)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=raolin
-Group=raolin
-WorkingDirectory=/home/raolin
+# ⚠️ 将 YOUR_USER 替换为你的系统用户名
+User=YOUR_USER
+Group=YOUR_USER
+WorkingDirectory=/home/YOUR_USER
 
 # cc-notify 可执行文件路径（npm install -g 后可用）
 ExecStart=/usr/local/bin/cc-notify
 
-# 环境变量
+# ========== 通用配置 ==========
+Environment=CC_NOTIFY_PORT=3456
+Environment=CC_NOTIFY_LOG_FILE=/home/YOUR_USER/.cc-notify.log
+Environment=CC_NODE_PATH=/usr/local/bin/cc-node
+
+# ========== Telegram 配置（推荐） ==========
 Environment=CC_NODE_CHANNEL_DEFAULT=telegram
 Environment=CC_NODE_CHANNEL_TELEGRAM_TOKEN=YOUR_BOT_TOKEN
 Environment=CC_NODE_CHANNEL_TELEGRAM_CHAT_ID=YOUR_CHAT_ID
-Environment=CC_NOTIFY_PORT=3456
-Environment=CC_NOTIFY_LOG_FILE=/home/raolin/.cc-notify.log
-Environment=CC_NODE_PATH=/usr/local/bin/cc-node
 
-# 安全配置
+# ========== QQ Bot 配置（独立 API v2） ==========
+# QQ 机器人凭证 — 在 QQ 开放平台 https://q.qq.com 获取
+# 必填，用于接收和发送 QQ 消息
+# Environment=CC_NODE_CHANNEL_QQBOT_APPID=你的AppID
+# Environment=CC_NODE_CHANNEL_QQBOT_SECRET=你的AppSecret
+# 群 OpenID（在 QQ 里用 /bot-me 获取）
+# Environment=CC_NODE_CHANNEL_QQBOT_GROUPID=群OpenID
+
+# ========== 安全配置 ==========
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/home/raolin/.cc-notify.log /home/raolin/.cc-notify.pid /tmp
+ReadWritePaths=/home/YOUR_USER/.cc-notify.log /home/YOUR_USER/.cc-notify.pid /tmp
 
-# 重启策略
+# ========== 重启策略 ==========
 Restart=on-failure
 RestartSec=5
 StartLimitBurst=3
 StartLimitIntervalSec=60
 
-# 日志
+# ========== 日志 ==========
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=cc-notify

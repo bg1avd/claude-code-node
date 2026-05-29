@@ -359,6 +359,13 @@ cc-node
       "type": "telegram",
       "token": "123456:ABC-DEF",
       "chatId": "78901234"
+    },
+    "qqbot": {
+      "type": "qqbot",
+      "token": "你的BotToken",
+      "appId": "你的AppID",
+      "channelId": "频道ID",
+      "groupOpenId": "群OpenID"
     }
   },
   "defaultChannel": "telegram"
@@ -379,9 +386,61 @@ cc-node
 - ❌ **执行出错**（自动通知错误内容）
 - 🔄 **手动发送**（`/channel send` 命令）
 
-## 🔔 后台运行 (cc-notify)
+## 📱 QQ Bot 远端编程（v2.0 新增）
+
+通过 QQ Bot API v2 实现远程编程控制。独立、零依赖、无需 OpenClaw。
+
+### 前置配置
+
+1. 前往 [QQ 开放平台](https://q.qq.com/) 注册机器人，获取 **AppID** 和 **AppSecret**
+2. 在 QQ 中与机器人对话或拉入群，使用 `/bot-me` 获取你的 **OpenID** 或 **群 OpenID**
+3. 配置环境变量：
+
+```bash
+export CC_NODE_CHANNEL_QQBOT_APPID=你的AppID
+export CC_NODE_CHANNEL_QQBOT_SECRET=你的AppSecret
+export CC_NODE_CHANNEL_QQBOT_GROUPID=你的群OpenID
+```
+
+### 使用方式
+
+启动 cc-notify 后，直接给机器人发消息或在群中 @机器人：
+
+```
+帮我写一个快速排序
+/ping
+/status
+/run ls -la
+/notify 任务完成！
+```
+
+### 技术架构
+
+```
+QQ消息 → WebSocket (wss://api.sgroup.qq.com) → cc-notify → cc-node
+cc-node → cc-notify → QQ API v2 (api.sgroup.qq.com/v2) → QQ消息
+```
+
+- **认证**: `appId + clientSecret` → `access_token`（自动续期，token 有效期 2 小时）
+- **发送**: POST `/v2/groups/{group_openid}/messages` (群) 或 `/v2/users/{openid}/messages` (C2C)
+- **接收**: WebSocket 长连接 + 心跳保活 + 自动重连
+- **代码**: 基于 [qqbot-standalone](https://github.com/bg1avd/qqbot-standalone) 的架构
+- **参考**: `src/channel/qqbot-listener.js`
+
+---
+
+## 🔔 后台运行 (cc-notify v2.0)
 
 cc-notify 是独立的通知守护进程，**不需要 cc-node 在前台运行**，开机自启后随时可用。
+支持 **Telegram** 和 **QQ Bot** 双通道远程编程。
+
+### v2.0 新特性
+
+- ✅ **QQ Bot 支持** — 通过 QQ 群/频道远程操控
+- ✅ **增强版 Telegram 监听** — 速率限制、Markdown 安全编码、多轮对话
+- ✅ **统一消息处理器** — 所有通道共享同一路由逻辑
+- ✅ **长消息分段** — 自动切分超过 4000 字符的回复
+- ✅ **API Key 持久化** — 自动生成并保存，重启不丢失
 
 ### 三种运行方式
 
@@ -393,14 +452,15 @@ cc-notify 是独立的通知守护进程，**不需要 cc-node 在前台运行**
 
 ### 手机交互
 
-在 Telegram 上给 Bot 发消息：
+在 Telegram/QQ 上给 Bot 发消息：
 
 ```
 你好                     → 当作一次性任务发给 cc-node 执行
 /ping                    → 检查服务是否在线
 /run ls -la              → 执行 shell 命令
-/notify 任务完成！        → 向所有通道广播通知
+/notify 任务完成！       → 向所有通道广播通知
 /status                  → 查看服务状态
+/cancel                  → 取消当前操作
 ```
 
 ### HTTP API（守护模式可用）
@@ -409,9 +469,16 @@ cc-notify 是独立的通知守护进程，**不需要 cc-node 在前台运行**
 # 发送通知
 curl -X POST http://localhost:3456/send \
   -H 'Content-Type: application/json' \
+  -H 'X-API-Key: <你的API_Key>' \
   -d '{"text":"构建完成 ✅"}'
 
-# 查看状态
+# 远程编程
+curl -X POST http://localhost:3456/chat \
+  -H 'Content-Type: application/json' \
+  -H 'X-API-Key: <你的API_Key>' \
+  -d '{"text":"帮我查下当前目录"}'
+
+# 查看状态（无需 API Key）
 curl http://localhost:3456/status
 ```
 
