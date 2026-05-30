@@ -320,7 +320,7 @@ export class TelegramListener {
     while (this.running) {
       try {
         const url = `${this.bot.apiBase}/getUpdates`
-        const res = await fetch(url, {
+        const res = await this._fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
