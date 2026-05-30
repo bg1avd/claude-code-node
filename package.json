@@ -1,6 +1,6 @@
 {
   "name": "@raolin2025/claude-code-node",
-  "version": "2.4.1",
+  "version": "2.4.2",
   "description": "Node.js AI Code Agent CLI - Zero dependencies, pure JavaScript, security hardened, multi-channel notifications, Telegram & QQ Bot remote programming",
   "type": "module",
   "main": "src/index.js",
