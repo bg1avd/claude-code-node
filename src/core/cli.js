@@ -408,18 +408,58 @@ export async function main() {
   await config.load(process.cwd())
 
   const apiBase = cliArgs.apiBase || config.get('apiBase') || process.env.LLM_API_BASE || ''
-  // 智能默认模型：根据 apiBase 自动选择
-  function getDefaultModel(base) {
-    if (!base) return 'deepseek-chat'  // 无 apiBase → DeepSeek 默认
-    if (base.includes('11434')) return 'llama3'  // Ollama 本地
-    if (base.includes('dashscope')) return 'qwen-plus'  // 通义千问
-    if (base.includes('bigmodel.cn')) return 'glm-4-flash'  // 智谱 GLM
-    if (base.includes('moonshot')) return 'kimi-k2-0711'  // Moonshot
-    if (base.includes('openai.com')) return 'gpt-4o'  // OpenAI
-    return 'deepseek-chat'  // 其他情况默认 DeepSeek
+  let model = cliArgs.model || config.get('model') || ''
+  // 未指定模型 → 自动从 API 拉取模型列表让用户选择
+  if (!model && apiBase) {
+    const apiKeyForModels = cliArgs.apiKey || config.get('apiKey') || process.env.LLM_API_KEY || process.env.DEEPSEEK_API_KEY || ''
+    if (apiKeyForModels) {
+      try {
+        const modelsUrl = apiBase.replace(/\/+$/, '') + '/models'
+        console.log('⚠️  未指定模型，正在从 API 获取可用模型列表...')
+        const res = await fetch(modelsUrl, { headers: { 'Authorization': `Bearer ${apiKeyForModels}` } })
+        if (res.ok) {
+          const data = await res.json()
+          const models = data.data || []
+          if (models.length > 0) {
+            console.log(`\n可用模型 (${models.length}):`)
+            models.forEach((m, i) => {
+              const id = m.id || m
+              console.log(`  ${(i + 1).toString().padStart(2)}. ${id}`)
+            })
+            console.log('输入编号选择，或直接输入模型名（回车跳过用 deepseek-chat）:')
+            // 用 readline 等待输入（此时 REPL 还没启动，需要临时创建）
+            const tmpRl = createInterface({ input: process.stdin, output: process.stdout })
+            const answer = await new Promise(resolve => tmpRl.question('> ', resolve))
+            tmpRl.close()
+            const num = parseInt(answer, 10)
+            if (!isNaN(num) && num >= 1 && num <= models.length) {
+              model = models[num - 1].id || models[num - 1]
+            } else if (answer.trim()) {
+              model = answer.trim()
+            } else {
+              model = 'deepseek-chat'
+            }
+            console.log(`✅ Model → ${model}`)
+          } else {
+            model = 'deepseek-chat'
+            console.log('API 返回空模型列表，使用默认: deepseek-chat')
+          }
+        } else {
+          model = 'deepseek-chat'
+          console.log('无法获取模型列表，使用默认: deepseek-chat')
+        }
+      } catch (e) {
+        model = 'deepseek-chat'
+        console.log(`获取模型列表失败 (${e.message})，使用默认: deepseek-chat`)
+      }
+    } else {
+      model = 'deepseek-chat'
+    }
+  } else if (!model) {
+    model = 'deepseek-chat'  // 无 apiBase 也无 model → DeepSeek 默认
   }
-  const model = cliArgs.model || config.get('model') || getDefaultModel(apiBase)
-  const systemPrompt = cliArgs.systemPrompt || ''
+  const DEFAULT_SYSTEM_PROMPT = `You are cc-node, an AI coding assistant. Configuration files: user-level ~/.claude-code/config.json, project-level .claude-code/config.json (in project root). Runtime files (pid/socket): ~/.cc-node/. Never reference settings.json or .claude.json — those paths do not exist.`
+const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
   const permissionMode = cliArgs.permissionMode || config.get('permissionMode')
   const maxTurns = cliArgs.maxTurns || config.get('maxTurns')
   const apiKey = cliArgs.apiKey || config.get('apiKey') || ''
