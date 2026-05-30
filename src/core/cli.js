@@ -407,11 +407,21 @@ export async function main() {
   const config = new Config()
   await config.load(process.cwd())
 
-  const model = cliArgs.model || config.get('model')
+  const apiBase = cliArgs.apiBase || config.get('apiBase') || process.env.LLM_API_BASE || ''
+  // 智能默认模型：根据 apiBase 自动选择
+  function getDefaultModel(base) {
+    if (!base) return 'deepseek-chat'  // 无 apiBase → DeepSeek 默认
+    if (base.includes('11434')) return 'llama3'  // Ollama 本地
+    if (base.includes('dashscope')) return 'qwen-plus'  // 通义千问
+    if (base.includes('bigmodel.cn')) return 'glm-4-flash'  // 智谱 GLM
+    if (base.includes('moonshot')) return 'kimi-k2-0711'  // Moonshot
+    if (base.includes('openai.com')) return 'gpt-4o'  // OpenAI
+    return 'deepseek-chat'  // 其他情况默认 DeepSeek
+  }
+  const model = cliArgs.model || config.get('model') || getDefaultModel(apiBase)
   const systemPrompt = cliArgs.systemPrompt || ''
   const permissionMode = cliArgs.permissionMode || config.get('permissionMode')
   const maxTurns = cliArgs.maxTurns || config.get('maxTurns')
-  const apiBase = cliArgs.apiBase || config.get('apiBase') || process.env.LLM_API_BASE || ''
   const apiKey = cliArgs.apiKey || config.get('apiKey') || ''
   const verbose = cliArgs.verbose || config.get('verbose')
 
