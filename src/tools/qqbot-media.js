@@ -10,8 +10,8 @@
  *   qqbot_media: { action: 'upload', path: '/home/.../image.png', scope: 'group', targetId: '群OPENID' }
  */
 
-import { QQBotEnhanced } from '../src/channel/qqbot-enhanced.js'
-import { parseQQMediaTags } from '../src/channel/qqbot-enhanced.js'
+import { QQBotEnhanced } from '../channel/qqbot-enhanced.js'
+import { parseQQMediaTags } from '../channel/qqbot-enhanced.js'
 
 const API_BASE = 'https://api.sgroup.qq.com'
 
