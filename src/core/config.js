@@ -26,8 +26,26 @@ const DEFAULTS = {
     fileRead: { maxLines: 2000, maxSizeKB: 256 },
     webFetch: { timeout: 30, maxChars: 100000 },
   },
-    channels: {},
-    defaultChannel: null,
+  channels: {},
+  defaultChannel: null,
+  qqbot: {
+    enabled: false,
+    accounts: {
+      default: {
+        enabled: true,
+        appId: '',
+        clientSecret: '',
+        dmPolicy: 'open',
+        groupPolicy: 'open',
+        allowFrom: ['*'],
+        defaultTargets: {}
+      }
+    },
+    defaultAccount: 'default',
+    globalDmPolicy: 'open',
+    globalGroupPolicy: 'open',
+    globalAllowFrom: ['*']
+  },
   mcp: {
     servers: {},
   },

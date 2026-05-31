@@ -195,81 +195,139 @@ class TelegramChannel {
 }
 
 // ============================================================
-// QQ Bot 通道适配器 v2.0
+// QQ Bot 通道适配器 v3.0 — 多账户、权限、富媒体
 // ============================================================
 
+import { QQBotEnhanced } from './qqbot-enhanced.js'
+import { QQBotAccountManager } from './qqbot-account-manager.js'
+
 /**
- * QQ Bot 通道适配器 — 独立、零依赖
+ * QQ Bot 增强版通道适配器
  *
- * 使用 QQ Bot API v2，仅需 appId + clientSecret
+ * 功能：
+ * - 多账户管理（从配置文件加载）
+ * - 权限控制（dmPolicy/groupPolicy + allowFrom 白名单）
+ * - 自动解析 <qqmedia> 标签并上传富媒体
+ * - 支持图片、文件、语音上传（限于 ~/.openclaw/media/qqbot）
+ * - WebSocket 监听（可选）
  */
 class QQBotChannel {
-  constructor(config = {}) {
-    this.appId = config.appId || process.env.CC_NODE_CHANNEL_QQBOT_APPID || ''
-    this.secret = config.secret || config.clientSecret || process.env.CC_NODE_CHANNEL_QQBOT_SECRET || ''
-    this._token = null
-    this._tokenCache = { token: null, expireAt: 0 }
-    this.channelId = config.channelId || ''
-    this.groupOpenId = config.groupOpenId || ''
-  }
+  constructor(config = {}, globalConfig = {}) {
+    this.name = 'qqbot'
+    this.enabled = config.enabled !== false
 
-  get name() { return 'qqbot' }
-
-  async _getToken() {
-    if (this._tokenCache.token && Date.now() < this._tokenCache.expireAt - 300000) {
-      return this._tokenCache.token
+    // 合并全局配置
+    const qqbotConfig = {
+      ...globalConfig.qqbot,
+      ...config
     }
-    const res = await fetch('https://bots.qq.com/app/getAppAccessToken', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ appId: this.appId, clientSecret: this.secret }),
-    })
-    if (!res.ok) throw new Error('QQ Token API ' + res.status)
-    const data = JSON.parse(await res.text())
-    if (!data.access_token) throw new Error('Token API no access_token')
-    this._tokenCache.token = data.access_token
-    this._tokenCache.expireAt = Date.now() + (data.expires_in || 7200) * 1000
-    return data.access_token
+
+    // 创建增强版 QQBot 实例
+    this.bot = new QQBotEnhanced(qqbotConfig)
+
+    // 通道特定配置
+    this.scope = config.scope || 'group'  // 默认发送到群
+    this.defaultTargetId = config.targetId || config.groupOpenId || ''
+
+    // WebSocket 监听状态
+    this._listener = null
+    this._onMessageCallback = null
   }
 
-  async send(text, options = {}) {
-    if (!this.appId || !this.secret) {
-      return [{ channel: 'qqbot', ok: false, error: '需要 appId 和 clientSecret' }]
+  /** 启动消息监听 */
+  async listen(onMessage) {
+    if (!this.enabled) {
+      console.warn('[QQBotChannel] 通道未启用')
+      return
     }
     try {
-      const token = await this._getToken()
-      const results = []
-
-      const scope = options.scope || (this.groupOpenId ? 'group' : '')
-      const targetId = options.targetId || this.groupOpenId || this.channelId
-
-      if (!scope || !targetId) {
-        return [{ channel: 'qqbot', ok: false, error: '未配置目标 (groupOpenId)' }]
-      }
-
-      const path = scope === 'group'
-        ? '/v2/groups/' + targetId + '/messages'
-        : '/v2/users/' + targetId + '/messages'
-
-      const body = { content: text.slice(0, 2000), msg_type: 0 }
-      if (options.replyMsgId) body.msg_id = options.replyMsgId
-
-      const r = await fetch('https://api.sgroup.qq.com' + path, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: 'QQBot ' + token },
-        body: JSON.stringify(body),
-      })
-      if (!r.ok) {
-        const errText = await r.text().catch(() => '')
-        throw new Error('HTTP ' + r.status + ': ' + errText.slice(0, 100))
-      }
-      results.push({ channel: 'qqbot', ok: true })
-      return results
+      this._onMessageCallback = onMessage
+      await this.bot.listen(this._handleIncomingMessage.bind(this))
+      console.log('[QQBotChannel] 监听已启动')
     } catch (e) {
-      return [{ channel: 'qqbot', ok: false, error: e.message.slice(0, 200) }]
+      console.error('[QQBotChannel] 监听启动失败:', e.message)
+      throw e
+    }
+  }
+
+  _handleIncomingMessage(msg) {
+    // 包装为统一消息格式，转发给回调
+    if (this._onMessageCallback) {
+      this._onMessageCallback({
+        channel: 'qqbot',
+        text: msg.text,
+        scope: msg.scope,
+        chatId: msg.chatId,
+        from: msg.from,
+        messageId: msg.messageId,
+        raw: msg.raw,
+        accountId: msg.accountId
+      })
+    }
+  }
+
+  /** 停止监听 */
+  stop() {
+    if (this.bot) {
+      this.bot.stop()
+    }
+  }
+
+  /** 发送消息（支持富媒体标签） */
+  async send(text, options = {}) {
+    if (!this.enabled) {
+      return [{ channel: 'qqbot', ok: false, error: '通道未启用' }]
+    }
+
+    try {
+      const scope = options.scope || this.scope
+      const targetId = options.targetId || this.defaultTargetId
+      const accountId = options.accountId || null
+
+      const result = await this.bot.send({
+        text,
+        scope,
+        targetId,
+        accountId,
+        opts: { replyMsgId: options.replyMsgId }
+      })
+
+      return result.ok
+        ? [{ channel: 'qqbot', ok: true }]
+        : [{ channel: 'qqbot', ok: false, error: result.error }]
+    } catch (e) {
+      console.error('[QQBotChannel] 发送失败:', e)
+      return [{ channel: 'qqbot', ok: false, error: e.message }]
+    }
+  }
+
+  /** 支持的工具调用（提供给 Agent） */
+  get tools() {
+    return {
+      /** 发送 QQ 消息 */
+      qqbot_send: async (args) => {
+        const { text, scope = this.scope, targetId = this.defaultTargetId } = args
+        const result = await this.send(text, { scope, targetId })
+        return result[0]
+      },
+
+      /** 获取账户列表 */
+      qqbot_list_accounts: async () => {
+        const accounts = this.bot.accountManager.getAllAccounts()
+        return accounts.map(a => ({ id: a.id, name: a.name, enabled: a.enabled }))
+      },
+
+      /** 发送图片（直接文件路径） */
+      qqbot_send_image: async (args) => {
+        const { path, scope = this.scope, targetId = this.defaultTargetId } = args
+        // 这里需要支持直接的图片发送，不通过文本标签
+        // 临时方案：调用 bot 的底层方法
+        return { ok: false, error: '暂未实现' }
+      }
     }
   }
 }
+
 
 // ============================================================
 // 已有适配器（保持兼容）

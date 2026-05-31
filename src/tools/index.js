@@ -11,6 +11,8 @@ import { webFetchTool } from './web-fetch.js'
 import { webSearchTool } from './web-search.js'
 import { askUserTool } from './ask-user.js'
 import { gitTool } from './git-tool.js'
+// QQ Bot 工具（外部包装）
+import { qqbotTools } from '../tools/qqbot-tools-wrapper.js'
 
 /**
  * 所有内置工具列表
@@ -26,6 +28,7 @@ export const builtinTools = [
   webSearchTool,
   askUserTool,
   gitTool,
+  ...qqbotTools
 ]
 
 /**
