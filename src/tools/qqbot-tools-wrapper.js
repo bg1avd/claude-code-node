@@ -8,9 +8,9 @@
  */
 
 import { ToolDef } from '../types/index.js'
-import { tools as qqbotChannelApiTools } from '../../tools/qqbot-channel-api.js'
-import { tools as qqbotRemindTools } from '../../tools/qqbot-remind.js'
-import { tools as qqbotMediaTools } from '../../tools/qqbot-media.js'
+import { tools as qqbotChannelApiTools } from './qqbot-channel-api.js'
+import { tools as qqbotRemindTools } from './qqbot-remind.js'
+import { tools as qqbotMediaTools } from './qqbot-media.js'
 
 // 通用执行器：将原始函数包装为 ToolDef 的执行格式
 function createExecutor(originalFunc) {
