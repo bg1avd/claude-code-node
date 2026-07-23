@@ -4,7 +4,7 @@
  * 
  * v1.2: 增加 Unix socket 服务，让 cc-notify 能发现并转发消息
  */
-import { createInterface } from 'readline'
+import * as readline from 'readline'
 import { createServer as createNetServer } from 'net'
 import { writeFileSync, unlinkSync, existsSync, mkdirSync, readFileSync, chmodSync } from 'fs'
 import { join } from 'path'
@@ -428,7 +428,7 @@ export async function main() {
             })
             console.log('输入编号选择，或直接输入模型名（回车跳过用 deepseek-chat）:')
             // 用 readline 等待输入（此时 REPL 还没启动，需要临时创建）
-            const tmpRl = createInterface({ input: process.stdin, output: process.stdout })
+            const tmpRl = readline.createInterface({ input: process.stdin, output: process.stdout })
             const answer = await new Promise(resolve => tmpRl.question('> ', resolve))
             tmpRl.close()
             const num = parseInt(answer, 10)
@@ -541,52 +541,79 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
   // REPL 模式 — 启动 Unix socket 让 cc-notify 能发现
   startSocketServer(engine, session, sessionManager, channelManager, verbose)
 
-  const rl = createInterface({ input: process.stdin, output: process.stdout, prompt: '> ' })
+  // ============================================================
+  // 多行输入支持：
+  //   Enter      → 提交输入
+  //   Ctrl+Enter → 换行（折行）
+  //
+  // 实现：使用 keypress 事件完全自己管理输入缓冲，
+  // 绕过 readline 的 line 事件（因为它会把 \n 当作行结束）。
+  // 保留一个 readline 实例仅用于 question() 模式（权限确认等）。
+  // ============================================================
 
-  // 将 readline 注入引擎配置，用于 ask 模式确认和 AskUserQuestion 工具
-  if (permissionMode === 'ask') {
-    engine.config.onConfirmTool = async (toolName, input) => {
-      // 如果已经启用会话全局自动允许，直接通过
-      if (engine.permissionChecker.sessionAllowAll) return true
+  let inputBuffer = ''      // 当前输入缓冲区
+  let inputHistory = []     // 输入历史
+  let historyIndex = -1     // 历史浏览索引
+  const PROMPT_STR = '> '
 
-      const snippet = JSON.stringify(input).slice(0, 120) || '(no params)'
-      return new Promise((resolve) => {
-        rl.question(`\n⚠️  Allow tool "${toolName}"?\n   Input: ${snippet}\n   (y/N/a) a=all session `, (answer) => {
-          const a = answer.toLowerCase()
-          if (a === 'a') {
-            engine.permissionChecker.allowAllForSession()
-            resolve(true)
-          } else {
-            resolve(a === 'y')
-          }
-        })
-      })
+  // 创建 readline 但不监听 line 事件，仅用于 question
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
+
+  // 检查是否是 TTY（交互式终端）
+  const isTTY = process.stdin.isTTY
+
+  if (isTTY) {
+    // TTY 模式：使用 keypress 事件实现多行输入
+    readline.emitKeypressEvents(process.stdin)
+    process.stdin.setRawMode(true)
+  } else {
+    // 非 TTY 模式（管道）：回退到 readline 的 line 事件
+    rl.on('line', (line) => {
+      processInputLine(line)
+    })
+  }
+
+  // 显示提示符
+  function showPrompt() {
+    process.stdout.write(PROMPT_STR)
+  }
+
+  // 刷新当前行显示
+  function refreshDisplay() {
+    // 清空当前行
+    readline.clearLine(process.stdout, 0)
+    readline.cursorTo(process.stdout, 0)
+    // 用 \n 替换换行符显示为多行
+    const display = inputBuffer.replace(/\n/g, '\n' + ' '.repeat(PROMPT_STR.length))
+    process.stdout.write(PROMPT_STR + display)
+    // 光标移到行尾
+    const lastNewline = inputBuffer.lastIndexOf('\n')
+    const cursorOffset = lastNewline >= 0
+      ? inputBuffer.length - lastNewline - 1
+      : inputBuffer.length
+    readline.cursorTo(process.stdout, PROMPT_STR.length + cursorOffset)
+  }
+
+  // 提交输入
+  function submitInput() {
+    const input = inputBuffer
+    inputBuffer = ''
+    if (input.trim()) {
+      inputHistory.push(input)
+      historyIndex = inputHistory.length
     }
-  }
-  engine.config.readline = rl
-
-  console.log(buildBanner({ model, permissionMode, session, maxTokens: tokenBudget.maxTokens }))
-  console.log(`Model: ${model} | Permission: ${permissionMode} | Tools: ${registry.getNames().join(', ')}`)
-  console.log(`Socket: ${SOCK_PATH} (cc-notify can connect)`)
-  if (channelManager.list().length > 0) {
-    const chList = channelManager.list().join(', ')
-    const def = channelManager.defaultChannel ? ` (default: ${channelManager.defaultChannel})` : ''
-    console.log(`Channels: ${chList}${def}`)
-  }
-  console.log()
-  rl.prompt()
-
-  // REPL 消息处理包装（留作扩展点）
-  async function processInput(input) {
-    return engine.processMessage(input)
+    process.stdout.write('\n')
+    // 处理输入
+    processInputLine(input)
   }
 
-  rl.on('line', async (line) => {
-    const input = line.trim()
-    if (!input) { rl.prompt(); return }
+  // 处理输入行
+  async function processInputLine(input) {
+    const trimmed = input.trim()
+    if (!trimmed) { showPrompt(); return }
 
-    if (input.startsWith('/')) {
-      const [cmd, ...rest] = input.slice(1).split(' ')
+    if (trimmed.startsWith('/')) {
+      const [cmd, ...rest] = trimmed.slice(1).split(' ')
       switch (cmd) {
         case 'help':
           if (rest[0]) {
@@ -656,7 +683,6 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
           }
           const target = rest.join(' ')
           let sessionId = target
-          // 支持数字序号选择（从 /sessions 列表中）
           if (/^\d+$/.test(target)) {
             const idx = parseInt(target, 10) - 1
             const list = await sessionManager.list()
@@ -671,19 +697,16 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
             console.log(`❌ Session not found: ${sessionId}`)
             break
           }
-          // 恢复会话内容
           session.id = loaded.id
           session.title = loaded.title
           session.messages = loaded.messages
           session.state = loaded.state || {}
-          // 恢复引擎消息历史
           engine.state.messages = loaded.messages.map(m => ({
             role: m.role,
             content: m.content,
             toolCalls: m.toolCalls,
             toolCallId: m.toolCallId,
           }))
-          // 恢复计数和预算
           engine.state.turnCount = loaded.state?.turnCount || 0
           if (engine.tokenBudget && loaded.state?.budgetUsed != null) {
             engine.tokenBudget.used = loaded.state.budgetUsed
@@ -791,7 +814,7 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
         default:
           console.log(`Unknown command: /${cmd}. Type /help for available commands.`)
       }
-      rl.prompt()
+      showPrompt()
       return
     }
 
@@ -803,13 +826,11 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
       console.log()
       await sessionManager.appendMessage({ role: 'user', content: input })
       await sessionManager.appendMessage({ role: 'assistant', content: result.response })
-      // 保存引擎状态到会话
       session.state = session.state || {}
       session.state.turnCount = engine.state.turnCount
       session.state.costHistory = engine.costTracker.history.slice(-50)
       await sessionManager.save(session)
       if (verbose) console.log(`[Turns: ${result.turns} | Tools: ${result.toolResults.length}]`)
-      // 显示费用（即使非 verbose 也显示）
       if (engine.costTracker && engine.costTracker.totalApiCalls > 0) {
         console.log(engine.costTracker.formatShort())
       }
@@ -821,8 +842,137 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
         }).catch(() => {})
       }
     }
-    rl.prompt()
-  })
+    showPrompt()
+  }
 
-  rl.on('close', () => { console.log('\nGoodbye!'); process.exit(0) })
+  // 处理按键事件（仅 TTY 模式）
+  if (isTTY) {
+  process.stdin.on('keypress', (str, key) => {
+    if (!key) return
+
+    // 处理 Ctrl+C → 退出
+    if (key.ctrl && key.name === 'c') {
+      if (inputBuffer) {
+        // 如果输入缓冲区非空，清空并换行
+        inputBuffer = ''
+        process.stdout.write('\n')
+        showPrompt()
+      } else {
+        process.stdout.write('\nGoodbye!\n')
+        cleanup()
+        process.exit(0)
+      }
+      return
+    }
+
+    // 处理 Enter（支持 return 和 enter 两种 key name）
+    if (key.name === 'return' || key.name === 'enter') {
+      if (key.ctrl) {
+        // Ctrl+Enter → 折行
+        inputBuffer += '\n'
+        process.stdout.write('\n')
+        // 显示续行提示
+        process.stdout.write('  ')
+      } else {
+        // Enter → 提交
+        submitInput()
+      }
+      return
+    }
+
+    // 处理退格
+    if (key.name === 'backspace') {
+      if (inputBuffer.length > 0) {
+        // 如果删除的是换行符，需要特殊处理
+        if (inputBuffer.endsWith('\n')) {
+          inputBuffer = inputBuffer.slice(0, -1)
+          // 光标上移一行
+          readline.cursorTo(process.stdout, 0)
+          process.stdout.write('\x1b[1A') // 上移一行
+          readline.clearLine(process.stdout, 0)
+          process.stdout.write(PROMPT_STR + inputBuffer.split('\n').pop())
+        } else {
+          inputBuffer = inputBuffer.slice(0, -1)
+          process.stdout.write('\b \b')
+        }
+      }
+      return
+    }
+
+    // 处理普通字符
+    if (str && str.length === 1 && str.charCodeAt(0) >= 0x20) {
+      inputBuffer += str
+      process.stdout.write(str)
+    }
+  })
+  }
+
+  // 恢复 stdin 模式
+  function cleanup() {
+    if (isTTY && process.stdin.isTTY) {
+      try { process.stdin.setRawMode(false) } catch {}
+    }
+    process.stdin.removeAllListeners('keypress')
+  }
+
+  // 将 readline 注入引擎配置，用于 ask 模式确认和 AskUserQuestion 工具
+  if (permissionMode === 'ask') {
+    engine.config.onConfirmTool = async (toolName, input) => {
+      // 如果已经启用会话全局自动允许，直接通过
+      if (engine.permissionChecker.sessionAllowAll) return true
+
+      const snippet = JSON.stringify(input).slice(0, 120) || '(no params)'
+      return new Promise((resolve) => {
+        rl.question(`\n⚠️  Allow tool "${toolName}"?\n   Input: ${snippet}\n   (y/N/a) a=all session `, (answer) => {
+          const a = answer.toLowerCase()
+          if (a === 'a') {
+            engine.permissionChecker.allowAllForSession()
+            resolve(true)
+          } else {
+            resolve(a === 'y')
+          }
+        })
+      })
+    }
+  }
+  engine.config.readline = rl
+
+  console.log(buildBanner({ model, permissionMode, session, maxTokens: tokenBudget.maxTokens }))
+  console.log(`Model: ${model} | Permission: ${permissionMode} | Tools: ${registry.getNames().join(', ')}`)
+  console.log(`Socket: ${SOCK_PATH} (cc-notify can connect)`)
+  if (channelManager.list().length > 0) {
+    const chList = channelManager.list().join(', ')
+    const def = channelManager.defaultChannel ? ` (default: ${channelManager.defaultChannel})` : ''
+    console.log(`Channels: ${chList}${def}`)
+  }
+  console.log()
+  // 显示初始提示符
+  showPrompt()
+
+  // REPL 消息处理包装（留作扩展点）
+  async function processInput(input) {
+    return engine.processMessage(input)
+  }
 }
+
+// ============================================================
+// 全局退出处理 — 回收 stdin 的 raw mode
+// ============================================================
+function cleanupStdin() {
+  try {
+    if (process.stdin.isTTY) process.stdin.setRawMode(false)
+    process.stdin.removeAllListeners('keypress')
+  } catch {}
+}
+
+process.on('SIGINT', () => {
+  cleanupStdin()
+  process.exit(0)
+})
+process.on('SIGTERM', () => {
+  cleanupStdin()
+  process.exit(0)
+})
+process.on('exit', () => {
+  cleanupStdin()
+})
