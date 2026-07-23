@@ -2,3 +2,14 @@ node_modules/
 .claude-code/
 *.log
 PROJECT_MEMORY.md
+
+# 文档和临时文件
+*.md
+!README.md
+!CHANGELOG.md
+!src/**/*.md
+*.tgz
+config-examples/
+examples/
+check-gittool.js
+test-*.mjs
