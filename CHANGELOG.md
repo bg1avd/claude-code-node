@@ -1,5 +1,25 @@
 # CHANGELOG
 
+## (待发布) — 自建本地 LLM 服务支持
+> commit `1560dfc`
+
+### 🎯 新增
+- **支持自建本地 LLM 服务（Ollama / llama.cpp / vLLM 等），无需 apiKey**
+  - 自动识别 apiBase 指向本地/内网（localhost、回环、RFC1918 私有段、`.local` 域名）的服务
+  - 此类服务缺省 apiKey 也能正常调用，不再强制 `Bearer undefined` 头
+  - REPL `/models` 命令在自建服务下跳过 API key 检查，正常拉取列表
+  - 未指定模型时启动自动拉取服务端 `/models` 列表交互选择
+- 新增 `src/utils/llm-server.js`（isLocalLlmServer / isLocalHostname / buildAuthHeaders）
+- 新增 `src/__tests__/llm-server.test.js` 单元测试（35 项）
+
+### 📓 文档
+- README 更新 Ollama / 自建服务使用说明
+- 新增 `KNOWN_ISSUES.md`（技术债务记录，含 REPL 多行输入取舍、git-tool 集成测试失败）
+
+### ⚠️ 已知事项
+- REPL 多行输入（Ctrl+Enter 折行）与 readline 回显稳定性存在取舍，
+  详见 `KNOWN_ISSUES.md` #1。
+
 ## v2.6.0 (2025-07-23) — 多行输入支持
 
 ### 🎯 新增

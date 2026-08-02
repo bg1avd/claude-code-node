@@ -206,9 +206,23 @@ cc-node --model kimi-k2-0711 --api-base https://api.moonshot.cn/v1
 # OpenAI
 cc-node --model gpt-4o --api-base https://api.openai.com/v1
 
-# Ollama 本地
-cc-node --model qwen2.5 --api-base http://localhost:11434/v1
+# Ollama / 自建本地服务（Ollama / llama.cpp / vLLM 等）
+# 指向 localhost 或内网地址时【无需 apiKey】，直接可用
+cc-node --api-base http://localhost:11434/v1 --model qwen2.5
+
+# 内网自建服务（局域网 IP，同样无需 apiKey）
+# 将 <内网IP> 替换为你的服务器地址，如 192.168.x.x
+cc-node --api-base http://<内网IP>:11434/v1 --model qwen3.6:27b
+
+# 未指定模型 → 自动拉取服务端 /models 列表供交互选择
+cc-node --api-base http://localhost:11434/v1
 ```
+
+> 💡 **自建本地服务支持**：cc-node 会自动识别 apiBase 指向本地/内网
+> （`localhost`、回环、`192.168.x` / `10.x` / `172.16-31.x` 私有段、`.local` 域名）
+> 的自建 LLM 服务（Ollama、llama.cpp、vLLM 等 OpenAI 兼容端点），
+> 此类服务**无需 apiKey 也能正常调用**，且不会强制附加 `Bearer undefined` 头。
+> 云端厂商（DeepSeek/OpenAI/Kimi 等）仍需 apiKey。
 
 [![npm version](https://img.shields.io/npm/v/@raolin2025/claude-code-node.svg)](https://www.npmjs.com/package/@raolin2025/claude-code-node) [![GitHub](https://img.shields.io/badge/GitHub-bg1avd%2Fclaude--code--node-blue)](https://github.com/bg1avd/claude-code-node) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ---
