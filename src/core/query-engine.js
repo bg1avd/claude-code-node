@@ -17,6 +17,7 @@ import { parseStream, parseNonStreamResponse } from './streaming.js'
 import { autoCompact } from './compact.js'
 import { CostTracker } from './cost-tracker.js'
 import { EnhancedPermissionChecker } from '../security/enhanced-permission.js'
+import { isLocalLlmServer, buildAuthHeaders } from '../utils/index.js'
 
 /**
  * 配置选项
@@ -265,7 +266,9 @@ export class QueryEngine {
     const apiKey = this.config.apiKey
     const apiBase = this.config.apiBase
 
-    if (!apiKey) {
+    // apiBase 指向自建本地服务（Ollama / llama.cpp / vLLM 等）时，允许缺省 apiKey
+    const isLocalServer = isLocalLlmServer(apiBase)
+    if (!isLocalServer && !apiKey) {
       throw new Error(
         `未设置 API Key。请设置以下环境变量之一:\n` +
         `  LLM_API_KEY=xxx (通用，推荐)\n` +
@@ -331,7 +334,7 @@ export class QueryEngine {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${apiKey}`,
+            ...buildAuthHeaders(apiBase, apiKey),
           },
           body: JSON.stringify(body),
           signal: this.abortController?.signal,

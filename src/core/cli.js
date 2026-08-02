@@ -16,6 +16,7 @@ import { TokenBudget } from './token-budget.js'
 import { ChannelManager } from '../channel/index.js'
 import { CostTracker } from './cost-tracker.js'
 import { autoCompact } from './compact.js'
+import { isLocalLlmServer } from '../utils/index.js'
 import { SOCK_DIR, SOCK_PATH, CC_NODE_PID } from './paths.js'
 
 // ============================================================
@@ -408,15 +409,23 @@ export async function main() {
   await config.load(process.cwd())
 
   const apiBase = cliArgs.apiBase || config.get('apiBase') || process.env.LLM_API_BASE || ''
+  // apiBase 指向自建本地服务（Ollama / llama.cpp / vLLM 等）时允许缺省 apiKey
+  const localApiBase = isLocalLlmServer(apiBase)
   let model = cliArgs.model || config.get('model') || ''
   // 未指定模型 → 自动从 API 拉取模型列表让用户选择
+  // 本地自建服务即使无 key 也尝试拉取（这些服务通常无需认证）
   if (!model && apiBase) {
     const apiKeyForModels = cliArgs.apiKey || config.get('apiKey') || process.env.LLM_API_KEY || process.env.DEEPSEEK_API_KEY || ''
-    if (apiKeyForModels) {
+    if (apiKeyForModels || localApiBase) {
       try {
         const modelsUrl = apiBase.replace(/\/+$/, '') + '/models'
         console.log('⚠️  未指定模型，正在从 API 获取可用模型列表...')
-        const res = await fetch(modelsUrl, { headers: { 'Authorization': `Bearer ${apiKeyForModels}` } })
+        const res = await fetch(modelsUrl, {
+          headers: {
+            'Content-Type': 'application/json',
+            ...(apiKeyForModels ? { 'Authorization': `Bearer ${apiKeyForModels}` } : {}),
+          },
+        })
         if (res.ok) {
           const data = await res.json()
           const models = data.data || []
@@ -631,11 +640,18 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
         case 'models': {
           const apiBase = engine.config.apiBase
           const apiKey = engine.config.apiKey
-          if (!apiKey) { console.log('❌ API key not configured'); break }
+          // 自建本地服务（Ollama/llama.cpp/vLLM）无需 apiKey 也能拉取模型列表
+          const localServer = isLocalLlmServer(apiBase)
+          if (!apiKey && !localServer) { console.log('❌ API key not configured'); break }
           const modelsUrl = apiBase.replace(/\/+$/, '') + '/models'
           console.log(`📡 Fetching models from ${modelsUrl}...`)
           try {
-            const res = await fetch(modelsUrl, { headers: { 'Authorization': `Bearer ${apiKey}` } })
+            const res = await fetch(modelsUrl, {
+              headers: {
+                'Content-Type': 'application/json',
+                ...(apiKey ? { 'Authorization': `Bearer ${apiKey}` } : {}),
+              },
+            })
             if (!res.ok) { console.log(`❌ API error: ${res.status}`); break }
             const data = await res.json()
             const models = data.data || []
