@@ -551,69 +551,19 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
   startSocketServer(engine, session, sessionManager, channelManager, verbose)
 
   // ============================================================
-  // 多行输入支持：
-  //   Enter      → 提交输入
-  //   Ctrl+Enter → 换行（折行）
+  // REPL 输入处理
   //
-  // 实现：使用 keypress 事件完全自己管理输入缓冲，
-  // 绕过 readline 的 line 事件（因为它会把 \n 当作行结束）。
-  // 保留一个 readline 实例仅用于 question() 模式（权限确认等）。
+  // 使用标准 readline 的 line 事件（terminal: true）实现输入读取：
+  //   - 字符回显、退格删除、行回绕、方向键历史由 readline 原生处理，
+  //     行为与 v2.5 一致，避免手动 keypress 回显导致的显示错乱。
+  //   - Enter 提交；Ctrl+C 退出。
+  //   - 非 TTY（管道/重定向）模式复用同一 readline 接口。
   // ============================================================
-
-  let inputBuffer = ''      // 当前输入缓冲区
-  let inputHistory = []     // 输入历史
-  let historyIndex = -1     // 历史浏览索引
-  const PROMPT_STR = '> '
-
-  // 创建 readline 但不监听 line 事件，仅用于 question
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
-
-  // 检查是否是 TTY（交互式终端）
-  const isTTY = process.stdin.isTTY
-
-  if (isTTY) {
-    // TTY 模式：使用 keypress 事件实现多行输入
-    readline.emitKeypressEvents(process.stdin)
-    process.stdin.setRawMode(true)
-  } else {
-    // 非 TTY 模式（管道）：回退到 readline 的 line 事件
-    rl.on('line', (line) => {
-      processInputLine(line)
-    })
-  }
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: '> ' })
 
   // 显示提示符
   function showPrompt() {
-    process.stdout.write(PROMPT_STR)
-  }
-
-  // 刷新当前行显示
-  function refreshDisplay() {
-    // 清空当前行
-    readline.clearLine(process.stdout, 0)
-    readline.cursorTo(process.stdout, 0)
-    // 用 \n 替换换行符显示为多行
-    const display = inputBuffer.replace(/\n/g, '\n' + ' '.repeat(PROMPT_STR.length))
-    process.stdout.write(PROMPT_STR + display)
-    // 光标移到行尾
-    const lastNewline = inputBuffer.lastIndexOf('\n')
-    const cursorOffset = lastNewline >= 0
-      ? inputBuffer.length - lastNewline - 1
-      : inputBuffer.length
-    readline.cursorTo(process.stdout, PROMPT_STR.length + cursorOffset)
-  }
-
-  // 提交输入
-  function submitInput() {
-    const input = inputBuffer
-    inputBuffer = ''
-    if (input.trim()) {
-      inputHistory.push(input)
-      historyIndex = inputHistory.length
-    }
-    process.stdout.write('\n')
-    // 处理输入
-    processInputLine(input)
+    rl.prompt()
   }
 
   // 处理输入行
@@ -861,75 +811,10 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
     showPrompt()
   }
 
-  // 处理按键事件（仅 TTY 模式）
-  if (isTTY) {
-  process.stdin.on('keypress', (str, key) => {
-    if (!key) return
-
-    // 处理 Ctrl+C → 退出
-    if (key.ctrl && key.name === 'c') {
-      if (inputBuffer) {
-        // 如果输入缓冲区非空，清空并换行
-        inputBuffer = ''
-        process.stdout.write('\n')
-        showPrompt()
-      } else {
-        process.stdout.write('\nGoodbye!\n')
-        cleanup()
-        process.exit(0)
-      }
-      return
-    }
-
-    // 处理 Enter（支持 return 和 enter 两种 key name）
-    if (key.name === 'return' || key.name === 'enter') {
-      if (key.ctrl) {
-        // Ctrl+Enter → 折行
-        inputBuffer += '\n'
-        process.stdout.write('\n')
-        // 显示续行提示
-        process.stdout.write('  ')
-      } else {
-        // Enter → 提交
-        submitInput()
-      }
-      return
-    }
-
-    // 处理退格
-    if (key.name === 'backspace') {
-      if (inputBuffer.length > 0) {
-        // 如果删除的是换行符，需要特殊处理
-        if (inputBuffer.endsWith('\n')) {
-          inputBuffer = inputBuffer.slice(0, -1)
-          // 光标上移一行
-          readline.cursorTo(process.stdout, 0)
-          process.stdout.write('\x1b[1A') // 上移一行
-          readline.clearLine(process.stdout, 0)
-          process.stdout.write(PROMPT_STR + inputBuffer.split('\n').pop())
-        } else {
-          inputBuffer = inputBuffer.slice(0, -1)
-          process.stdout.write('\b \b')
-        }
-      }
-      return
-    }
-
-    // 处理普通字符
-    if (str && str.length === 1 && str.charCodeAt(0) >= 0x20) {
-      inputBuffer += str
-      process.stdout.write(str)
-    }
+  // REPL 主循环 — 由 readline 原生处理回显、退格、行回绕与 Enter 提交
+  rl.on('line', (line) => {
+    processInputLine(line)
   })
-  }
-
-  // 恢复 stdin 模式
-  function cleanup() {
-    if (isTTY && process.stdin.isTTY) {
-      try { process.stdin.setRawMode(false) } catch {}
-    }
-    process.stdin.removeAllListeners('keypress')
-  }
 
   // 将 readline 注入引擎配置，用于 ask 模式确认和 AskUserQuestion 工具
   if (permissionMode === 'ask') {
