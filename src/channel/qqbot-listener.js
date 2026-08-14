@@ -269,13 +269,9 @@ export class QQBot {
   }
 
   async _getWSURL() {
-    const token = await this._t()
-    const res = await fetch(`${API_BASE}/websocket`, {
-      headers: { Authorization: `QQBot ${token}` },
-    })
-    if (!res.ok) throw new Error(`WS URL ${res.status}`)
-    const data = await res.json()
-    return data.url
+    // QQ Bot API v2 的 /websocket 端点需要 WebSocket 升级请求，不能用 HTTP fetch
+    // 直接使用固定的 WebSocket URL
+    return 'wss://api.sgroup.qq.com/websocket'
   }
 
   _handleWS(msg) {

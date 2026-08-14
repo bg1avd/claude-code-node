@@ -19,3 +19,6 @@ test-*.mjs
 
 # 备份的敏感文件（本地临时，勿提交）
 .claude-code-safe-trash/
+
+# QQ Bot 密钥（永不提交）
+qqbot.json

@@ -45,6 +45,7 @@ export class QueryEngineConfig {
     this.initialMessages = options.initialMessages || []
     this.onConfirmTool = options.onConfirmTool || null  // ask 模式确认回调
     this.readline = options.readline || null              // 用于 AskUserQuestion 工具
+    this.onDelta = options.onDelta || null                // 流式增量回调 {type:'text'|'reasoning', text}（供 VS Code 扩展等 UI 消费）
   }
 }
 
@@ -402,9 +403,18 @@ export class QueryEngine {
     try {
       for await (const event of parseStream(response)) {
         if (event.type === 'text') {
-          // 实时输出到终端
-          process.stdout.write(event.text)
+          // 实时输出（有 onDelta 回调时交给调用方，如 VS Code 扩展；否则写终端）
+          if (typeof this.config.onDelta === 'function') {
+            this.config.onDelta({ type: 'text', text: event.text })
+          } else {
+            process.stdout.write(event.text)
+          }
           currentText += event.text
+        } else if (event.type === 'reasoning') {
+          // 推理内容（thinking）同样支持回调
+          if (typeof this.config.onDelta === 'function') {
+            this.config.onDelta({ type: 'reasoning', text: event.text })
+          }
         } else if (event.type === 'tool_use') {
           // 收集工具调用
           result.toolCalls.push(new ToolCall(
