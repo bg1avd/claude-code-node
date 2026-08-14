@@ -167,7 +167,7 @@ export class QueryEngine {
       if (msg.role === 'system') {
         request.push({ role: 'system', content: msg.content })
       } else if (msg.role === 'user') {
-        request.push({ role: 'user', content: this._formatContent(msg.content) })
+        request.push({ role: 'user', content: this._buildUserContent(msg) })
       } else if (msg.role === 'assistant') {
         // 构建 assistant 消息基础
         const asstMsg = {
@@ -450,6 +450,22 @@ export class QueryEngine {
     if (typeof content === 'string') return content
     if (typeof content === 'object') return JSON.stringify(content)
     return String(content)
+  }
+
+  /**
+   * 构建用户消息 content（支持多模态：文本 + 图片）
+   * 有 images 时输出 OpenAI 兼容 content 数组；否则纯文本（向后兼容）
+   */
+  _buildUserContent(msg) {
+    const text = this._formatContent(msg.content)
+    const images = msg.images && msg.images.length ? msg.images : []
+    if (images.length === 0) return text
+    const parts = []
+    if (text) parts.push({ type: 'text', text })
+    for (const url of images) {
+      parts.push({ type: 'image_url', image_url: { url } })
+    }
+    return parts
   }
 
   /** 取消当前运行 */

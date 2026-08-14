@@ -1,3 +1,5 @@
+export { UserMessage, AssistantMessage, ToolCall } from "../types/index.js"
+
 /**
  * 核心模块统一导出
  */

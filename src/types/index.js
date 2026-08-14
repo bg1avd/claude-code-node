@@ -24,8 +24,13 @@ export class Message {
 }
 
 export class UserMessage extends Message {
-  constructor(content) {
+  /**
+   * @param {string} content 文本内容
+   * @param {string[]} [images] 图片 URL 列表（data URL 或 http URL，视觉模型用）
+   */
+  constructor(content, images = []) {
     super(Role.USER, content)
+    this.images = images
   }
 }
 
