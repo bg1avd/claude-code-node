@@ -76,7 +76,7 @@ export function isLocalHostname(hostname) {
 
 /**
  * 判断一个 apiBase 是否指向「自建本地 LLM 服务」（无需强制 apiKey）
- * @param {string} apiBase - 如 http://192.168.1.50:11434/v1
+ * @param {string} apiBase - 如 http://127.0.0.1:11434/v1
  */
 export function isLocalLlmServer(apiBase) {
   if (!apiBase) return false
