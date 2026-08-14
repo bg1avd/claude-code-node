@@ -67,7 +67,24 @@ cc-node --resume session-1747000000000-abc123
 | `--resume` | `-r` | 恢复会话 ID | |
 | `--verbose` | `-v` | 详细输出 | `false` |
 | `--no-stream` | | 禁用流式响应 | `false` |
+| `--stdio` | | **JSON-RPC 服务器模式**（供桥接层/外部客户端接入，见下） | |
 | `--help` | `-h` | 显示帮助 | |
+
+### 🖥️ stdio 服务器模式（--stdio）
+
+以独立子进程形态提供 **JSON-RPC 2.0 over NDJSON** 服务，供外部客户端（VS Code 扩展 / Web / Telegram 等）接入。
+协议完整定义见 cc-node-bridge 项目 `docs/stdio-protocol.md`。
+
+```bash
+# 启动（stdin/stdout 为协议通道，stderr 为日志）
+cc-node --stdio --api-base http://127.0.0.1:11434/v1 --model qwen2.5:0.5b
+
+# 最小请求：initialize
+printf '{"jsonrpc":"2.0","id":1,"method":"initialize"}\n' | cc-node --stdio
+```
+
+能力：流式输出（event/delta）、多模态（images）、remote 工具执行（toolCall 回传）、
+会话管理、abort 中断、config 运行时配置。每个接入客户端建议独立子进程（由桥接层管理）。
 
 ### 权限模式
 
