@@ -67,15 +67,17 @@ export class QueryEngine {
 
   /**
    * 主入口 — 处理用户消息
+   * @param {string} userInput 文本
+   * @param {string[]} [images] 图片 URL（data URL / http），视觉模型用
    */
-  async processMessage(userInput) {
+  async processMessage(userInput, images = []) {
     if (this.state.isRunning) {
       throw new Error('引擎正在运行中，请等待当前回合完成')
     }
     this.state.isRunning = true
     this.state.turnCount++
     this.abortController = new AbortController()
-    const userMsg = new UserMessage(userInput)
+    const userMsg = new UserMessage(userInput, images)
     this.state.messages.push(userMsg)
 
     // M3: 自动上下文压缩
@@ -438,8 +440,8 @@ export class QueryEngine {
       }
     }
 
-    // 流式输出后换行
-    if (currentText) process.stdout.write('\n')
+    // 流式输出后换行（仅终端直写模式；onDelta 回调模式由调用方处理，避免污染协议流）
+    if (currentText && typeof this.config.onDelta !== 'function') process.stdout.write('\n')
 
     return result
   }

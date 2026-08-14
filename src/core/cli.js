@@ -352,6 +352,7 @@ function parseArgs(argv) {
       case '--resume': case '-r': args.resume = argv[++i]; break
       case '--verbose': case '-v': args.verbose = true; break
       case '--no-stream': args.noStream = true; break
+      case '--stdio': args.stdio = true; break
       case '--version':
         const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'))
         console.log(pkg.version)
@@ -404,6 +405,14 @@ Unix Socket (for cc-notify):
 
 export async function main() {
   const cliArgs = parseArgs(process.argv)
+
+  // P1: stdio 服务器模式（JSON-RPC 2.0 over NDJSON，供桥接层/外部客户端接入）
+  if (cliArgs.stdio) {
+    const { StdioServer } = await import('../stdio/server.js')
+    const server = new StdioServer({ cliArgs })
+    server.start()
+    return
+  }
 
   const config = new Config()
   await config.load(process.cwd())
