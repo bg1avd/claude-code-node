@@ -18,6 +18,8 @@ import { CostTracker } from './cost-tracker.js'
 import { autoCompact } from './compact.js'
 import { isLocalLlmServer } from '../utils/index.js'
 import { SOCK_DIR, SOCK_PATH, CC_NODE_PID } from './paths.js'
+import { TelegramListener } from '../channel/tg-listener.js'
+import { fetchViaSocks5 } from '../channel/tg-proxy.js'
 
 // ============================================================
 // Unix Socket — 让 cc-notify 能发现 cc-node
@@ -315,7 +317,7 @@ const DETAILED_HELP = {
 
   compact: "/compact\n  Manually trigger context compression.\n  Compresses the conversation history to fit within the token budget.\n  Keeps recent turns intact, compresses older ones.\n\n  Typically triggered automatically at 80% budget usage.",
 
-  cd:      "/cd <path>\n  Change the working directory of cc-node.\n  Affects all subsequent tool executions (Bash, Read, Write, etc.).\n\n  Without path: show the current working directory.\n\n  Example: /cd /home/raolin/projects\n  Example: /cd ..",
+  cd:      "/cd <path>\n  Change the working directory of cc-node.\n  Affects all subsequent tool executions (Bash, Read, Write, etc.).\n\n  Without path: show the current working directory.\n\n  Example: /cd /home/yourname/projects\n  Example: /cd ..",
 
   allow:   "/allow [tool|all|reset]\n  Manage tool permissions for this session.\n\n  Options:\n    <tool>   — allow a specific tool (e.g. Bash, Write, Read)\n    all      — automatically allow ALL remaining tools for this session\n    reset    — reset to ask mode (ask for each tool)\n    (no arg) — same as /allow all\n\n  When asked to confirm a tool, you can also type:\n    y — allow this once\n    a — allow all for the rest of the session\n\n  Example: /allow Bash\n  Example: /allow all\n  Example: /allow reset",
 
@@ -353,6 +355,7 @@ function parseArgs(argv) {
       case '--verbose': case '-v': args.verbose = true; break
       case '--no-stream': args.noStream = true; break
       case '--stdio': args.stdio = true; break
+      case '--with-notify': args.withNotify = true; break
       case '--version':
         const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'))
         console.log(pkg.version)
@@ -371,6 +374,8 @@ Options:
   --version                 Show version
   -v, --verbose             Verbose mode
   --no-stream               Disable streaming
+  --with-notify             Start built-in channel listener (Telegram)
+                            (replaces cc-notify daemon — no external script needed)
   -h, --help                Show this help
 
 Environment variables:
@@ -575,8 +580,14 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
     rl.prompt()
   }
 
+  // Telegram 双向通道（可选）：tgListener 监听 Telegram 消息，tgChatId 记录回复目标
+  let tgListener = null
+  let tgChatId = null
+  let tgReplyTarget = null
+
   // 处理输入行
-  async function processInputLine(input) {
+  // source: 'cli' 来自终端输入, 'telegram' 来自 Telegram
+  async function processInputLine(input, source = 'cli', tgChatId = null) {
     const trimmed = input.trim()
     if (!trimmed) { showPrompt(); return }
 
@@ -809,8 +820,15 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
       if (engine.costTracker && engine.costTracker.totalApiCalls > 0) {
         console.log(engine.costTracker.formatShort())
       }
+      // 将 AI 回复同步发送到 Telegram（镜像 CLI 显示）
+      if (tgListener?.bot && result?.response) {
+        await sendTelegram(result.response, tgChatId || null)
+      }
     } catch (err) {
       console.error(`\nError: ${err.message}\n`)
+      if (tgListener?.bot) {
+        await sendTelegram(`❌ Error: ${err.message}`, tgChatId || null)
+      }
       if (channelManager.list().length > 0) {
         await channelManager.sendTemplate('error', {
           task: input.slice(0, 80), error: err.message.slice(0, 200),
@@ -818,6 +836,33 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
       }
     }
     showPrompt()
+  }
+
+  // 发送文本到 Telegram（支持分片，>4000 字符自动拆分）
+  async function sendTelegram(text, chatId = null) {
+    try {
+      const target = chatId || tgChatId
+      if (!target) return
+      const MAX_LEN = 4000
+      if (text.length <= MAX_LEN) {
+        await tgListener.bot.sendMessage(target, text, { parseMode: 'HTML' })
+      } else {
+        const parts = []
+        let cur = ''
+        for (const line of text.split('\n')) {
+          if (cur.length + line.length > 3800) { parts.push(cur); cur = line }
+          else { cur += (cur ? '\n' : '') + line }
+        }
+        if (cur) parts.push(cur)
+        for (let i = 0; i < parts.length; i++) {
+          const header = i > 0 ? `📎 (${i + 1}/${parts.length})\n` : ''
+          await tgListener.bot.sendMessage(target, header + parts[i], { parseMode: 'HTML' })
+          await new Promise(r => setTimeout(r, 300))
+        }
+      }
+    } catch (e) {
+      console.error(`[TG] send failed: ${e.message}`)
+    }
   }
 
   // REPL 主循环 — 由 readline 原生处理回显、退格、行回绕与 Enter 提交
@@ -846,6 +891,63 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
     }
   }
   engine.config.readline = rl
+
+  // ============================================================
+  // Telegram 双向通道启动（可选）
+  // 配置了 CC_NODE_CHANNEL_TELEGRAM_TOKEN 或 config 中 telegram 时启用：
+  //  - CLI 的 AI 回复会同步镜像发送到 Telegram
+  //  - Telegram 消息会作为 REPL 输入，与 CLI 共享同一个引擎和对话记忆
+  // ============================================================
+  const tgToken = process.env.CC_NODE_CHANNEL_TELEGRAM_TOKEN || config.get('channels')?.telegram?.token || ''
+  if (tgToken) {
+    try {
+      tgListener = new TelegramListener({
+        channels: {
+          telegram: {
+            token: tgToken,
+            proxy: process.env.CC_NODE_CHANNEL_TELEGRAM_PROXY || config.get('channels')?.telegram?.proxy || '',
+            apiBase: process.env.CC_NODE_CHANNEL_TELEGRAM_API_BASE || config.get('channels')?.telegram?.apiBase || '',
+          },
+        },
+      })
+      tgListener.start(async (msg) => {
+        // Telegram 消息 → 复用 REPL 引擎处理（共享同一份对话记忆）
+        tgChatId = msg.chatId || tgChatId
+        tgReplyTarget = msg.replyTo || null
+        const text = msg.text || msg.callbackData || ''
+        if (!text) return
+        // 命令由 listener 内部处理，普通消息转给引擎
+        if (!text.startsWith('/')) {
+          await processInputLine(text, 'telegram', msg.chatId)
+        }
+      }).catch(e => console.error(`[TG] listener error: ${e.message}`))
+      console.log(`✅ Telegram channel ready (bot ${tgToken.slice(0, 12)}...)`)
+    } catch (e) {
+      console.error(`[TG] init failed: ${e.message}`)
+    }
+  }
+
+  // ============================================================
+  // --with-notify: 内置频道监听器（替代 cc-notify 守护进程）
+  // 当 cc-node 启动时同时启动 Telegram 监听器，
+  // 无需外部 bash 脚本，跨平台（Windows/Linux/macOS）都能用。
+  // ============================================================
+  if (cliArgs.withNotify) {
+    const { startBuiltinListeners } = await import('../channel/notify-daemon.js')
+    // 启动内部的 notify 监听器（不 fork 新进程，直接在当前进程运行）
+    const builtinNotify = await startBuiltinListeners({
+      channels: config.get('channels') || {},
+      defaultChannel: config.get('defaultChannel') || process.env.CC_NODE_CHANNEL_DEFAULT || null,
+      onMessage: async (msg) => {
+        // 来自外部的消息 → 转发到 REPL 引擎
+        const text = msg.text || ''
+        if (text && !text.startsWith('/')) {
+          await processInputLine(text, msg.channel || 'external', msg.chatId)
+        }
+      },
+    })
+    console.log('📡 Built-in channel listeners started (--with-notify)')
+  }
 
   console.log(buildBanner({ model, permissionMode, session, maxTokens: tokenBudget.maxTokens }))
   console.log(`Model: ${model} | Permission: ${permissionMode} | Tools: ${registry.getNames().join(', ')}`)

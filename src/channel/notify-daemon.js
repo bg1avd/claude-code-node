@@ -26,6 +26,7 @@ import {
   mkdirSync, openSync, closeSync,
 } from 'node:fs'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { homedir } from 'node:os'
 import { spawn, execSync } from 'node:child_process'
 import { createConnection } from 'node:net'
@@ -181,12 +182,36 @@ function sendToExistingNode(socketPath, text) {
 function spawnNewNode(ccNodePath, text) {
   return new Promise((resolve) => {
     const timeout = 180000  // 3分钟超时
+    // 用 let 在 setTimeout 之前声明 child，避免 TDZ / 时序问题导致 "child is not defined"
+    let child = null
+    let finished = false
+    const finish = (val) => {
+      if (finished) return
+      finished = true
+      if (timer) { clearTimeout(timer); timer = null }
+      resolve(val)
+    }
     let timer = setTimeout(() => {
-      child.kill()
-      resolve({ type: 'reply', text: '⏰ 执行超时（3 分钟）' })
+      try { if (child && child.kill) child.kill() } catch {}
+      finish({ type: 'reply', text: '⏰ 执行超时（3 分钟）' })
     }, timeout)
     try {
-      const child = spawn(ccNodePath, [text], {
+      // 一次性模式必须显式传 --api-key / --api-base / --model，
+      // 因为 cc-node 的 cli.js 只从命令行参数或 config 读取 apiKey，不读 LLM_API_KEY 环境变量。
+      // 注意：cc-node 的 parseArgs 在遇到第一个非 '-' 参数（prompt）后会跳过后续选项，
+      // 所以选项必须放在 prompt 之前。
+      const args = []
+      const apiKey = process.env.LLM_API_KEY || process.env.DEEPSEEK_API_KEY || process.env.OPENAI_API_KEY || process.env.QWEN_API_KEY || process.env.GLM_API_KEY || process.env.KIMI_API_KEY || ''
+      const apiBase = process.env.LLM_API_BASE || ''
+      // 仅在显式指定时传 --model，否则让 cli.js 使用默认模型，避免硬编码不存在的模型名导致一次性节点失败
+      const model = process.env.CC_NODE_ONESHOT_MODEL || ''
+      if (apiKey) args.push('--api-key', apiKey)
+      if (apiBase) args.push('--api-base', apiBase)
+      if (model) args.push('--model', model)
+      args.push('--no-stream')
+      args.push(text)
+
+      child = spawn(ccNodePath, args, {
         stdio: ['pipe', 'pipe', 'pipe'],
         env: { ...process.env, CC_NODE_ONESHOT: '1' },
         timeout,
@@ -196,25 +221,19 @@ function spawnNewNode(ccNodePath, text) {
       child.stdout.on('data', (d) => (stdout += d.toString()))
       child.stderr.on('data', (d) => (stderr += d.toString()))
       child.on('close', (code) => {
-        clearTimeout(timer)
-        timer = null
         if (stdout.trim()) {
-          resolve({ type: 'reply', text: stdout.trim().slice(0, 4000) })
+          finish({ type: 'reply', text: stdout.trim().slice(0, 4000) })
         } else if (stderr.trim()) {
-          resolve({ type: 'reply', text: `❌ Error: ${stderr.trim().slice(0, 1000)}` })
+          finish({ type: 'reply', text: `❌ Error: ${stderr.trim().slice(0, 1000)}` })
         } else {
-          resolve({ type: 'reply', text: `(completed with code ${code})` })
+          finish({ type: 'reply', text: `(completed with code ${code})` })
         }
       })
       child.on('error', (e) => {
-        clearTimeout(timer)
-        timer = null
-        resolve({ type: 'reply', text: `❌ Failed: ${e.message}` })
+        finish({ type: 'reply', text: `❌ Failed: ${e.message}` })
       })
     } catch (e) {
-      clearTimeout(timer)
-      timer = null
-      resolve({ type: 'reply', text: `❌ Failed: ${e.message}` })
+      finish({ type: 'reply', text: `❌ Failed: ${e.message}` })
     }
   })
 }
@@ -225,6 +244,11 @@ async function routeMessage(text, config) {
     log(`[route] cc-node running → forwarding via socket`)
     try {
       const reply = await sendToExistingNode(nodeInfo.socketPath, text)
+      // 如果 socket 返回的是错误类型（如"引擎正在运行中"），回退到一次性模式
+      if (reply && reply.type === 'error') {
+        log(`[route] socket returned error (${reply.text}) → spawning new one-shot node`)
+        return (await spawnNewNode(config.ccNodePath, text)).text
+      }
       return reply.text || JSON.stringify(reply)
     } catch (e) {
       log(`[route] socket forward failed: ${e.message} → spawning new`)
@@ -821,7 +845,70 @@ async function main() {
   setInterval(() => {}, 60000)
 }
 
-main().catch((err) => {
-  console.error('Fatal error:', err.message)
-  process.exit(1)
-})
+// 仅当 notify-daemon.js 作为主入口直接运行时才启动守护进程。
+// 被 cli.js 通过 import() 引入（--with-notify 模式）时，只导出 startBuiltinListeners，
+// 避免 import 副作用重复启动 HTTP 服务 / QQ 监听器 / PID 文件。
+const isMainEntry = (() => {
+  try {
+    return process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
+  } catch {
+    return false
+  }
+})()
+
+if (isMainEntry) {
+  main().catch((err) => {
+    console.error('Fatal error:', err.message)
+    process.exit(1)
+  })
+}
+
+// ============================================================
+// --with-notify: 内置监听器（由 cli.js 调用，无需 fork 新进程）
+// ============================================================
+
+/**
+ * 在 cc-node 主进程中启动频道监听器（Telegram），
+ * 替代外部 bash 脚本启动 cc-notify 的方式。
+ * 跨平台兼容 — 不依赖 bash / nohup / PID 文件。
+ *
+ * @param {object} opts
+ * @param {object} opts.channels - 频道配置对象
+ * @param {string|null} opts.defaultChannel - 默认频道
+ * @param {function} opts.onMessage - 消息回调 (msg) => void
+ * @returns {Promise<{tgListener: object|null, stop: function}>}
+ */
+export async function startBuiltinListeners(opts = {}) {
+  const { channels = {}, defaultChannel = null, onMessage } = opts
+
+  const config = {
+    channels,
+    defaultChannel: defaultChannel || process.env.CC_NODE_CHANNEL_DEFAULT || null,
+  }
+
+  let tgListener = null
+
+  // 启动 Telegram 监听器
+  if (config.channels.telegram?.token) {
+    try {
+      const { TelegramListener } = await import('./tg-listener.js')
+      tgListener = new TelegramListener(config)
+      if (tgListener.bot) {
+        tgListener.start(async (msg) => {
+          msg.channel = 'telegram'
+          await onMessage(msg)
+        }).catch(e => console.error(`[builtin-notify] TG listener error: ${e.message}`))
+        console.log(`[builtin-notify] ✅ Telegram listener started`)
+      }
+    } catch (e) {
+      console.error(`[builtin-notify] TG init failed: ${e.message}`)
+    }
+  }
+
+  return {
+    tgListener,
+    stop() {
+      tgListener?.stop()
+    },
+  }
+}

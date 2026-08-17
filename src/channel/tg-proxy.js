@@ -35,11 +35,14 @@ export function socks5Connect(proxyHost, proxyPort, targetHost, targetPort, opts
 
     socket.once('connect', async () => {
       try {
+        // 创建持久的字节缓冲读取器，避免多次 readBytes 丢失多余字节
+        const reader = createByteReader(socket)
+
         // Step 1: 握手 — 协商认证方式
         const authMethods = opts.username ? [0x00, 0x02] : [0x00]  // 无认证 + 用户名密码
         socket.write(Buffer.from([0x05, authMethods.length, ...authMethods]))
 
-        const handshake = await readBytes(socket, 2)
+        const handshake = await reader.read(2)
         if (handshake[0] !== 0x05) {
           throw new Error('SOCKS5: 版本不匹配')
         }
@@ -51,7 +54,7 @@ export function socks5Connect(proxyHost, proxyPort, targetHost, targetPort, opts
           const p = Buffer.from(opts.password, 'utf8')
           const authReq = Buffer.from([0x01, u.length, ...u, p.length, ...p])
           socket.write(authReq)
-          const authResp = await readBytes(socket, 2)
+          const authResp = await reader.read(2)
           if (authResp[1] !== 0x00) throw new Error('SOCKS5: 认证失败')
         } else if (handshake[1] !== 0x00) {
           throw new Error('SOCKS5: 代理不支持不需要的认证方式')
@@ -72,7 +75,7 @@ export function socks5Connect(proxyHost, proxyPort, targetHost, targetPort, opts
         const connectReq = Buffer.from([0x05, 0x01, 0x00, hostType, ...addr, ...portBuf])
         socket.write(connectReq)
 
-        const connectResp = await readBytes(socket, 4)
+        const connectResp = await reader.read(4)
         if (connectResp[0] !== 0x05 || connectResp[1] !== 0x00) {
           const errors = { 0x01: '通用错误', 0x02: '不允许', 0x03: '网络不可达', 0x04: '主机不可达', 0x05: '连接被拒', 0x06: 'TTL超时', 0x07: '命令不支持', 0x08: '地址类型不支持' }
           throw new Error(`SOCKS5: 连接失败 — ${errors[connectResp[1]] || `错误码 ${connectResp[1]}`}`)
@@ -80,11 +83,14 @@ export function socks5Connect(proxyHost, proxyPort, targetHost, targetPort, opts
 
         // 读取剩余响应包头（根据地址类型）
         const addrType = connectResp[3]
-        if (addrType === 0x01) await readBytes(socket, 6)  // IPv4 + port
+        if (addrType === 0x01) await reader.read(6)  // IPv4 + port
         else if (addrType === 0x03) {
-          const len = (await readBytes(socket, 1))[0]
-          await readBytes(socket, len + 2)  // hostname + port
-        } else if (addrType === 0x04) await readBytes(socket, 18)  // IPv6 + port
+          const len = (await reader.read(1))[0]
+          await reader.read(len + 2)  // hostname + port
+        } else if (addrType === 0x04) await reader.read(18)  // IPv6 + port
+
+        // 清理 reader 的监听器，确保隧道建立后数据完整交给调用方
+        reader.detach()
 
         clearTimeout(timeout)
         resolve(socket)
@@ -100,6 +106,85 @@ export function socks5Connect(proxyHost, proxyPort, targetHost, targetPort, opts
       reject(err)
     })
   })
+}
+
+/**
+ * 创建持久的字节缓冲读取器。
+ *
+ * 原实现每次 readBytes 都重新注册 'data' 监听器，当 SOCKS5 代理
+ * 一次性返回多段响应时，首个 readBytes 会消费掉多余字节并丢弃，
+ * 导致后续 readBytes 永远等待，最终触发超时。此读取器用统一的
+ * 内部缓冲队列累积所有到达的字节，保证多次读取之间字节不丢失。
+ *
+ * @param {import('node:net').Socket} socket
+ */
+function createByteReader(socket) {
+  let buffer = Buffer.alloc(0)
+  let closed = false
+  const waiters = []
+
+  const onData = (chunk) => {
+    buffer = Buffer.concat([buffer, chunk])
+    flush()
+  }
+
+  const onError = () => {
+    closed = true
+    flush()
+  }
+
+  const onEnd = () => {
+    closed = true
+    flush()
+  }
+
+  socket.on('data', onData)
+  socket.once('error', onError)
+  socket.once('end', onEnd)
+
+  function flush() {
+    while (waiters.length > 0) {
+      const waiter = waiters[0]
+      if (buffer.length >= waiter.n) {
+        waiters.shift()
+        const out = buffer.slice(0, waiter.n)
+        buffer = buffer.slice(waiter.n)
+        waiter.resolve(out)
+      } else {
+        break
+      }
+    }
+    // 所有等待者都已满足，但连接已关闭且字节不足 -> 报错
+    if (closed && waiters.length > 0 && buffer.length === 0) {
+      const waiter = waiters.shift()
+      waiter.reject(new Error('SOCKS5: 连接意外关闭'))
+    }
+  }
+
+  return {
+    read(n) {
+      return new Promise((resolve, reject) => {
+        if (n === 0) return resolve(Buffer.alloc(0))
+        // 先检查已有缓冲
+        if (buffer.length >= n) {
+          const out = buffer.slice(0, n)
+          buffer = buffer.slice(n)
+          return resolve(out)
+        }
+        // 连接已关闭且缓冲不足
+        if (closed) {
+          return reject(new Error('SOCKS5: 连接意外关闭'))
+        }
+        waiters.push({ n, resolve, reject })
+        flush()
+      })
+    },
+    detach() {
+      socket.removeListener('data', onData)
+      socket.removeListener('error', onError)
+      socket.removeListener('end', onEnd)
+    },
+  }
 }
 
 /**
@@ -171,8 +256,18 @@ export async function fetchViaSocks5(url, options = {}, proxyAddr) {
   // 构建 HTTP 请求
   const path = parsedUrl.pathname + parsedUrl.search
   const headers = Object.entries(options.headers || {}).map(([k, v]) => `${k}: ${v}`).join('\r\n')
+  // body 必须是字符串/Buffer；FormData/Blob 等 multipart 正文当前不支持
+  // （仅用于 Telegram Bot API 的 JSON 请求），遇到非字符串 body 给出清晰错误而非崩溃。
   const body = options.body || ''
-  const req = `${options.method || 'GET'} ${path} HTTP/1.1\r\nHost: ${host}\r\n${headers ? headers + '\r\n' : ''}Content-Length: ${body.length}\r\nConnection: close\r\n\r\n${body}`
+  if (typeof body !== 'string' && !Buffer.isBuffer(body)) {
+    socket.destroy()
+    return Promise.reject(new Error('fetchViaSocks5: 仅支持 string/Buffer 请求体（不支持 FormData 等 multipart）'))
+  }
+  // 注意：Content-Length 必须用 UTF-8 字节数，不能用字符串字符数，
+  // 否则包含中文/emoji 时会导致服务器读不完整请求体。
+  const bodyLen = Buffer.byteLength(body, 'utf8')
+  const head = `${options.method || 'GET'} ${path} HTTP/1.1\r\nHost: ${host}\r\n${headers ? headers + '\r\n' : ''}Content-Length: ${bodyLen}\r\nConnection: close\r\n\r\n`
+  const reqBuf = Buffer.concat([Buffer.from(head, 'utf8'), Buffer.isBuffer(body) ? body : Buffer.from(body, 'utf8')])
 
   return new Promise((resolve, reject) => {
     let responseData = ''
@@ -181,7 +276,7 @@ export async function fetchViaSocks5(url, options = {}, proxyAddr) {
       reject(new Error('HTTP request timeout'))
     }, 30000)
 
-    socket.write(req)
+    socket.write(reqBuf)
     socket.on('data', (chunk) => {
       responseData += chunk.toString()
     })
@@ -210,27 +305,5 @@ export async function fetchViaSocks5(url, options = {}, proxyAddr) {
       clearTimeout(timeout)
       reject(err)
     })
-  })
-}
-
-/** 从 socket 读取指定字节数 */
-function readBytes(socket, n) {
-  return new Promise((resolve, reject) => {
-    if (n === 0) return resolve(Buffer.alloc(0))
-    let buf = Buffer.alloc(0)
-    const onData = (chunk) => {
-      buf = Buffer.concat([buf, chunk])
-      if (buf.length >= n) {
-        socket.removeListener('data', onData)
-        resolve(buf.slice(0, n))
-      }
-    }
-    socket.on('data', onData)
-    socket.once('error', reject)
-    // 处理已经缓冲的数据
-    if (buf.length >= n) {
-      socket.removeListener('data', onData)
-      resolve(buf.slice(0, n))
-    }
   })
 }

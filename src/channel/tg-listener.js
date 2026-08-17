@@ -91,7 +91,7 @@ class RateLimiter {
 // Telegram Bot 客户端
 // ============================================================
 
-class TelegramBotClient {
+export class TelegramBotClient {
   constructor(token, opts = {}) {
     this.token = token
     this.apiBase = opts.apiBase || API_BASE(token)
