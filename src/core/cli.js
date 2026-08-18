@@ -1008,6 +1008,9 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
         }
       },
     })
+    // 关键：把 startBuiltinListeners 内置监听器的 tgListener 赋给全局 tgListener，
+    // 否则 onConfirmTool 的 tgListener?.bot 恒为 false，权限确认不会推送 Telegram。
+    if (builtinNotify?.tgListener) tgListener = builtinNotify.tgListener
     console.log('📡 Built-in channel listeners started (--with-notify)')
   }
 
