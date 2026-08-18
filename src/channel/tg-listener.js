@@ -118,7 +118,9 @@ export class TelegramBotClient {
     const body = {
       chat_id: chatId,
       text: text.slice(0, 4096),  // Telegram 消息最大 4096 字符
-      parse_mode: parseMode || 'HTML',
+      // parseMode: null 表示降级为纯文本（去掉 parse_mode 字段）；
+      // 否则默认 HTML，或用显式指定的 parseMode。
+      ...(parseMode === null ? {} : { parse_mode: parseMode || 'HTML' }),
       disable_notification: silent || false,
       disable_web_page_preview: disableWebPreview ?? true,
     }
@@ -139,9 +141,9 @@ export class TelegramBotClient {
         await new Promise(r => setTimeout(r, retryAfter * 1000))
         return this.sendMessage(chatId, text, options)
       }
-      // 400 可能是消息太长或格式问题 — 降级为纯文本
+      // 400 可能是消息太长或格式问题 — 降级为纯文本（parseMode: null 去掉 parse_mode）
       if (data.error_code === 400 && parseMode) {
-        return this.sendMessage(chatId, text, { ...options, parseMode: undefined })
+        return this.sendMessage(chatId, text, { ...options, parseMode: null })
       }
       throw new Error(`Telegram API ${data.error_code}: ${data.description?.slice(0, 200) || 'unknown'}`)
     }

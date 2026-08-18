@@ -694,9 +694,9 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
             modelList.forEach((id, i) => {
               console.log(`  ${(i + 1).toString().padStart(2)}. ${id}`)
             })
-            // 来自 Telegram：直接列出，不等待 CLI 交互（用 /model <名字或编号> 切换）
+            // 来自 Telegram：直接列出，不等待 CLI 交互（用 /model 名字或编号 切换）
             if (source === 'telegram') {
-              console.log('\nℹ️ 用 /model <名字或编号> 切换模型')
+              console.log('\nℹ️ 用 /model 名字或编号 切换模型')
               break
             }
             console.log('\nType a number to select, or model name directly:')
