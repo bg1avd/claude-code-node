@@ -601,6 +601,8 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
   let pendingConfirm = null
   // 最近一次 /models 拉取的模型列表（供 /model <编号> 选择）
   let modelList = []
+  // /models 从 Telegram 发出后，等待用户回复编号/名字来选择模型
+  let pendingModelSelect = false
 
   // 处理输入行
   // source: 'cli' 来自终端输入, 'telegram' 来自 Telegram
@@ -635,7 +637,31 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
       return
     }
 
+    // /models 从 Telegram 发出后，用户回复编号或名字来选择模型
+    if (source === 'telegram' && pendingModelSelect && !trimmed.startsWith('/')) {
+      const num = parseInt(trimmed, 10)
+      let selected = ''
+      if (!isNaN(num) && num >= 1 && num <= modelList.length) {
+        selected = modelList[num - 1]
+      } else if (modelList.includes(trimmed)) {
+        selected = trimmed
+      }
+      // 无论是否是有效选择，都结束"等待选择"状态
+      pendingModelSelect = false
+      if (selected) {
+        engine.config.model = selected
+        console.log(`Model → ${selected}`)
+        if (tgListener?.bot) {
+          await sendTelegram(`✅ 已切换模型 → ${selected}`, tgChatId || null).catch(() => {})
+        }
+        return
+      }
+      // 不是有效选择 → 当作普通消息继续处理
+    }
+
     if (trimmed.startsWith('/')) {
+      // 用户输入了命令，取消可能存在的"等待模型选择"状态
+      pendingModelSelect = false
       // 来自 Telegram 的命令：捕获 console 输出并回发到 Telegram
       const isTgCmd = source === 'telegram' && tgListener?.bot
       let tgOut = ''
@@ -696,7 +722,8 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
             })
             // 来自 Telegram：直接列出，不等待 CLI 交互（用 /model 名字或编号 切换）
             if (source === 'telegram') {
-              console.log('\nℹ️ 用 /model 名字或编号 切换模型')
+              console.log('\nℹ️ 直接回复编号或模型名即可切换')
+              pendingModelSelect = true  // 等待用户回复编号/名字来选择模型
               break
             }
             console.log('\nType a number to select, or model name directly:')
