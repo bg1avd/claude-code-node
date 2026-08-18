@@ -907,7 +907,9 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
   //  - Telegram 消息会作为 REPL 输入，与 CLI 共享同一个引擎和对话记忆
   // ============================================================
   const tgToken = process.env.CC_NODE_CHANNEL_TELEGRAM_TOKEN || config.get('channels')?.telegram?.token || ''
-  if (tgToken) {
+  // 关键修复: 使用 --with-notify 时，由 startBuiltinListeners 统一启动 Telegram 监听器，
+  // 这里不能再独立启动一个，否则同一 token 会有两个 getUpdates 长轮询 → Telegram 报 HTTP 409 Conflict。
+  if (tgToken && !cliArgs.withNotify) {
     try {
       tgListener = new TelegramListener({
         channels: {
