@@ -385,14 +385,15 @@ export class TelegramListener {
     }
   }
 
-  /** 将消息加入串行处理队列（不阻塞轮询循环） */
+  /** 异步处理一条消息（不串行排队，避免权限确认死锁） */
   _enqueueMessage(msg) {
-    this._msgQueue = this._msgQueue.then(async () => {
-      try {
-        await this._handleMessage(msg)
-      } catch (e) {
-        log(`[TG] handle error: ${e.message}`)
-      }
+    // 关键：不能串行排队等待前一条消息处理完。
+    // 若第一条消息触发权限确认而挂起（await pendingConfirm），
+    // 后续的权限确认回复 a 会排在后面积压，造成死锁（a 永远处理不到）。
+    // 因此每条消息独立异步处理：权限确认回复能立即响应，普通消息由
+    // processInputLine 内部处理"引擎忙"的情况。
+    this._handleMessage(msg).catch((e) => {
+      log(`[TG] handle error: ${e.message}`)
     })
   }
 

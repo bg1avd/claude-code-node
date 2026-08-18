@@ -855,6 +855,16 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
       return
     }
 
+    // 发送到引擎 — 引擎忙（如正在处理上一条消息）时，提示而不是崩溃/吞掉
+    if (engine.state.isRunning) {
+      const busyMsg = '⏳ 引擎正在处理其他任务，请稍候或输入 /stop 停止当前任务。'
+      console.log(busyMsg)
+      if (source === 'telegram' && tgListener?.bot) {
+        await sendTelegram(busyMsg, tgChatId || null).catch(() => {})
+      }
+      return
+    }
+
     // 发送到引擎
     try {
       const result = await processInput(input)
