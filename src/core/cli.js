@@ -599,6 +599,8 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
   let currentSource = 'cli'
   // 等待中的 Telegram 权限确认（resolve 回调）— 远程用户回复 y/n/a 时响应
   let pendingConfirm = null
+  // 最近一次 /models 拉取的模型列表（供 /model <编号> 选择）
+  let modelList = []
 
   // 处理输入行
   // source: 'cli' 来自终端输入, 'telegram' 来自 Telegram
@@ -634,6 +636,15 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
     }
 
     if (trimmed.startsWith('/')) {
+      // 来自 Telegram 的命令：捕获 console 输出并回发到 Telegram
+      const isTgCmd = source === 'telegram' && tgListener?.bot
+      let tgOut = ''
+      const origLog = console.log
+      if (isTgCmd) {
+        tgOut = ''
+        console.log = (...args) => { tgOut += args.map(String).join(' ') + '\n'; origLog(...args) }
+      }
+      try {
       const [cmd, ...rest] = trimmed.slice(1).split(' ')
       switch (cmd) {
         case 'help':
@@ -646,7 +657,16 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
           }
           break
         case 'model':
-          if (rest[0]) { engine.config.model = rest.join(' '); console.log(`Model → ${engine.config.model}`) }
+          // /model <名字或编号> — 支持用 /models 列表里的编号切换
+          if (rest[0]) {
+            const num = parseInt(rest[0], 10)
+            if (!isNaN(num) && modelList.length > 0 && num >= 1 && num <= modelList.length) {
+              engine.config.model = modelList[num - 1]
+            } else {
+              engine.config.model = rest.join(' ')
+            }
+            console.log(`Model → ${engine.config.model}`)
+          }
           else console.log(`Model: ${engine.config.model}`)
           break
         case 'models': {
@@ -668,17 +688,23 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
             const data = await res.json()
             const models = data.data || []
             if (models.length === 0) { console.log('No models returned'); break }
+            // 记录模型列表，供 /model <编号> 选择
+            modelList = models.map(m => m.id || m)
             console.log(`\nAvailable models (${models.length}):`)
-            models.forEach((m, i) => {
-              const id = m.id || m
+            modelList.forEach((id, i) => {
               console.log(`  ${(i + 1).toString().padStart(2)}. ${id}`)
             })
+            // 来自 Telegram：直接列出，不等待 CLI 交互（用 /model <名字或编号> 切换）
+            if (source === 'telegram') {
+              console.log('\nℹ️ 用 /model <名字或编号> 切换模型')
+              break
+            }
             console.log('\nType a number to select, or model name directly:')
             const answer = await new Promise(resolve => rl.question('> ', resolve))
             const num = parseInt(answer, 10)
             let selected
-            if (!isNaN(num) && num >= 1 && num <= models.length) {
-              selected = models[num - 1].id || models[num - 1]
+            if (!isNaN(num) && num >= 1 && num <= modelList.length) {
+              selected = modelList[num - 1]
             } else if (answer.trim()) {
               selected = answer.trim()
             }
@@ -850,6 +876,13 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
           process.exit(0)
         default:
           console.log(`Unknown command: /${cmd}. Type /help for available commands.`)
+      }
+      } finally {
+        // 恢复 console.log 并把命令输出回发到 Telegram
+        if (isTgCmd) {
+          console.log = origLog
+          if (tgOut.trim()) await sendTelegram(tgOut.trim(), tgChatId || null)
+        }
       }
       showPrompt()
       return
@@ -1068,10 +1101,10 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
         tgReplyTarget = msg.replyTo || null
         const text = msg.text || msg.callbackData || ''
         if (!text) return
-        // 命令由 listener 内部处理，普通消息转给引擎
-        if (!text.startsWith('/')) {
-          await processInputLine(text, 'telegram', msg.chatId)
-        }
+        // 普通消息和 / 命令都转给引擎（/命令由 processInputLine 处理）
+        // 注意：tg-listener 已内部处理 /ping /status /run 等自己的命令，
+        // 只有未识别的 / 命令（如 /models /stop /resume）才会到达这里。
+        await processInputLine(text, 'telegram', msg.chatId)
       }).catch(e => console.error(`[TG] listener error: ${e.message}`))
       console.log(`✅ Telegram channel ready (bot ${tgToken.slice(0, 12)}...)`)
     } catch (e) {
@@ -1094,9 +1127,9 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
         // 记录全局回复目标，供权限确认 / AI 回复镜像发送到 Telegram 使用
         if (msg.chatId) tgChatId = msg.chatId
         if (msg.replyTo) tgReplyTarget = msg.replyTo
-        // 来自外部的消息 → 转发到 REPL 引擎
+        // 来自外部的消息 → 转发到 REPL 引擎（含 / 命令，由 processInputLine 处理）
         const text = msg.text || ''
-        if (text && !text.startsWith('/')) {
+        if (text) {
           await processInputLine(text, msg.channel || 'external', msg.chatId)
         }
       },
