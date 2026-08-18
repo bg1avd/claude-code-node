@@ -592,12 +592,42 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
   let tgListener = null
   let tgChatId = null
   let tgReplyTarget = null
+  // 当前正在处理的请求来源（'cli' | 'telegram'）— 用于权限确认等按来源分支的逻辑
+  let currentSource = 'cli'
+  // 等待中的 Telegram 权限确认（resolve 回调）— 远程用户回复 y/n/a 时响应
+  let pendingConfirm = null
 
   // 处理输入行
   // source: 'cli' 来自终端输入, 'telegram' 来自 Telegram
   async function processInputLine(input, source = 'cli', tgChatId = null) {
     const trimmed = input.trim()
     if (!trimmed) { showPrompt(); return }
+
+    // 记录当前请求来源，供 onConfirmTool 等按来源分支的逻辑使用
+    currentSource = source
+
+    // 关键：来自 Telegram 的消息，如果当前正在等待远程权限确认（pendingConfirm），
+    // 则把它当作确认回复（y/n/a）处理，而不是当作新的 REPL 输入。
+    if (source === 'telegram' && pendingConfirm) {
+      const confirm = pendingConfirm
+      pendingConfirm = null
+      const a = trimmed.toLowerCase()
+      if (a === 'a') {
+        try { engine.permissionChecker.allowAllForSession() } catch {}
+        confirm(true)
+      } else if (a === 'y') {
+        confirm(true)
+      } else if (a === 'n') {
+        confirm(false)
+      } else {
+        // 不是 y/n/a，忽略这次（不打断确认等待），但也可能是误发，继续等待
+        pendingConfirm = confirm
+        if (tgListener?.bot) {
+          await sendTelegram('⚠️ 请回复 y（允许一次）/ n（拒绝）/ a（本会话全部允许）', tgChatId || null).catch(() => {})
+        }
+      }
+      return
+    }
 
     if (trimmed.startsWith('/')) {
       const [cmd, ...rest] = trimmed.slice(1).split(' ')
@@ -885,6 +915,25 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
       if (engine.permissionChecker.sessionAllowAll) return true
 
       const snippet = JSON.stringify(input).slice(0, 120) || '(no params)'
+
+      // Telegram 远程模式：把权限确认推送到 Telegram，等待远程用户回复 y/n/a
+      if (currentSource === 'telegram' && tgListener?.bot) {
+        const promptText = `⚠️  需要工具权限\n工具: ${toolName}\n输入: ${snippet}\n\n请回复：\ny = 允许一次\nn = 拒绝\na = 本会话全部允许`
+        await sendTelegram(promptText, null).catch(() => {})
+        return new Promise((resolve) => {
+          // 60 秒内未回复则自动拒绝，避免远程确认永久挂起阻塞对话
+          const timer = setTimeout(() => {
+            if (pendingConfirm === resolve) pendingConfirm = null
+            resolve(false)
+          }, 60000)
+          pendingConfirm = (val) => {
+            clearTimeout(timer)
+            resolve(val)
+          }
+        })
+      }
+
+      // 本地 CLI：用终端交互确认
       return new Promise((resolve) => {
         rl.question(`\n⚠️  Allow tool "${toolName}"?\n   Input: ${snippet}\n   (y/N/a) a=all session `, (answer) => {
           const a = answer.toLowerCase()
