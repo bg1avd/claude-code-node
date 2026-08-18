@@ -3,6 +3,7 @@
  * 对应原版: src/tools/BashTool/
  */
 import { spawn } from 'child_process'
+import { existsSync } from 'node:fs'
 import { ToolDef } from '../types/index.js'
 import { checkBashSafety } from '../security/bash-guard.js'
 
@@ -51,8 +52,35 @@ Usage:
     }
 
     return new Promise((resolve, reject) => {
-      const shell = process.env.SHELL || '/bin/bash'
-      const proc = spawn(shell, ['-c', command], {
+      // 跨平台 shell 选择：
+      // - Windows: 优先用 Git Bash（如已安装），否则用 cmd.exe /c
+      // - 其他平台: 用 SHELL 环境变量或默认 /bin/bash
+      const isWindows = process.platform === 'win32'
+      let shell, shellArgs
+      if (isWindows) {
+        // 检测 Git Bash 是否可用
+        const gitBashCandidates = [
+          process.env.GIT_BASH,
+          'C:\\Program Files\\Git\\bin\\bash.exe',
+          'C:\\Program Files (x86)\\Git\\bin\\bash.exe',
+        ].filter(Boolean)
+        let gitBash = null
+        try {
+          gitBash = gitBashCandidates.find((p) => existsSync(p)) || null
+        } catch {}
+        if (gitBash) {
+          shell = gitBash
+          shellArgs = ['-c', command]
+        } else {
+          // 无 Git Bash → 用 cmd.exe
+          shell = process.env.ComSpec || 'cmd.exe'
+          shellArgs = ['/c', command]
+        }
+      } else {
+        shell = process.env.SHELL || '/bin/bash'
+        shellArgs = ['-c', command]
+      }
+      const proc = spawn(shell, shellArgs, {
         cwd,
         env: { ...process.env, ...extraEnv },
         stdio: ['pipe', 'pipe', 'pipe'],
