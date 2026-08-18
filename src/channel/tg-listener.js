@@ -273,6 +273,8 @@ export class TelegramListener {
     this._pollTimer = null
     this._retryDelay = 1000
     this.maxRetryDelay = 30000
+    this._lastPollError = null      // 最近一次轮询错误消息（用于去抖刷屏）
+    this._lastPollErrorAt = 0       // 最近一次轮询错误时间戳
     this.conversations = new ConversationState()
     this._onMessage = null
     this._handlers = {}
@@ -323,6 +325,9 @@ export class TelegramListener {
         const res = await this._fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          // 长轮询本身最多等 30s（Telegram API 参数），HTTP 层超时必须更长，
+          // 否则代理路径（fetchViaSocks5）30s 硬超时会误杀长轮询 → HTTP request timeout 刷屏。
+          timeout: 60000,
           body: JSON.stringify({
             offset: this.lastUpdateId + 1,
             timeout: 30,
@@ -360,7 +365,17 @@ export class TelegramListener {
         this._retryDelay = 1000
 
       } catch (e) {
-        log(`[TG] Poll error: ${e.message} (retry in ${this._retryDelay}ms)`)
+        // 错误去抖：连续相同的错误（如长轮询超时）只在首次/状态变化时打印，
+        // 避免 AI 处理长任务时 getUpdates 空转超时不断刷屏。
+        const msg = e.message || 'unknown'
+        const now = Date.now()
+        const isSame = msg === this._lastPollError
+        const isRecent = (now - (this._lastPollErrorAt || 0)) < 60000
+        if (!isSame || !isRecent) {
+          log(`[TG] Poll error: ${msg} (retry in ${this._retryDelay}ms)`)
+          this._lastPollError = msg
+          this._lastPollErrorAt = now
+        }
         await this._sleep(this._retryDelay)
         this._retryDelay = Math.min(this._retryDelay * 2, this.maxRetryDelay)
       }

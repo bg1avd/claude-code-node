@@ -271,10 +271,13 @@ export async function fetchViaSocks5(url, options = {}, proxyAddr) {
 
   return new Promise((resolve, reject) => {
     let responseData = ''
+    // 超时可配置（options.timeout，毫秒），默认 30s。
+    // Telegram getUpdates 是长轮询（最多等 30s），必须传更大的超时避免误判超时。
+    const timeoutMs = options.timeout || 30000
     const timeout = setTimeout(() => {
       socket.destroy()
       reject(new Error('HTTP request timeout'))
-    }, 30000)
+    }, timeoutMs)
 
     socket.write(reqBuf)
     socket.on('data', (chunk) => {
