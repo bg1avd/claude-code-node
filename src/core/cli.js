@@ -998,6 +998,9 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
       channels: config.get('channels') || {},
       defaultChannel: config.get('defaultChannel') || process.env.CC_NODE_CHANNEL_DEFAULT || null,
       onMessage: async (msg) => {
+        // 记录全局回复目标，供权限确认 / AI 回复镜像发送到 Telegram 使用
+        if (msg.chatId) tgChatId = msg.chatId
+        if (msg.replyTo) tgReplyTarget = msg.replyTo
         // 来自外部的消息 → 转发到 REPL 引擎
         const text = msg.text || ''
         if (text && !text.startsWith('/')) {
