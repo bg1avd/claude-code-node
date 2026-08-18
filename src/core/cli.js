@@ -281,6 +281,7 @@ Commands:
   /session       — Show session info
   /sessions      — List all sessions
   /clear         — Clear conversation
+  /stop          — Stop current AI work (when stuck/long)
   /config KEY    — Show config value
   /budget        — Show token budget
   /channel CMD   — Manage notification channels (list|send|test)
@@ -314,6 +315,8 @@ const DETAILED_HELP = {
   resume:  "/resume <session-id>\n  Restore a saved conversation by session ID.\n  Session ID can be the full ID or the numeric index from /sessions list.\n\n  Example: /resume session-1779605332906-52da0706986efa67\n  Example: /resume 1 (resume the first session in the list)",
 
   clear:  "/clear\n  Clear the current conversation context.\n  Starts a fresh session. Previous messages are not sent to the API anymore.\n\n  Note: Does not delete saved sessions.",
+
+  stop:  "/stop\n  Stop the currently running AI work.\n  Use when the AI appears stuck or takes too long to respond.\n  Sends an abort signal to interrupt the current task.\n  After stopping, you can issue a new command.",
 
   config:  "/config [key]\n  Without key: show the entire config as JSON.\n  With a key path: show the value for that specific path.\n\n  Example: /config\n  Example: /config model",
 
@@ -749,6 +752,15 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
           engine.reset()
           session = await sessionManager.create()
           console.log('Conversation cleared')
+          break
+        case 'stop':
+          // 停止当前正在运行的 AI 工作（如卡死 / 长时间无响应时）
+          if (engine.state.isRunning) {
+            engine.abort()
+            console.log('⏹️  已发送停止信号，正在中止当前工作...')
+          } else {
+            console.log('（当前没有正在运行的任务）')
+          }
           break
         case 'config':
           if (rest[0]) {

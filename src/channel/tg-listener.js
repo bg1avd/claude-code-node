@@ -419,8 +419,11 @@ export class TelegramListener {
       if (reply) {
         // 如果回复很长，分多条发送
         await this._sendLongMessage(chatId, reply, { replyTo: msg.message_id })
+        return
       }
-      return
+      // _handleCommand 返回 null = 未知命令（如 /stop、/resume 等）
+      // 需要转发给 cc-node 的 processInputLine 处理，不能吞掉。
+      // 落到下方普通消息分支继续转发。
     }
 
     // 处理普通消息 — 转发给 cc-node
