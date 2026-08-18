@@ -15,26 +15,84 @@
 
 import { ToolDef } from '../types/index.js'
 import { TelegramBotClient } from '../channel/tg-listener.js'
+import { readFileSync, statSync } from 'fs'
+import { homedir } from 'os'
+import { join } from 'path'
 
 const API_BASE = (token) => `https://api.telegram.org/bot${token}`
 
-/** 读取配置 */
-function getToken() {
-  return process.env.CC_NODE_CHANNEL_TELEGRAM_TOKEN || ''
+/**
+ * 读取 Telegram 配置（环境变量优先，其次 config.json 的 channels.telegram）
+ *
+ * 配置优先级：
+ *   1. 环境变量 CC_NODE_CHANNEL_TELEGRAM_*
+ *   2. 用户级 ~/.claude-code/config.json → channels.telegram
+ *   3. 项目级 .claude-code/config.json → channels.telegram（覆盖用户级）
+ */
+let _cachedTgConfig = null
+let _cachedTgConfigMtime = null
+
+function loadTgConfigFromFile() {
+  const files = [
+    join(homedir(), '.claude-code/config.json'),   // 用户级
+    '.claude-code/config.json',                      // 项目级（覆盖用户级）
+  ]
+  let merged = {}
+  for (const file of files) {
+    try {
+      const raw = readFileSync(file, 'utf-8')
+      const data = JSON.parse(raw)
+      if (data?.channels?.telegram) {
+        merged = { ...merged, ...data.channels.telegram }
+      }
+    } catch { /* 文件不存在或解析失败则跳过 */ }
+  }
+  return merged
 }
 
+/** 读取 Telegram 配置（带缓存，文件 mtime 变化自动失效） */
+function getTgConfig() {
+  const userFile = join(homedir(), '.claude-code/config.json')
+  const projectFile = '.claude-code/config.json'
+  let mtimeKey = ''
+  for (const f of [userFile, projectFile]) {
+    try { mtimeKey += statSync(f).mtimeMs } catch {}
+  }
+  if (_cachedTgConfigMtime !== mtimeKey) {
+    _cachedTgConfig = loadTgConfigFromFile()
+    _cachedTgConfigMtime = mtimeKey
+  }
+  return _cachedTgConfig
+}
+
+/** 读取 token（环境变量优先，其次 config.json） */
+function getToken() {
+  return process.env.CC_NODE_CHANNEL_TELEGRAM_TOKEN || getTgConfig().token || ''
+}
+
+/** 读取默认聊天 ID（环境变量优先，其次 config.json） */
 function getDefaultChatId() {
-  return process.env.CC_NODE_CHANNEL_TELEGRAM_CHAT_ID || ''
+  return process.env.CC_NODE_CHANNEL_TELEGRAM_CHAT_ID || getTgConfig().chatId || ''
+}
+
+/** 读取代理（环境变量优先，其次 config.json） */
+function getProxy() {
+  return process.env.CC_NODE_CHANNEL_TELEGRAM_PROXY || getTgConfig().proxy || ''
+}
+
+/** 读取 API Base（环境变量优先，其次 config.json） */
+function getApiBase(token) {
+  return process.env.CC_NODE_CHANNEL_TELEGRAM_API_BASE || getTgConfig().apiBase || API_BASE(token)
 }
 
 /** 创建 TelegramBotClient 实例 */
 function getClient() {
   const token = getToken()
   if (!token) {
-    throw new Error('未配置 Telegram Token（请设置 CC_NODE_CHANNEL_TELEGRAM_TOKEN）')
+    throw new Error('未配置 Telegram Token（请设置 CC_NODE_CHANNEL_TELEGRAM_TOKEN 或 config.json 的 channels.telegram.token）')
   }
-  const proxy = process.env.CC_NODE_CHANNEL_TELEGRAM_PROXY || ''
-  const apiBase = process.env.CC_NODE_CHANNEL_TELEGRAM_API_BASE || API_BASE(token)
+  const proxy = getProxy()
+  const apiBase = getApiBase(token)
   return new TelegramBotClient(token, { proxy, apiBase })
 }
 
@@ -93,7 +151,7 @@ async function sendMedia(args) {
 
   const client = getClient()
   const token = getToken()
-  const apiBase = client.apiBase || API_BASE(token)
+  const apiBase = client.apiBase || getApiBase(token)
 
   // 检测文件类型
   const ext = absPath.split('.').pop().toLowerCase()
@@ -156,7 +214,7 @@ async function channelApi(args) {
 
   const client = getClient()
   const token = getToken()
-  const apiBase = client.apiBase || API_BASE(token)
+  const apiBase = client.apiBase || getApiBase(token)
 
   const url = new URL(apiBase + (path.startsWith('/') ? path : '/' + path))
   for (const [k, v] of Object.entries(query)) url.searchParams.append(k, String(v))

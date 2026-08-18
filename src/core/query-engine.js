@@ -413,9 +413,11 @@ export class QueryEngine {
           }
           currentText += event.text
         } else if (event.type === 'reasoning') {
-          // 推理内容（thinking）同样支持回调
+          // 推理内容（thinking）同样支持回调；无 onDelta 时在终端展示思维链
           if (typeof this.config.onDelta === 'function') {
             this.config.onDelta({ type: 'reasoning', text: event.text })
+          } else if (this.config.verbose) {
+            process.stdout.write(event.text)
           }
         } else if (event.type === 'tool_use') {
           // 收集工具调用
@@ -426,6 +428,7 @@ export class QueryEngine {
           ))
         } else if (event.type === 'done') {
           result.content = event.result.content || currentText
+          result.reasoningContent = event.result.reasoningContent || result.reasoningContent
           result.toolCalls = event.result.toolCalls?.map(tc =>
             new ToolCall(tc.id, tc.name, tc.input)
           ) || result.toolCalls

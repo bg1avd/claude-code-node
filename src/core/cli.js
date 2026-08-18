@@ -867,7 +867,12 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
 
     // 发送到引擎
     try {
+      // 有 Telegram 通道时，流式推送思维链到当前回复目标，避免远程"以为没回应"
+      const streamTarget = (source === 'telegram') ? (tgChatId || null) : (tgListener?.bot ? tgChatId || null : null)
+      if (streamTarget) tgThinkingStart(streamTarget)
       const result = await processInput(input)
+      // 处理结束，清掉思维链流（最终回复随后发送）
+      tgThinkingEnd()
       console.log()
       console.log(result.response)
       console.log()
@@ -886,6 +891,7 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
         await sendTelegram(result.response, tgChatId || null)
       }
     } catch (err) {
+      tgThinkingEnd()
       console.error(`\nError: ${err.message}\n`)
       if (tgListener?.bot) {
         await sendTelegram(`❌ Error: ${err.message}`, tgChatId || null)
@@ -924,6 +930,63 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
     } catch (e) {
       console.error(`[TG] send failed: ${e.message}`)
     }
+  }
+
+  // ============================================================
+  // 思维链流式推送 → Telegram
+  // 把引擎 onDelta 产出的 reasoning（思考过程）实时推送到 Telegram，
+  // 让远程用户看到 AI 正在工作，而不是"以为没回应"。
+  // 采用节流 + 编辑同一消息的方式，避免刷屏和触发速率限制。
+  // ============================================================
+  const tgThinking = { buffer: '', timer: null, target: null, lastMsgId: null }
+
+  function tgThinkingStart(target) {
+    tgThinking.target = target || null
+    tgThinking.buffer = ''
+    tgThinking.lastMsgId = null
+    // 先发送 typing 动作，让 Telegram 立即显示"正在输入"
+    if (tgListener?.bot && tgThinking.target) {
+      tgListener.bot.sendChatAction(tgThinking.target, 'typing').catch(() => {})
+    }
+  }
+
+  function tgThinkingPush(text) {
+    if (!text || !tgListener?.bot || !tgThinking.target) return
+    tgThinking.buffer += text
+    // 只保留最近 8000 字符，避免无限增长
+    if (tgThinking.buffer.length > 8000) tgThinking.buffer = tgThinking.buffer.slice(-8000)
+    // 节流：2 秒内最多刷新一次
+    if (tgThinking.timer) clearTimeout(tgThinking.timer)
+    tgThinking.timer = setTimeout(() => tgThinkingFlush(), 2000)
+  }
+
+  async function tgThinkingFlush() {
+    if (tgThinking.timer) { clearTimeout(tgThinking.timer); tgThinking.timer = null }
+    if (!tgListener?.bot || !tgThinking.target || !tgThinking.buffer) return
+    const target = tgThinking.target
+    const body = `🧠 思考中…\n\n${tgThinking.buffer.slice(-3500)}`
+    try {
+      if (tgThinking.lastMsgId) {
+        await tgListener.bot.editMessage(target, tgThinking.lastMsgId, body, { parseMode: 'HTML' })
+      } else {
+        const res = await tgListener.bot.sendMessage(target, body, { parseMode: 'HTML' })
+        tgThinking.lastMsgId = res?.message_id || null
+      }
+    } catch (e) {
+      // 编辑失败（如消息被删）→ 重发一条新的
+      tgThinking.lastMsgId = null
+      try {
+        const res = await tgListener.bot.sendMessage(target, body, { parseMode: 'HTML' })
+        tgThinking.lastMsgId = res?.message_id || null
+      } catch {}
+    }
+  }
+
+  function tgThinkingEnd() {
+    if (tgThinking.timer) { clearTimeout(tgThinking.timer); tgThinking.timer = null }
+    tgThinking.buffer = ''
+    tgThinking.lastMsgId = null
+    tgThinking.target = null
   }
 
   // REPL 主循环 — 由 readline 原生处理回显、退格、行回绕与 Enter 提交
@@ -1035,6 +1098,23 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
     // 否则 onConfirmTool 的 tgListener?.bot 恒为 false，权限确认不会推送 Telegram。
     if (builtinNotify?.tgListener) tgListener = builtinNotify.tgListener
     console.log('📡 Built-in channel listeners started (--with-notify)')
+  }
+
+  // ============================================================
+  // 引擎流式回调 — 保持 CLI 实时输出，并把思维链推送到 Telegram
+  // onDelta 会在流式生成时被调用（{type:'text'|'reasoning', text}）。
+  // 设置 onDelta 后引擎不再直接写终端，因此这里需手动维持终端输出。
+  // ============================================================
+  engine.config.onDelta = ({ type, text }) => {
+    if (type === 'text') {
+      // 保持 CLI 实时输出（与未设置 onDelta 时行为一致）
+      process.stdout.write(text)
+    } else if (type === 'reasoning') {
+      // CLI 也显示思维链
+      process.stdout.write(text)
+      // 实时推送到 Telegram（节流）
+      tgThinkingPush(text)
+    }
   }
 
   console.log(buildBanner({ model, permissionMode, session, maxTokens: tokenBudget.maxTokens }))

@@ -44,6 +44,8 @@ export async function* parseStream(response) {
           // reasoning_content (DeepSeek thinking mode)
           if (delta.reasoning_content) {
             result.reasoningContent += delta.reasoning_content
+            // 实时产出 reasoning 事件，供 onDelta 回调（如推送思维链到 Telegram）消费
+            yield { type: 'reasoning', text: delta.reasoning_content }
           }
 
           // 文本
