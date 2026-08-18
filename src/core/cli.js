@@ -98,9 +98,17 @@ function startSocketServer(engine, session, sessionManager, channelManager, verb
 
   server.listen(SOCK_PATH, () => {
     // v1.1 修复: socket 文件权限 0600（仅所有者可读写），阻止其他用户连接
-    try { chmodSync(SOCK_PATH, 0o600) } catch {}
+    // Windows named pipe 不支持 chmod，跳过
+    try { if (!process.platform.startsWith('win')) chmodSync(SOCK_PATH, 0o600) } catch {}
     // 写 PID 文件（权限 0644）
     writeFileSync(CC_NODE_PID, String(process.pid), { mode: 0o644 })
+  })
+
+  // 关键修复: 监听 socket 失败时绝不能崩溃（如 Windows 权限 / 端口占用）。
+  // 否则触发 Unhandled 'error' event 导致整个 cc-node 进程退出。
+  server.on('error', (err) => {
+    console.error(`⚠️  Socket 监听失败（${err.code || err.message}）— cc-notify 远程转发将不可用，但 REPL 仍可正常使用。`)
+    console.error(`   Path: ${SOCK_PATH}`)
   })
 
   // 退出时清理
