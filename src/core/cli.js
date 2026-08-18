@@ -611,7 +611,8 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
 
     // 关键：来自 Telegram 的消息，如果当前正在等待远程权限确认（pendingConfirm），
     // 则把它当作确认回复（y/n/a）处理，而不是当作新的 REPL 输入。
-    if (source === 'telegram' && pendingConfirm) {
+    // 注意：/ 开头的命令优先走命令分支，不被权限确认拦截（否则 /quit、/stop 会被吞）。
+    if (source === 'telegram' && pendingConfirm && !trimmed.startsWith('/')) {
       const confirm = pendingConfirm
       pendingConfirm = null
       const a = trimmed.toLowerCase()
