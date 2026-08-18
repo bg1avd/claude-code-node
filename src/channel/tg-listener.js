@@ -275,6 +275,7 @@ export class TelegramListener {
     this.maxRetryDelay = 30000
     this._lastPollError = null      // 最近一次轮询错误消息（用于去抖刷屏）
     this._lastPollErrorAt = 0       // 最近一次轮询错误时间戳
+    this._msgQueue = Promise.resolve()  // 消息串行处理队列（避免阻塞轮询循环）
     this.conversations = new ConversationState()
     this._onMessage = null
     this._handlers = {}
@@ -348,15 +349,17 @@ export class TelegramListener {
           for (const update of data.result) {
             this.lastUpdateId = Math.max(this.lastUpdateId, update.update_id)
 
-            // 处理回调查询（内联键盘按钮）
+            // 处理回调查询（按钮点击）— 快速操作，直接 await
             if (update.callback_query) {
               await this._handleCallbackQuery(update.callback_query)
               continue
             }
 
-            // 处理消息
+            // 处理消息 — 加入串行队列异步处理，不阻塞轮询循环。
+            // 否则 AI 处理上一条消息时（可能很久），getUpdates 无法继续接收
+            // 新消息（如权限确认回复 a、/quit 等）。
             if (update.message) {
-              await this._handleMessage(update.message)
+              this._enqueueMessage(update.message)
             }
           }
         }
@@ -380,6 +383,17 @@ export class TelegramListener {
         this._retryDelay = Math.min(this._retryDelay * 2, this.maxRetryDelay)
       }
     }
+  }
+
+  /** 将消息加入串行处理队列（不阻塞轮询循环） */
+  _enqueueMessage(msg) {
+    this._msgQueue = this._msgQueue.then(async () => {
+      try {
+        await this._handleMessage(msg)
+      } catch (e) {
+        log(`[TG] handle error: ${e.message}`)
+      }
+    })
   }
 
   /** 处理消息 */
