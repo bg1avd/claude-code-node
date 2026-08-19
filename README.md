@@ -116,7 +116,7 @@ printf '{"jsonrpc":"2.0","id":1,"method":"initialize"}\n' | cc-node --stdio
 [![npm version](https://img.shields.io/npm/v/@raolin2025/claude-code-node.svg)](https://www.npmjs.com/package/@raolin2025/claude-code-node) [![GitHub](https://img.shields.io/badge/GitHub-bg1avd%2Fclaude--code--node-blue)](https://github.com/bg1avd/claude-code-node) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ---
 
-## 🛠️ 内置工具（9 个）
+## 🛠️ 内置工具（10 个）
 
 | 工具 | 说明 | 权限级别 | 安全检查 |
 |------|------|---------|---------|
@@ -129,6 +129,7 @@ printf '{"jsonrpc":"2.0","id":1,"method":"initialize"}\n' | cc-node --stdio
 | **WebFetch** | 抓取网页内容 | `ask` | ✅ SSRF 防护 |
 | **WebSearch** | 网页搜索 | `ask` | 需要 API Key |
 | **GitTool** | GitHub PR 自动化（审查/合并/评论） | `high` | ✅ 预检查 |
+| **NpmPublish** | npm 发布一键工具（版本/打包/发布） | `ask` | ✅ token 校验 |
 | **AskUserQuestion** | 向用户提问 | `always-allow` | — |
 
 [![npm version](https://img.shields.io/npm/v/@raolin2025/claude-code-node.svg)](https://www.npmjs.com/package/@raolin2025/claude-code-node) [![GitHub](https://img.shields.io/badge/GitHub-bg1avd%2Fclaude--code--node-blue)](https://github.com/bg1avd/claude-code-node) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)

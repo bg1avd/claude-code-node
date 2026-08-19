@@ -11,6 +11,7 @@ import { webFetchTool } from './web-fetch.js'
 import { webSearchTool } from './web-search.js'
 import { askUserTool } from './ask-user.js'
 import { gitTool } from './git-tool.js'
+import { npmPublishTool } from './npm-publish.js'
 // Telegram 工具（替代原 QQ Bot 工具，QQ 通道已放弃）
 import { telegramTools } from './telegram-tools.js'
 
@@ -28,6 +29,7 @@ export const builtinTools = [
   webSearchTool,
   askUserTool,
   gitTool,
+  npmPublishTool,
   ...telegramTools
 ]
 
