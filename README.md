@@ -302,7 +302,7 @@ const tools = registry.getAllTools()
 claude-code-node/              33 文件 · 4307 行
 ├── src/
 │   ├── core/                  1279 行 — 引擎、CLI、会话、配置
-│   ├── tools/                  944 行 — 9 个内置工具
+│   ├── tools/                  944 行 — 10 个内置工具
 │   ├── security/               964 行 — 4 层安全防护
 │   ├── utils/                  544 行 — 差异、文件、进程、格式
 │   ├── mcp/                    385 行 — MCP 客户端+注册表
@@ -334,7 +334,7 @@ claude-code-node/              33 文件 · 4307 行
 | 语言 | TypeScript | JavaScript (ESM) |
 | 依赖 | ~200 npm 包 | **0 外部依赖** |
 | 代码量 | 512,000+ 行 | 4,307 行 |
-| 工具数 | ~40 | 9（核心） |
+| 工具数 | ~40 | 10（核心） |
 | API 协议 | Anthropic | **OpenAI 兼容（全行业通用）** |
 | SSRF 防护 | ✅ | ✅ |
 | 命令安全 | ✅ (2592行) | ✅ (279行) |
@@ -391,13 +391,6 @@ cc-node
       "type": "telegram",
       "token": "123456:ABC-DEF",
       "chatId": "78901234"
-    },
-    "qqbot": {
-      "type": "qqbot",
-      "token": "你的BotToken",
-      "appId": "你的AppID",
-      "channelId": "频道ID",
-      "groupOpenId": "群OpenID"
     }
   },
   "defaultChannel": "telegram"
@@ -418,25 +411,26 @@ cc-node
 - ❌ **执行出错**（自动通知错误内容）
 - 🔄 **手动发送**（`/channel send` 命令）
 
-## 📱 QQ Bot 远端编程（v2.0 新增）
+## 📱 Telegram 远端编程（v2.0 新增）
 
-通过 QQ Bot API v2 实现远程编程控制。独立、零依赖、无需 OpenClaw。
+通过 Telegram Bot API 实现远程编程控制。独立、零依赖、无需 OpenClaw。
 
 ### 前置配置
 
-1. 前往 [QQ 开放平台](https://q.qq.com/) 注册机器人，获取 **AppID** 和 **AppSecret**
-2. 在 QQ 中与机器人对话或拉入群，使用 `/bot-me` 获取你的 **OpenID** 或 **群 OpenID**
+1. 在 Telegram 中与 [@BotFather](https://t.me/BotFather) 对话，创建机器人并获取 **Bot Token**
+2. 与机器人发起对话，获取你的 **Chat ID**（数字，可用 `/getUpdates` 查看）
 3. 配置环境变量：
 
 ```bash
-export CC_NODE_CHANNEL_QQBOT_APPID=你的AppID
-export CC_NODE_CHANNEL_QQBOT_SECRET=你的AppSecret
-export CC_NODE_CHANNEL_QQBOT_GROUPID=你的群OpenID
+export CC_NODE_CHANNEL_TELEGRAM_TOKEN=你的BotToken
+export CC_NODE_CHANNEL_TELEGRAM_CHAT_ID=你的ChatID
+# 可选：走代理（如网络受限）
+# export CC_NODE_CHANNEL_TELEGRAM_PROXY=127.0.0.1:1080
 ```
 
 ### 使用方式
 
-启动 cc-notify 后，直接给机器人发消息或在群中 @机器人：
+启动 cc-notify 后，直接在 Telegram 里给机器人发消息：
 
 ```
 帮我写一个快速排序
@@ -449,27 +443,27 @@ export CC_NODE_CHANNEL_QQBOT_GROUPID=你的群OpenID
 ### 技术架构
 
 ```
-QQ消息 → WebSocket (wss://api.sgroup.qq.com) → cc-notify → cc-node
-cc-node → cc-notify → QQ API v2 (api.sgroup.qq.com/v2) → QQ消息
+Telegram消息 → Bot API 长轮询(getUpdates) → cc-notify → cc-node
+cc-node → cc-notify → Telegram Bot API (api.telegram.org/bot<token>) → Telegram消息
 ```
 
-- **认证**: `appId + clientSecret` → `access_token`（自动续期，token 有效期 2 小时）
-- **发送**: POST `/v2/groups/{group_openid}/messages` (群) 或 `/v2/users/{openid}/messages` (C2C)
-- **接收**: WebSocket 长连接 + 心跳保活 + 自动重连
-- **代码**: 基于 [qqbot-standalone](https://github.com/bg1avd/qqbot-standalone) 的架构
-- **参考**: `src/channel/qqbot-listener.js`
+- **认证**: `Bot Token` 认证（`Bearer <token>`）
+- **发送**: `sendMessage` / `sendPhoto` / `sendVideo` / `sendAudio` / `sendDocument`
+- **接收**: 长轮询 `getUpdates`（offset 持久化，重启不重放）
+- **富媒体**: 支持图片、视频、音频、文件上传
+- **定时提醒**: 集成调度系统，支持相对时间 / cron 表达式
+- **参考**: `src/channel/tg-listener.js`、`src/tools/telegram-tools.js`
 
 ---
 
 ## 🔔 后台运行 (cc-notify v2.0)
 
 cc-notify 是独立的通知守护进程，**不需要 cc-node 在前台运行**，开机自启后随时可用。
-支持 **Telegram** 和 **QQ Bot** 双通道远程编程。
+支持 **Telegram** 远程编程。
 
 ### v2.0 新特性
 
-- ✅ **QQ Bot 支持** — 通过 QQ 群/频道远程操控
-- ✅ **增强版 Telegram 监听** — 速率限制、Markdown 安全编码、多轮对话
+- ✅ **Telegram 监听** — 速率限制、Markdown 安全编码、多轮对话
 - ✅ **统一消息处理器** — 所有通道共享同一路由逻辑
 - ✅ **长消息分段** — 自动切分超过 4000 字符的回复
 - ✅ **API Key 持久化** — 自动生成并保存，重启不丢失
@@ -484,7 +478,7 @@ cc-notify 是独立的通知守护进程，**不需要 cc-node 在前台运行**
 
 ### 手机交互
 
-在 Telegram/QQ 上给 Bot 发消息：
+在 Telegram 上给 Bot 发消息：
 
 ```
 你好                     → 当作一次性任务发给 cc-node 执行
@@ -643,5 +637,5 @@ PRMergePolicy 支持以下检查（可配置）：
 
 - GitTool 已内置到 cc-node 工具集中
 - 可通过 `/tools` 查看
-- 审查结果可与 QQ/Telegram 通道集成，发送通知
+- 审查结果可与 Telegram 通道集成，发送通知
 

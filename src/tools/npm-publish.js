@@ -172,7 +172,7 @@ async function status(cwd) {
   catch { lines.push('npm whoami: 未登录 ⚠️') }
   // token
   const token = getNpmToken()
-  lines.push(token ? `~/.npmrc token: npm_${token.slice(4, 8)}... (${token.startsWith('npm_') ? 'GAT' : '未知类型'})` : '~/.npmrc token: 未找到 ⚠️')
+  lines.push(token ? `~/.npmrc token: npm_${token.slice(4, 6)}... (${token.startsWith('npm_') ? 'GAT' : '未知类型'})` : '~/.npmrc token: 未找到 ⚠️')
   // 本地版本
   const pkg = readPackage(cwd)
   lines.push(`本地版本: ${pkg.version}`)
