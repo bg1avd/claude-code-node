@@ -588,6 +588,8 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
   let currentSource = 'cli'
   // 等待中的 Telegram 权限确认（resolve 回调）— 远程用户回复 y/n/a 时响应
   let pendingConfirm = null
+  // 等待中的 Telegram AskUserQuestion 回答（resolve 回调）— 远程用户回复任意文本时响应
+  let pendingAskUser = null
   // 最近一次 /models 拉取的模型列表（供 /model <编号> 选择）
   let modelList = []
   // /models 从 Telegram 发出后，等待用户回复编号/名字来选择模型
@@ -607,6 +609,13 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
     // 关键：来自 Telegram 的消息，如果当前正在等待远程权限确认（pendingConfirm），
     // 则把它当作确认回复（y/n/a）处理，而不是当作新的 REPL 输入。
     // 注意：/ 开头的命令优先走命令分支，不被权限确认拦截（否则 /quit、/stop 会被吞）。
+    // 优先处理 pendingAskUser（AskUserQuestion 需要任意文本答案，且通常是用户正在等待的问题）。
+    if (source === 'telegram' && pendingAskUser && !trimmed.startsWith('/')) {
+      const ask = pendingAskUser
+      pendingAskUser = null
+      ask(trimmed)
+      return
+    }
     if (source === 'telegram' && pendingConfirm && !trimmed.startsWith('/')) {
       const confirm = pendingConfirm
       pendingConfirm = null
@@ -1101,6 +1110,29 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
     }
   }
   engine.config.readline = rl
+
+  // AskUserQuestion 工具回调 — 按当前来源分流：
+  // - Telegram 远程模式：推送问题到 Telegram 并等待远程回复（带超时兜底，避免死锁）
+  // - CLI 本地模式：走本地终端交互（inputCtrl.ask）
+  engine.config.onAskUser = (question) => {
+    if (currentSource === 'telegram' && tgListener?.bot) {
+      const promptText = `❓ ${question}\n\n请直接回复你的回答。`
+      sendTelegram(promptText, null).catch(() => {})
+      return new Promise((resolve) => {
+        // 60 秒内未回复则自动跳过，避免远程提问永久挂起阻塞引擎
+        const timer = setTimeout(() => {
+          if (pendingAskUser === resolve) pendingAskUser = null
+          resolve('(用户未在 60 秒内回答)')
+        }, 60000)
+        pendingAskUser = (val) => {
+          clearTimeout(timer)
+          resolve(val)
+        }
+      })
+    }
+    // CLI 本地模式
+    return askQuestion(`❓ ${question}\n> `)
+  }
 
   // ============================================================
   // Telegram 双向通道启动（可选）

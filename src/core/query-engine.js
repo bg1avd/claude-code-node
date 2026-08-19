@@ -44,6 +44,7 @@ export class QueryEngineConfig {
     this.tokenBudget = options.tokenBudget || null
     this.initialMessages = options.initialMessages || []
     this.onConfirmTool = options.onConfirmTool || null  // ask 模式确认回调
+    this.onAskUser = options.onAskUser || null            // AskUserQuestion 工具回调（宿主按来源分流，避免远程死锁）
     this.readline = options.readline || null              // 用于 AskUserQuestion 工具
     this.onDelta = options.onDelta || null                // 流式增量回调 {type:'text'|'reasoning', text}（供 VS Code 扩展等 UI 消费）
   }
