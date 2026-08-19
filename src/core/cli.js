@@ -18,6 +18,7 @@ import { CostTracker } from './cost-tracker.js'
 import { autoCompact } from './compact.js'
 import { isLocalLlmServer } from '../utils/index.js'
 import { SOCK_DIR, SOCK_PATH, CC_NODE_PID } from './paths.js'
+import { renderHeadpiece } from './headpiece.js'
 import { TelegramListener } from '../channel/tg-listener.js'
 import { fetchViaSocks5 } from '../channel/tg-proxy.js'
 
@@ -147,48 +148,16 @@ function buildBanner({ model, permissionMode, session, maxTokens }) {
   const top = `╭${leftLabel}${'─'.repeat(inner - leftLabel.length)}╮`
   const bottom = `╰${'─'.repeat(inner)}╯`
 
-  const col1 = 24 // 左侧机器人列（19字符+边距）
+  const col1 = 24 // 左侧头标列（头标宽度 20 + 边距）
   const col2 = 50 // 标题列
   const col3 = inner - col1 - col2 - 2 // 信息列
 
-  // ANSI 颜色
-  const BLUE = '\x1b[34m'
-  const CYAN = '\x1b[36m'
-  const RESET = '\x1b[0m'
-  const RED = '\x1b[31m'
+  // 头标（独立模块 headpiece.js 提供，替换只需改该文件）
+  const headpiece = renderHeadpiece({ colWidth: col1 })
+  const robotLines = headpiece.lines
 
-  // 像素风格 CC 机器人（19字符宽，带颜色边框）
-  const robotRaw = [
-    '  ┌───────────────┐  ',
-    '  │  ██       ██  │  ',
-    '  │    ██████     │  ',
-    '  │  ██       ██  │  ',
-    '  │               │  ',
-    '  │    ███████    │  ',
-    '  │  ██       ██  │  ',
-    '  │    ██████     │  ',
-    '  │  ██   ██   ██ │  ',
-    '  └───────────────┘  ',
-  ]
-
-  // 颜色化：边框蓝，眼睛/嘴巴青
-  const colorize = (line) =>
-    line
-      .replace(/[┌└─╭╮┐┘│]/g, BLUE + '$&' + RESET)
-      .replace(/[█]/g, RED + '$&' + RESET)
-
-  const robotColored = robotRaw.map(colorize)
-
-  // 机器人列：先去掉 ANSI（保证 pad 长度准确），再填充
+  // 去掉 ANSI 转义码，返回真实可见长度
   const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*m/g, '')
-  const robotPlain = robotColored.map(line => stripAnsi(line))
-
-  // 在 col1 内居中（按最大可见长度 21 计算，短的自动靠右）
-  const visibleWidth = 21
-  const totalCol1 = 24
-  const leftPad = Math.floor((totalCol1 - visibleWidth) / 2)
-  const rightPad = totalCol1 - visibleWidth - leftPad
-  const robotLines = robotPlain.map(line => ' '.repeat(leftPad) + line + ' '.repeat(rightPad))
 
   // 辅助函数：字符串填充（忽略 ANSI 颜色码计算真实长度，正确处理嵌入在字符串中的 ANSI）
   const realLen = (s) => stripAnsi(s).length
