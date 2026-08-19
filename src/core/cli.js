@@ -590,6 +590,8 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
   let pendingConfirm = null
   // 等待中的 Telegram AskUserQuestion 回答（resolve 回调）— 远程用户回复任意文本时响应
   let pendingAskUser = null
+  // 取消当前等待中的 AskUserQuestion（用户 /stop 时调用，resolve 为取消标记，避免死锁）
+  let cancelAskUser = null
   // 最近一次 /models 拉取的模型列表（供 /model <编号> 选择）
   let modelList = []
   // /models 从 Telegram 发出后，等待用户回复编号/名字来选择模型
@@ -613,7 +615,8 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
     if (source === 'telegram' && pendingAskUser && !trimmed.startsWith('/')) {
       const ask = pendingAskUser
       pendingAskUser = null
-      ask(trimmed)
+      cancelAskUser = null
+      ask.fn(trimmed)
       return
     }
     if (source === 'telegram' && pendingConfirm && !trimmed.startsWith('/')) {
@@ -808,7 +811,14 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
           console.log('Conversation cleared')
           break
         case 'stop':
-          // 停止当前正在运行的 AI 工作（如卡死 / 长时间无响应时）
+          // 停止当前正在运行的 AI 工作（如卡死 / 长时间无响应时）。
+          // 若正在等待 AskUserQuestion 回答，先取消提问（resolve 取消标记），避免引擎挂起。
+          if (pendingAskUser) {
+            const cancel = cancelAskUser
+            pendingAskUser = null
+            cancelAskUser = null
+            if (cancel) cancel()
+          }
           if (engine.state.isRunning) {
             engine.abort()
             console.log('⏹️  已发送停止信号，正在中止当前工作...')
@@ -1152,17 +1162,16 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
   // - CLI 本地模式：走本地终端交互（inputCtrl.ask）
   engine.config.onAskUser = (question) => {
     if (currentSource === 'telegram' && tgListener?.bot) {
-      const promptText = `❓ ${question}\n\n请直接回复你的回答。`
+      const promptText = `❓ ${question}\n\n请直接回复你的回答。\n（发 /stop 可取消本次提问）`
       sendTelegram(promptText, null).catch(() => {})
       return new Promise((resolve) => {
-        // 60 秒内未回复则自动跳过，避免远程提问永久挂起阻塞引擎
-        const timer = setTimeout(() => {
-          if (pendingAskUser === resolve) pendingAskUser = null
-          resolve('(用户未在 60 秒内回答)')
-        }, 60000)
-        pendingAskUser = (val) => {
-          clearTimeout(timer)
-          resolve(val)
+        // 一直等待用户回答——不设超时自行结束（超时会吞掉迟到回答，违背"等待回答"语义）。
+        // 用户回复任意文本即作为回答；用户 /stop 则通过 cancelAskUser 取消（resolve 取消标记，避免死锁）。
+        pendingAskUser = { fn: (val) => resolve(val) }
+        cancelAskUser = () => {
+          if (pendingAskUser) pendingAskUser = null
+          cancelAskUser = null
+          resolve('(提问已取消)')
         }
       })
     }
