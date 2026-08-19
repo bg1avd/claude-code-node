@@ -57,7 +57,7 @@ const TOOL_PARAMETERS = {
     },
     squash: {
       type: 'boolean',
-      description: 'publish 时是否把多个提交合并为单个 release 提交（默认 true）',
+      description: 'publish 时把本次改动合并为单个 release 提交（默认 true）。始终基于当前 HEAD 提交，不会回溯到旧 release，故不会产生分叉（默认 true）',
       default: true
     },
     doGitPush: {
@@ -270,19 +270,10 @@ async function doPublish({ cwd, version, commitMessage, squash, doGitPush, doNpm
   // 4. git 提交（合并或直接提交）
   const msg = commitMessage || `release: v${pkg.version}`
   try {
-    if (squash !== false) {
-      // 合并为单个 release 提交：soft reset 到上一个 release 提交基点，再一次性提交
-      // 基点 = HEAD 之前最近的一个 "release:" 提交（不含当前），若没有则用 HEAD~n 之前全部
-      let baseCommit = null
-      try {
-        // 最近的两个 release 提交中，取最早那个作为基点（即当前 release 之前的状态）
-        const releases = sh('git log --format="%h" --grep="^release:"', cwd).split('\n').filter(Boolean)
-        // releases[0] 是最近的 release（可能是本次或上一次）；若 HEAD 就是 release 则取 [1]
-        const headIsRelease = sh('git log -1 --format="%s"', cwd).startsWith('release:')
-        baseCommit = headIsRelease ? (releases[1] || releases[0]) : (releases[0] || 'HEAD')
-      } catch { baseCommit = 'HEAD' }
-      sh(`git reset --soft ${baseCommit}`, cwd)
-    }
+    // 合并为单个 release 提交：直接基于当前 HEAD 提交本次产生的全部改动。
+    // 不再用 git reset --soft 回溯到旧 release（会吞掉 HEAD 之后已提交已推送的历史，
+    // 导致 release 提交父基点错误、与远程分叉、push 报 non-fast-forward，见 KNOWN_ISSUES.md 第 3 条）。
+    // 直接 git add -A && git commit 后，新提交父即当前 HEAD，天然不会分叉。
     sh(`git add -A`, cwd)
     sh(`git commit -m "${msg.replace(/"/g, '\\"')}"`, cwd)
     steps.push(`git 提交: ${msg}`)

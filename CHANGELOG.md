@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## v2.7.3 (2026-08-19) — NpmPublish squash 分叉修复
+
+### 🐛 修复
+- **NpmPublish 工具 git squash 分叉**：去掉 `git reset --soft` 回溯到旧 release 的逻辑
+  （会吞掉 HEAD 之后已提交已推送的历史，导致 release 提交父基点错误、与远程分叉、
+  push 报 non-fast-forward）。改为直接基于当前 HEAD 提交，天然不会分叉。
+  - 涉及：`src/tools/npm-publish.js`
+
 ## v2.7.2 (2026-08-19) — AskUserQuestion Telegram 死锁修复
 
 ### 🐛 修复
