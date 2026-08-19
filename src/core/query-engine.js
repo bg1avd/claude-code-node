@@ -63,6 +63,8 @@ export class QueryEngine {
     this.abortController = null
     this.costTracker = this.config.costTracker || new CostTracker({ model: this.config.model })
     this.tokenBudget = this.config.tokenBudget || null
+    // 最近一次 processMessage 是否已通过流式回调/直写把正文输出（供调用方避免重复打印 response）
+    this.lastStreamed = false
   }
 
   /**
@@ -76,6 +78,7 @@ export class QueryEngine {
     }
     this.state.isRunning = true
     this.state.turnCount++
+    this.lastStreamed = false  // 本轮是否已流式输出正文
     this.abortController = new AbortController()
     const userMsg = new UserMessage(userInput, images)
     this.state.messages.push(userMsg)
@@ -405,6 +408,8 @@ export class QueryEngine {
     try {
       for await (const event of parseStream(response)) {
         if (event.type === 'text') {
+          // 记录已流式输出正文（供调用方避免重复打印最终 response）
+          if (event.text) this.lastStreamed = true
           // 实时输出（有 onDelta 回调时交给调用方，如 VS Code 扩展；否则写终端）
           if (typeof this.config.onDelta === 'function') {
             this.config.onDelta({ type: 'text', text: event.text })

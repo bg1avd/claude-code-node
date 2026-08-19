@@ -5,6 +5,7 @@
  * v1.2: 增加 Unix socket 服务，让 cc-notify 能发现并转发消息
  */
 import * as readline from 'readline'
+import { createMultilineInput } from './multiline-input.js'
 import { createServer as createNetServer } from 'net'
 import { writeFileSync, unlinkSync, existsSync, mkdirSync, readFileSync, chmodSync } from 'fs'
 import { join } from 'path'
@@ -527,7 +528,8 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
       engine.config.onConfirmTool = async () => true
     }
     const result = await engine.processMessage(cliArgs.oneShot)
-    console.log(result.response)
+    // 引擎已流式输出正文（无 onDelta 时引擎内部直写终端）→ 不再重复打印，避免"回答两次"
+    if (!engine.lastStreamed) console.log(result.response)
     // 保存会话
     session = await sessionManager.create(`one-shot: ${cliArgs.oneShot.slice(0, 50)}`)
     await sessionManager.appendMessage({ role: 'user', content: cliArgs.oneShot })
@@ -545,19 +547,37 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
   startSocketServer(engine, session, sessionManager, channelManager, verbose)
 
   // ============================================================
-  // REPL 输入处理
+  // REPL 输入处理 — 多行输入（读取完整输入再处理）
   //
-  // 使用标准 readline 的 line 事件（terminal: true）实现输入读取：
-  //   - 字符回显、退格删除、行回绕、方向键历史由 readline 原生处理，
-  //     行为与 v2.5 一致，避免手动 keypress 回显导致的显示错乱。
-  //   - Enter 提交；Ctrl+C 退出。
-  //   - 非 TTY（管道/重定向）模式复用同一 readline 接口。
+  // 不再用 readline 的 line 事件（它遇到 \n 就提交当前行，导致
+  // 多行文本被断句，后续行在引擎忙时被丢弃）。
+  // 改用 keypress + raw mode 自己管理输入缓冲（见 multiline-input.js）：
+  //   - Enter（\r）→ 提交整段输入（含内嵌换行）
+  //   - Ctrl+Enter / Alt+Enter / Ctrl+J → 折行，多行输入（不提交）
+  //   - 可打印字符回显、退格、上下方向键历史、Ctrl+C
+  //   - 非 TTY（管道/重定向）回退到 readline line 事件
   // ============================================================
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: '> ' })
+  const inputCtrl = createMultilineInput({
+    prompt: '> ',
+    onSubmit: (text) => { processInputLine(text) },
+    onExit: () => { process.exit(0) },
+  })
 
   // 显示提示符
   function showPrompt() {
-    rl.prompt()
+    inputCtrl.showPrompt()
+  }
+
+  // 单行问题收集（权限确认 / /models 选择 / AskUserQuestion）
+  // 返回 Promise<string>，在 keypress 模式下与多行输入共用同一 stdin，
+  // 避免 readline 的 question 与主循环 keypress 互相干扰。
+  function askQuestion(questionText) {
+    return inputCtrl.ask(questionText)
+  }
+
+  // 兼容对象：供 AskUserQuestion 工具和引擎的 ctx.readline.question() 使用
+  const rl = {
+    question: (q, cb) => { askQuestion(q).then(cb) },
   }
 
   // Telegram 双向通道（可选）：tgListener 监听 Telegram 消息，tgChatId 记录回复目标
@@ -572,6 +592,8 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
   let modelList = []
   // /models 从 Telegram 发出后，等待用户回复编号/名字来选择模型
   let pendingModelSelect = false
+  // 流式输出标志 — onDelta 已实时把回答输出到终端时，不再重复打印完整 response
+  let streamedText = false
 
   // 处理输入行
   // source: 'cli' 来自终端输入, 'telegram' 来自 Telegram
@@ -867,9 +889,15 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
           }
           break
         }
-        case 'exit': case 'quit':
+        case 'exit': case 'quit': {
+          // 退出前确认消费 Telegram update（避免 /quit 等命令残留在服务器缓冲区，
+          // 下次启动重放导致死循环起不来）。配合 tg-listener 的 offset 持久化双保险。
+          if (tgListener?.bot) {
+            try { await tgListener.flushOffset() } catch {}
+          }
           console.log('Goodbye!')
           process.exit(0)
+        }
         default:
           console.log(`Unknown command: /${cmd}. Type /help for available commands.`)
       }
@@ -903,7 +931,11 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
       // 处理结束，清掉思维链流（最终回复随后发送）
       tgThinkingEnd()
       console.log()
-      console.log(result.response)
+      // 正文已被 onDelta 实时流式输出到终端 → 不重复打印（否则出现"回答两次"的双层显示）。
+      // 仅当没有流式输出（noStream / 流式失败 / 无 onDelta 回调）时才打印完整 response。
+      if (!engine.lastStreamed && !streamedText) {
+        console.log(result.response)
+      }
       console.log()
       await sessionManager.appendMessage({ role: 'user', content: input })
       await sessionManager.appendMessage({ role: 'assistant', content: result.response })
@@ -1025,12 +1057,11 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
     tgThinking.flushing = false
   }
 
-  // REPL 主循环 — 由 readline 原生处理回显、退格、行回绕与 Enter 提交
-  rl.on('line', (line) => {
-    processInputLine(line)
-  })
+  // REPL 主循环 — 由 multiline-input 处理多行输入（keypress / 非TTY readline）
+  // 输入由 createMultilineInput 在创建时挂接，start() 显示初始提示符
+  inputCtrl.start()
 
-  // 将 readline 注入引擎配置，用于 ask 模式确认和 AskUserQuestion 工具
+  // 将 readline 兼容对象注入引擎配置，用于 ask 模式确认和 AskUserQuestion 工具
   if (permissionMode === 'ask') {
     engine.config.onConfirmTool = async (toolName, input) => {
       // 如果已经启用会话全局自动允许，直接通过
@@ -1146,6 +1177,8 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
   engine.config.onDelta = ({ type, text }) => {
     // 保持 CLI 实时输出
     process.stdout.write(text)
+    // 记录已有文本被实时输出到终端（供 processInputLine 判断是否需重复打印 response）
+    if (type === 'text' && text) streamedText = true
     // 无论 text 还是 reasoning，都实时推送到 Telegram（节流）
     tgThinkingPush(text)
   }

@@ -1,5 +1,69 @@
 # CHANGELOG
 
+## v2.7.1 (2026-08-19) — REPL 多行输入 + Telegram offset 持久化
+
+### 🎯 修复
+- **根因**：readline `line` 事件遇到 `\n` 就提交当前行，多行文本被断句，且后续行在引擎忙时被丢弃。
+- **新增 `src/core/multiline-input.js`**：keypress + raw mode 管理输入缓冲，
+  Enter（`\r`）提交整段、文本换行（`\n`）折行，读取完整输入才处理。
+  - 支持退格、可打印字符回显、上/下方向键历史、Ctrl+C
+  - 处理 CRLF 提交后的残留 `\n`
+  - 非 TTY（管道/重定向）回退到 readline line 事件
+- **`src/core/cli.js`**：REPL 主循环改用多行输入器；权限确认 / `/models` / AskUserQuestion
+  统一走 `ask()`，避免与 keypress 主循环互相干扰。
+- **Telegram / socket 通道**：确认多行文本完整传递，无断句。
+- **测试**：新增 `src/__tests__/multiline-input.test.js`（6 项）。
+
+### 🎯 修复（2026-08-19）：终端回显乱跳 / 无回显
+- **根因**：`render()` 在单行输入时也执行 `\x1b[1A`（上移一行），且多行时光标定位
+  （`\x1b[1A / \x1b[2C / \x1b[1B / \x1b[2A` 组合）错误、行数跟踪未考虑终端自动换行与
+  CJK 宽字符，导致屏幕乱跳、输入看似无回显。
+- **修复**：重写 `render()` 光标管理：
+  - 单行输入：只做 `\r`（回行首）+ `\x1b[J`（清屏）+ 重绘，**绝不上下移动光标**
+  - 多行输入：先 `\x1b[nA` 精确上移到输入区首行，再清屏重绘
+  - 新增 `renderedRows()` 按终端列数 + CJK 宽字符（全角=2列）精确计算占用屏幕行数
+- **验证**：真实 TTY 下单行/多行/折行/退格/长行自动换行均稳定回显，光标不乱跳。
+
+### 📌 行为变化
+- CLI 交互输入多行文章时，按 **Enter** 一次性提交整段（含换行），不再被拆成多行/丢失后续行。
+- 终端内如需折行，直接按 Enter 前输入内容中的换行（如粘贴）会正确保留。
+
+### 🎯 修复（2026-08-19）：Alt+Enter / Ctrl+Enter 换行不可用 + 回答重复显示双层
+- **问题 1（换行不可用）**：部分终端把 Alt+Enter 拆成独立的 `ESC` 事件和 `Enter` 事件，
+  或发送 CSI 序列 `\x1b[13~`，旧逻辑无法识别 → Alt+Enter 不折行；
+  Ctrl+Enter 在多数终端发送的仍是 `\r`（与普通 Enter 无法区分），按下即被当作提交。
+- **修复**（`src/core/multiline-input.js`）：增强多行折行键识别：
+  - 新增 **独立 ESC 事件跟踪**：`ESC` 后紧跟 `Enter` 视为 Alt+Enter → 折行（400ms 超时防误判）
+  - 新增 **CSI 序列 `\x1b[13~`**（部分终端 Ctrl/Alt+Enter）→ 折行
+  - 保留原有 `meta+Enter` / `Ctrl+J`（`\n`）折行
+- **问题 2（回答两次 / 双层显示）**：`onDelta` 已实时流式输出回答，结束后又
+  `console.log(result.response)` 重复打印一遍 → 屏幕出现同一回答两次。
+- **修复**（`src/core/cli.js` + `src/core/query-engine.js`）：新增 `engine.lastStreamed` 标志，
+  流式正文已被输出时不再重复打印完整 response（REPL 与 one-shot 模式均生效）。
+  仅当 noStream / 流式失败 / 无流式回调时才打印完整 response。
+- **测试**：新增「独立 ESC 事件 + Enter 折行」「CSI `\x1b[13~` 折行」两项，共 12 项全过。
+
+### 🎯 修复（多行键入不可用 / Ctrl+Enter 误提交）
+- **问题**：真实终端按下 Enter 发送的是 `\r`，而旧逻辑把 `\r` 一律当作「提交」，
+  `\n`（文本换行）分支几乎不会触发 → 输入第一行就提交，**根本无法多行输入**；
+  用户按 Ctrl+Enter 想继续输入也被当作提交，AI 立即回复。
+- **修复**（`src/core/multiline-input.js`）：重写 Enter 处理，支持多行折行键：
+  - Enter（`\r`）→ 仍为提交（单行输入体验不变）
+  - **Ctrl+Enter** / **Alt+Enter（Esc+Enter）** / **Ctrl+J** → 折行（多行输入）
+  - ⚠️ 注意：多数终端 Ctrl+Enter 发送的仍是 `\r`，无法与 Enter 区分；
+    **跨终端可靠的多行换行键是 Alt+Enter（Esc+Enter）**。
+- **测试**：新增「Alt+Enter 折行 + Enter 提交」与「普通 Enter 仍提交」两项，共 10 项全过。
+
+### 🎯 修复（2026-08-19）：Telegram /quit 死循环 — 持久化 getUpdates offset
+- **问题**：`lastUpdateId` 仅存内存、重启即归 0。`/quit` 用 `process.exit(0)` 强杀进程，
+  来不及提交下一次 `getUpdates(offset)` 确认消费 → `/quit` 消息永远留在 Telegram 服务端缓冲，
+  下次启动从 offset 0 重放并再次退出，形成 **cc-node 永远无法启动的死循环**。
+- **修复**（`src/channel/tg-listener.js`）：
+  - `_poll()` 中 offset 前进时**立即持久化**到 `~/.cc-node/tg-offset.json`，构造时恢复。
+    即使进程被强杀，重启也从正确位置继续，不再重放旧消息。
+  - 新增 `flushOffset()`：主动用 `getUpdates(offset=lastUpdateId+1)` 确认已消费的更新，
+    在 `/quit` / `/exit` 命令处理里 `process.exit` 前调用，作为双重保险。
+
 ## v2.6.1 (2026-08-04) — 发布到 npm (Staged Publishing 实盘)
 
 > 目标版本 `2.6.0` 因被自身 staged 占位 + 强制 2FA 封锁无法发布；改用 **v2.6.1** 直接发布成功。

@@ -16,6 +16,11 @@
 // MarkdownV2 安全编码
 // ============================================================
 
+// 静态导入用于 offset 持久化（ESM 顶层导入，可在构造函数内同步使用）
+import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'fs'
+import { homedir } from 'os'
+import { join, dirname } from 'path'
+
 const TG_MD_ESCAPE_CHARS = /[_*[\]()~`>#+\-=|{}.!]/g
 const TG_CODE_ESCAPE_CHARS = /[`\\]/g
 const TG_LINK_ESCAPE_CHARS = /[()]/g
@@ -270,7 +275,8 @@ export class TelegramListener {
     this.proxyAddr = ch.proxy || process.env.CC_NODE_CHANNEL_TELEGRAM_PROXY || ''
     this.apiBase = ch.apiBase || ''
     this.bot = this.token ? new TelegramBotClient(this.token, { proxy: this.proxyAddr, apiBase: this.apiBase }) : null
-    this.lastUpdateId = 0
+    // 从磁盘恢复持久化的 offset，避免进程重启后重放旧消息（含 /quit 等历史命令）
+    this.lastUpdateId = this._loadOffset()
     this.running = false
     this._pollTimer = null
     this._retryDelay = 1000
@@ -350,6 +356,9 @@ export class TelegramListener {
         if (data.result?.length) {
           for (const update of data.result) {
             this.lastUpdateId = Math.max(this.lastUpdateId, update.update_id)
+            // 推进 offset 后立即持久化到磁盘，保证进程异常退出（如 /quit）
+            // 重启后从正确位置继续，不重放旧消息。
+            this._saveOffset()
 
             // 处理回调查询（按钮点击）— 快速操作，直接 await
             if (update.callback_query) {
@@ -637,6 +646,77 @@ export class TelegramListener {
 
   _sleep(ms) {
     return new Promise(r => setTimeout(r, ms))
+  }
+
+  // ============================================================
+  // Offset 持久化 — 防止进程重启后重放旧消息（含 /quit 等）
+  // Telegram 的 getUpdates 用 offset 确认消费；若 offset 只存内存，
+  // 进程异常退出（如 /quit 的 process.exit）后重启 lastUpdateId 归零，
+  // 会重放服务器上所有未确认的 update，导致 /quit 死循环起不来。
+  // 将 offset 持久化到磁盘，重启后从正确位置继续，彻底根治此问题。
+  // ============================================================
+
+  /** offset 状态文件路径 */
+  _offsetFile() {
+    return join(homedir(), '.cc-node', 'tg-offset.json')
+  }
+
+  /** 从磁盘加载已持久化的 offset */
+  _loadOffset() {
+    try {
+      const file = this._offsetFile()
+      if (!existsSync(file)) return 0
+      const raw = readFileSync(file, 'utf8').trim()
+      if (!raw) return 0
+      const data = JSON.parse(raw)
+      const id = Number(data.lastUpdateId) || 0
+      if (id > 0) log(`[TG] Restored offset ${id} (persisted, skip replayed updates)`)
+      return id
+    } catch {
+      return 0
+    }
+  }
+
+  /** 持久化当前 offset 到磁盘 */
+  _saveOffset() {
+    try {
+      const file = this._offsetFile()
+      mkdirSync(dirname(file), { recursive: true })
+      writeFileSync(file, JSON.stringify({ lastUpdateId: this.lastUpdateId, updatedAt: Date.now() }), 'utf8')
+    } catch (e) {
+      log(`[TG] Failed to persist offset: ${e.message}`)
+    }
+  }
+
+  /**
+   * 退出前确认消费已接收的 update（双保险）。
+   * 正常路径下 next poll 会提交 offset，但 /quit 等命令走 process.exit
+   * 同步强杀进程，没有机会再 poll 一次 → 未确认的 update 残留在服务器。
+   * 调用 getUpdates(offset=lastUpdateId+1) 可让 Telegram 立即确认消费。
+   * 返回 Promise，调用方应 await 后再退出。
+   */
+  async flushOffset() {
+    if (!this.bot) return
+    try {
+      const url = `${this.bot.apiBase}/getUpdates`
+      const res = await this._fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 10000,
+        body: JSON.stringify({
+          offset: this.lastUpdateId + 1,
+          timeout: 0,
+          allowed_updates: ['message', 'callback_query', 'edited_message'],
+        }),
+      })
+      if (res.ok) {
+        const data = await res.json()
+        if (data.ok) {
+          log(`[TG] Flushed offset ${this.lastUpdateId + 1} before exit`)
+          return
+        }
+      }
+    } catch {}
   }
 }
 
