@@ -1,5 +1,14 @@
 # CHANGELOG
 
+## v2.7.2 (2026-08-19) — AskUserQuestion Telegram 死锁修复
+
+### 🐛 修复
+- **AskUserQuestion 工具在 Telegram 通道下卡死引擎的死锁**：
+  远程模式下不再走本地 CLI 阻塞（Promise 永不 resolve 导致 isRunning 永久为 true，
+  后续消息全被判「引擎忙」丢弃）。新增 `onAskUser` 回调按来源分流：
+  Telegram 模式推送问题到远程并 60 秒超时兜底，CLI 模式走本地交互。
+  - 涉及：`src/tools/ask-user.js`、`src/core/query-engine.js`、`src/core/cli.js`
+
 ## v2.7.1 (2026-08-19) — REPL 多行输入 + Telegram offset 持久化
 
 ### 🎯 修复
