@@ -284,6 +284,50 @@ async function createTelegramListener(config) {
 
 
 // ============================================================
+// Telegram typing 心跳 — 让"正在输入"持续显示直到处理完成
+// ============================================================
+
+/**
+ * 发送一次 Telegram typing 动作。
+ * 兼容代理 / 直连两种方式。
+ */
+async function tgSendTyping(config, chatId) {
+  if (!config.channels?.telegram?.token || !chatId) return
+  try {
+    const proxyAddr = config.channels.telegram.proxy || process.env.CC_NODE_CHANNEL_TELEGRAM_PROXY || ''
+    const apiBase = config.channels.telegram.apiBase || `https://api.telegram.org`
+    const url = `${apiBase}/bot${config.channels.telegram.token}/sendChatAction`
+    const body = JSON.stringify({ chat_id: chatId, action: 'typing' })
+    if (proxyAddr) {
+      const { fetchViaSocks5 } = await import('./tg-proxy.js')
+      await fetchViaSocks5(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }, proxyAddr)
+    } else {
+      await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body })
+    }
+  } catch {}
+}
+
+/**
+ * 启动 typing 心跳：Telegram 的 typing 提示约 5 秒后自动消失，
+ * 若处理耗时较长（cc-node 多轮思考 / 工具执行），需周期重发才能持续显示。
+ * 返回停止函数，处理结束后调用即可让"正在输入"消失。
+ */
+function tgStartTypingHeartbeat(config, chatId) {
+  if (!config.channels?.telegram?.token || !chatId) return () => {}
+  let stopped = false
+  const timer = setInterval(async () => {
+    if (stopped) return
+    await tgSendTyping(config, chatId)
+  }, 4000)
+  // 立即发送一次，让提示马上出现
+  tgSendTyping(config, chatId)
+  return () => {
+    stopped = true
+    clearInterval(timer)
+  }
+}
+
+// ============================================================
 // 统一消息处理器
 // ============================================================
 
@@ -434,27 +478,10 @@ function createMessageHandler(config) {
     // ============================================================
     log(`[route] processing: "${text.slice(0, 50)}${text.length > 50 ? '...' : ''}"`)
 
-    // 发送"处理中"提示
+    // 发送"处理中"提示 — 启动 typing 心跳，让"正在输入"持续显示直到处理完成
+    let stopTyping = () => {}
     if (isTelegram && config.channels.telegram?.token) {
-      try {
-        const proxyAddr = config.channels.telegram.proxy || process.env.CC_NODE_CHANNEL_TELEGRAM_PROXY || ''
-        const apiBase = config.channels.telegram.apiBase || `https://api.telegram.org`
-        const url = `${apiBase}/bot${config.channels.telegram.token}/sendChatAction`
-        if (proxyAddr) {
-          const { fetchViaSocks5 } = await import('./tg-proxy.js')
-          await fetchViaSocks5(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ chat_id: chatId, action: 'typing' }),
-          }, proxyAddr)
-        } else {
-          await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ chat_id: chatId, action: 'typing' }),
-          })
-        }
-      } catch {}
+      stopTyping = tgStartTypingHeartbeat(config, chatId)
     }
     if (isQQBot) {
       await sendToChannel(config.channels, 'qqbot', '🤖 收到，正在处理...')
@@ -462,6 +489,8 @@ function createMessageHandler(config) {
 
     try {
       const result = await routeMessage(text, config)
+      // 处理完成，停掉 typing 心跳 → "正在输入" 提示消失
+      stopTyping()
       const reply = result || '(no response)'
 
       if (isTelegram && config.channels.telegram?.token) {
@@ -494,6 +523,8 @@ function createMessageHandler(config) {
       log(`[route] done (${reply.length} chars)`)
 
     } catch (e) {
+      // 出错也停掉 typing 心跳，避免提示一直挂起
+      stopTyping()
       log(`[route] error: ${e.message}`)
       const errMsg = `❌ Error processing: ${e.message}`
       if (isTelegram && config.channels.telegram?.token) {

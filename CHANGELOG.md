@@ -1,5 +1,31 @@
 # CHANGELOG
 
+## v2.7.4
+
+## v2.7.4 (2026-08-19) — Telegram typing 心跳
+
+### 🐛 修复
+- **Telegram "正在输入"提示在长任务中途消失**：Telegram 的 typing 提示约 5 秒后自动消失，
+  而 cc-node 处理耗时较长时只在开始时发送一次 `sendChatAction(typing)`。
+  - 新增 **typing 心跳**：整轮处理期间每 4 秒重发一次 typing 动作，让"正在输入"持续显示
+    直到全部输出完成（`tgThinkingEnd`）才停止。
+  - 涉及 `src/core/cli.js`（主处理路径）与 `src/channel/notify-daemon.js`（cc-notify 路由路径，
+    含代理/直连兼容），处理成功或出错时均停止心跳。
+
+
+## Unreleased — Telegram typing 心跳（持续"正在输入"）
+
+### 🐛 修复
+- **Telegram "正在输入"提示在长任务中途消失**：Telegram 的 typing 提示约 5 秒后自动消失，
+  而 cc-node 处理耗时较长（多轮思考 / 工具执行 / 读取文件）时，只在开始时发送一次
+  `sendChatAction(typing)`，导致用户无法区分"还在工作"与"已完成/卡死"。
+  - 新增 **typing 心跳**：整轮处理期间每 4 秒重发一次 typing 动作，让"正在输入"持续显示，
+    直到全部输出完成（`tgThinkingEnd`）才停止，等待下一轮时提示消失。
+  - 涉及：
+    - `src/core/cli.js` — 主处理路径（REPL/socket 转发）新增 `tgStartTypingHeartbeat` / `tgStopTypingHeartbeat`
+    - `src/channel/notify-daemon.js` — cc-notify 路由路径新增 `tgStartTypingHeartbeat`（含代理/直连兼容），
+      处理成功或出错时均停止心跳
+
 ## v2.7.3 (2026-08-19) — NpmPublish squash 分叉修复
 
 ### 🐛 修复

@@ -1008,16 +1008,38 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
   // 让远程用户看到 AI 正在工作，而不是"以为没回应"。
   // 采用节流 + 编辑同一消息的方式，避免刷屏和触发速率限制。
   // ============================================================
-  const tgThinking = { buffer: '', timer: null, target: null, lastMsgId: null, flushing: false }
+  const tgThinking = { buffer: '', timer: null, target: null, lastMsgId: null, flushing: false, typingTimer: null }
+
+  // Telegram 的 typing 提示约 5 秒后自动消失。若 cc-node 处理耗时较长
+  //（如执行工具、读取文件、多轮思考），单次 sendChatAction 撑不住整个周期，
+  // 用户会看到"正在输入"消失，误以为已完成/卡死。
+  // 因此用一个心跳定时器在整轮处理期间每隔几秒重发一次 typing 动作，
+  // 让"正在输入"持续显示，直到本轮处理完全结束（tgThinkingEnd 清掉定时器）。
+  const TG_TYPING_HEARTBEAT_MS = 4000
+
+  function tgStartTypingHeartbeat() {
+    // 停止旧的，避免重复
+    if (tgThinking.typingTimer) { clearInterval(tgThinking.typingTimer); tgThinking.typingTimer = null }
+    if (!tgListener?.bot || !tgThinking.target) return
+    tgThinking.typingTimer = setInterval(() => {
+      if (!tgThinking.target) { tgStopTypingHeartbeat(); return }
+      tgListener.bot.sendChatAction(tgThinking.target, 'typing').catch(() => {})
+    }, TG_TYPING_HEARTBEAT_MS)
+  }
+
+  function tgStopTypingHeartbeat() {
+    if (tgThinking.typingTimer) { clearInterval(tgThinking.typingTimer); tgThinking.typingTimer = null }
+  }
 
   function tgThinkingStart(target) {
     tgThinking.target = target || null
     tgThinking.buffer = ''
     tgThinking.lastMsgId = null
     tgThinking.flushing = false
-    // 先发送 typing 动作，让 Telegram 立即显示"正在输入"
+    // 先发送 typing 动作，让 Telegram 立即显示"正在输入"，并启动心跳保持持续显示
     if (tgListener?.bot && tgThinking.target) {
       tgListener.bot.sendChatAction(tgThinking.target, 'typing').catch(() => {})
+      tgStartTypingHeartbeat()
     }
   }
 
@@ -1060,6 +1082,8 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
 
   function tgThinkingEnd() {
     if (tgThinking.timer) { clearTimeout(tgThinking.timer); tgThinking.timer = null }
+    // 处理结束，停掉 typing 心跳 → "正在输入" 提示消失
+    tgStopTypingHeartbeat()
     tgThinking.buffer = ''
     tgThinking.lastMsgId = null
     tgThinking.target = null
