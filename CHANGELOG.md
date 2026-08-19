@@ -1,5 +1,20 @@
 # CHANGELOG
 
+## v2.7.7 (2026-08-19) — AskUserQuestion 改为异步发问（取消 pending 挂起结构）
+
+### 🎯 重构
+- **AskUserQuestion 不再"挂起等待"导致会话发呆/卡死**：原先远程提问用 `onAskUser` 返回
+  挂起 Promise + 全局 `pendingAskUser` 标志来等待回答，引擎在等待期间 `isRunning=true`
+  锁死会话；一旦 pending 状态异常，用户回答会被"引擎忙"拒绝，会话陷入发呆，只能 /stop 恢复。
+  - **改为异步发问**：Telegram 通道可用时，发问题到 Telegram 后**立即返回**
+    `(已向用户提问，等待回复): <问题>`（不挂起 Promise、不锁死引擎），引擎结束本轮后
+    会话完全可用；用户后续回复作为**正常消息**进入引擎，由下一轮把回复当作回答。
+  - **取消 pending 结构**：移除 `pendingAskUser` / `cancelAskUser` 全局标志及其在
+    `processInputLine` / `/stop` 中的挂起逻辑。
+  - **不限制来源**：回答不再用 `source === 'telegram'` 排除，任意来源消息都能被正常处理。
+  - CLI 本地模式仍走同步终端交互（`inputCtrl.ask`）。
+  - 涉及：`src/core/cli.js`
+
 ## v2.7.6 (2026-08-19) — AskUserQuestion 超时吞回答修复
 
 ### 🐛 修复

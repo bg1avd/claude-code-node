@@ -588,10 +588,6 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
   let currentSource = 'cli'
   // 等待中的 Telegram 权限确认（resolve 回调）— 远程用户回复 y/n/a 时响应
   let pendingConfirm = null
-  // 等待中的 Telegram AskUserQuestion 回答（resolve 回调）— 远程用户回复任意文本时响应
-  let pendingAskUser = null
-  // 取消当前等待中的 AskUserQuestion（用户 /stop 时调用，resolve 为取消标记，避免死锁）
-  let cancelAskUser = null
   // 最近一次 /models 拉取的模型列表（供 /model <编号> 选择）
   let modelList = []
   // /models 从 Telegram 发出后，等待用户回复编号/名字来选择模型
@@ -611,14 +607,8 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
     // 关键：来自 Telegram 的消息，如果当前正在等待远程权限确认（pendingConfirm），
     // 则把它当作确认回复（y/n/a）处理，而不是当作新的 REPL 输入。
     // 注意：/ 开头的命令优先走命令分支，不被权限确认拦截（否则 /quit、/stop 会被吞）。
-    // 优先处理 pendingAskUser（AskUserQuestion 需要任意文本答案，且通常是用户正在等待的问题）。
-    if (source === 'telegram' && pendingAskUser && !trimmed.startsWith('/')) {
-      const ask = pendingAskUser
-      pendingAskUser = null
-      cancelAskUser = null
-      ask.fn(trimmed)
-      return
-    }
+    // （AskUserQuestion 已改为异步发问，不再依赖 pendingAskUser 挂起结构——用户回复
+    //   作为正常消息进入引擎处理，无锁死/发呆问题。）
     if (source === 'telegram' && pendingConfirm && !trimmed.startsWith('/')) {
       const confirm = pendingConfirm
       pendingConfirm = null
@@ -812,13 +802,7 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
           break
         case 'stop':
           // 停止当前正在运行的 AI 工作（如卡死 / 长时间无响应时）。
-          // 若正在等待 AskUserQuestion 回答，先取消提问（resolve 取消标记），避免引擎挂起。
-          if (pendingAskUser) {
-            const cancel = cancelAskUser
-            pendingAskUser = null
-            cancelAskUser = null
-            if (cancel) cancel()
-          }
+          // AskUserQuestion 已改为异步发问（不挂起），无需在此取消 pending 等待。
           if (engine.state.isRunning) {
             engine.abort()
             console.log('⏹️  已发送停止信号，正在中止当前工作...')
@@ -1157,25 +1141,19 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
   }
   engine.config.readline = rl
 
-  // AskUserQuestion 工具回调 — 按当前来源分流：
-  // - Telegram 远程模式：推送问题到 Telegram 并等待远程回复（带超时兜底，避免死锁）
-  // - CLI 本地模式：走本地终端交互（inputCtrl.ask）
+  // AskUserQuestion 工具回调 — 按通道分流：
+  // - Telegram 可用时：异步发问——发问题到 Telegram 后立即返回（不挂起 Promise、不锁死引擎），
+  //   用户后续回复作为正常消息进入，由下一轮引擎处理时把回复当作回答。
+  //   避免旧"挂起等待"结构导致会话卡死/发呆。
+  // - CLI 本地模式：同步等待本地终端输入。
   engine.config.onAskUser = (question) => {
-    if (currentSource === 'telegram' && tgListener?.bot) {
-      const promptText = `❓ ${question}\n\n请直接回复你的回答。\n（发 /stop 可取消本次提问）`
+    if (tgListener?.bot && tgChatId) {
+      const promptText = `❓ ${question}\n\n请直接回复你的回答。`
       sendTelegram(promptText, null).catch(() => {})
-      return new Promise((resolve) => {
-        // 一直等待用户回答——不设超时自行结束（超时会吞掉迟到回答，违背"等待回答"语义）。
-        // 用户回复任意文本即作为回答；用户 /stop 则通过 cancelAskUser 取消（resolve 取消标记，避免死锁）。
-        pendingAskUser = { fn: (val) => resolve(val) }
-        cancelAskUser = () => {
-          if (pendingAskUser) pendingAskUser = null
-          cancelAskUser = null
-          resolve('(提问已取消)')
-        }
-      })
+      // 立即返回，不挂起；用户回复会在下一轮以正常消息进入
+      return `(已向用户提问，等待回复): ${question}`
     }
-    // CLI 本地模式
+    // CLI 本地模式：同步等待终端输入
     return askQuestion(`❓ ${question}\n> `)
   }
 
