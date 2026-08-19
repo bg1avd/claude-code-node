@@ -1008,7 +1008,10 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
   // 让远程用户看到 AI 正在工作，而不是"以为没回应"。
   // 采用节流 + 编辑同一消息的方式，避免刷屏和触发速率限制。
   // ============================================================
-  const tgThinking = { buffer: '', timer: null, target: null, lastMsgId: null, flushing: false, typingTimer: null }
+  const tgThinking = { buffer: '', timer: null, target: null, lastMsgId: null, flushing: false, typingTimer: null, lastResetAt: 0 }
+  // 周期性重置"🧠 思考中…"消息，避免它无限膨胀成一个无法判断是否仍在工作的静态块。
+  // 每隔 RESET_MS 就删掉旧消息、发一条新的，让用户每隔几秒看到一次明确的活动信号。
+  const TG_THINKING_RESET_MS = 5000
 
   // Telegram 的 typing 提示约 5 秒后自动消失。若 cc-node 处理耗时较长
   //（如执行工具、读取文件、多轮思考），单次 sendChatAction 撑不住整个周期，
@@ -1036,6 +1039,7 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
     tgThinking.buffer = ''
     tgThinking.lastMsgId = null
     tgThinking.flushing = false
+    tgThinking.lastResetAt = Date.now()
     // 先发送 typing 动作，让 Telegram 立即显示"正在输入"，并启动心跳保持持续显示
     if (tgListener?.bot && tgThinking.target) {
       tgListener.bot.sendChatAction(tgThinking.target, 'typing').catch(() => {})
@@ -1062,6 +1066,14 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
     const target = tgThinking.target
     const body = `🧠 思考中…\n\n${tgThinking.buffer.slice(-3500)}`
     try {
+      // 周期性重置：若已有一条消息且距上次重置超过阈值，删除旧消息并发新消息，
+      // 让用户每隔几秒看到"🧠 思考中…"重新出现，明确 AI 仍在工作（而非已卡死/完成）。
+      const needReset = tgThinking.lastMsgId && (Date.now() - tgThinking.lastResetAt) >= TG_THINKING_RESET_MS
+      if (needReset) {
+        tgListener.bot.deleteMessage(target, tgThinking.lastMsgId).catch(() => {})
+        tgThinking.lastMsgId = null
+        tgThinking.lastResetAt = Date.now()
+      }
       if (tgThinking.lastMsgId) {
         await tgListener.bot.editMessage(target, tgThinking.lastMsgId, body, { parseMode: 'HTML' })
       } else {
