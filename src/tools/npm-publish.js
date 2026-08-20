@@ -87,6 +87,21 @@ function sh(cmd, cwd) {
   return execSync(cmd, { cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim()
 }
 
+/**
+ * 解析 `npm pack --json` 输出，提取 tarball 文件名。
+ * 输出形如 `{"@scope/pkg":{"filename":"pkg-1.0.0.tgz",...}}`（嵌套包名键）。
+ * @param {string} packJson npm pack --json 的原始输出
+ * @returns {string} tarball 文件名
+ * @throws 无法解析时抛错
+ */
+export function parsePackJson(packJson) {
+  const data = JSON.parse(packJson)
+  const meta = Object.values(data)[0] || {}
+  const filename = meta.filename
+  if (!filename) throw new Error('npm pack --json 输出缺少 filename')
+  return filename
+}
+
 /** 读取 ~/.npmrc 中的 token */
 function getNpmToken() {
   try {
@@ -261,7 +276,10 @@ async function doPublish({ cwd, version, commitMessage, squash, doGitPush, doNpm
   // 3. 打包
   let tarballPath = ''
   try {
-    tarballPath = join(cwd, sh('npm pack --json', cwd).match(/"filename":"([^"]+)"/)?.[1] || '')
+    // 用 JSON 解析提取 filename（旧正则 /"filename":"([^"]+)"/ 因冒号后有空格而匹配不到，
+    // 导致 join(cwd,'') 得到目录 → 后续 readFileSync EISDIR，见 parsePackJson 注释）。
+    const filename = parsePackJson(sh('npm pack --json', cwd))
+    tarballPath = join(cwd, filename)
     steps.push(`打包: ${tarballPath.split('/').pop()}`)
   } catch (e) {
     return { ok: false, steps, error: `打包失败: ${e.message}` }

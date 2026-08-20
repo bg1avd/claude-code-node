@@ -12,7 +12,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 
-import { npmPublishTool } from '../tools/npm-publish.js'
+import { npmPublishTool, parsePackJson } from '../tools/npm-publish.js'
 
 describe('NpmPublish 工具结构', () => {
   test('工具元数据正确', () => {
@@ -21,6 +21,29 @@ describe('NpmPublish 工具结构', () => {
     const actions = npmPublishTool.parameters.properties.action.enum
     assert.deepStrictEqual(actions, ['status', 'version', 'pack', 'publish', 'manual-publish'])
     assert.ok(npmPublishTool.description.includes('npm'))
+  })
+})
+
+describe('parsePackJson 打包解析', () => {
+  test('解析真实 npm pack --json 输出（冒号后有空格），不产生 EISDIR 目录 bug', () => {
+    // npm pack --json 实际输出：嵌套包名键，且 "filename" 冒号后带空格
+    const packJson = JSON.stringify({
+      '@raolin2025/claude-code-node': {
+        id: '@raolin2025/claude-code-node@2.7.8',
+        name: '@raolin2025/claude-code-node',
+        version: '2.7.8',
+        filename: 'raolin2025-claude-code-node-2.7.8.tgz',
+      },
+    }, null, 2) // 带缩进，模拟真实输出
+    assert.strictEqual(parsePackJson(packJson), 'raolin2025-claude-code-node-2.7.8.tgz')
+  })
+
+  test('无 filename 时抛错', () => {
+    assert.throws(() => parsePackJson(JSON.stringify({ '@x/y': { version: '1.0.0' } })), /filename/)
+  })
+
+  test('非法 JSON 抛错', () => {
+    assert.throws(() => parsePackJson('not-json'), SyntaxError)
   })
 })
 

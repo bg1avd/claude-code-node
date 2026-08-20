@@ -1,6 +1,18 @@
 # CHANGELOG
 
-## v2.7.8 (未发布) — Telegram 退出 409 竞态加固
+## v2.7.9 (2026-08-20) — 修复 NpmPublish 发布工具 EISDIR bug
+
+### 🐛 修复
+- **NpmPublish `publish` 一键发布偶发 `EISDIR: illegal operation on a directory, read`**：
+  工具用正则 `/"filename":"([^"]+)"/` 解析 `npm pack --json` 输出，但 npm 实际输出
+  为 `"filename": "xxx.tgz"`（**冒号后有空格**），正则匹配不到 → `join(cwd, '')` 得到
+  **目录本身** → 后续 `readFileSync` 触发 EISDIR，发布失败。
+  - **改用 JSON 解析**：新增可导出 `parsePackJson()`，用 `JSON.parse` 提取 `filename`，
+    彻底消除正则空白依赖；无法解析时明确报错而非生成目录路径。
+  - 新增回归测试：`src/__tests__/npm-publish.test.js` 覆盖带空格输出、缺 filename、非法 JSON。
+  - 涉及：`src/tools/npm-publish.js`。
+
+## v2.7.8 (2026-08-20) — Telegram 退出 409 竞态加固
 
 ### 🐛 修复
 - **Telegram `/quit` 退出时偶发 `HTTP 409 Conflict`**：Telegram Bot API 规定同一 bot token
