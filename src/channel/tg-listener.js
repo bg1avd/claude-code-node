@@ -284,6 +284,11 @@ export class TelegramListener {
     this._lastPollError = null      // 最近一次轮询错误消息（用于去抖刷屏）
     this._lastPollErrorAt = 0       // 最近一次轮询错误时间戳
     this._msgQueue = Promise.resolve()  // 消息串行处理队列（避免阻塞轮询循环）
+    // 排他锁 — 解决 flushOffset 与 _poll 长轮询并发触发 getUpdates 导致 409 Conflict。
+    // Telegram 同一 bot token 同一时刻只允许一个 getUpdates 长轮询。
+    this._pollAbort = null          // 当前 _poll 挂起请求的 AbortController（供 flush 取消）
+    this._flushLock = false         // true = flushOffset 正在独占 bot 连接
+    this._polling = false           // 是否正处于 _poll 请求挂起中（await 未返回）
     this.conversations = new ConversationState()
     this._onMessage = null
     this._handlers = {}
@@ -329,11 +334,23 @@ export class TelegramListener {
   /** 内部轮询 */
   async _poll() {
     while (this.running) {
+      // flushOffset 持有排他锁时，不发起新的 getUpdates，避免与 flush 并发导致 409。
+      // flush 会 abort 当前挂起请求并设置锁，这里等待锁释放后再继续。
+      if (this._flushLock) {
+        await this._sleep(50)
+        continue
+      }
+
+      // 为本次请求创建 AbortController，flushOffset 可通过它取消挂起的长轮询，
+      // 从而独占 bot 连接、消除 409 竞态。
+      this._pollAbort = new AbortController()
+      this._polling = true
       try {
         const url = `${this.bot.apiBase}/getUpdates`
         const res = await this._fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          signal: this._pollAbort.signal,
           // 长轮询本身最多等 30s（Telegram API 参数），HTTP 层超时必须更长，
           // 否则代理路径（fetchViaSocks5）30s 硬超时会误杀长轮询 → HTTP request timeout 刷屏。
           timeout: 60000,
@@ -379,6 +396,11 @@ export class TelegramListener {
         this._retryDelay = 1000
 
       } catch (e) {
+        // flushOffset 通过 abort 取消挂起请求以独占连接 — 属于预期中断，静默处理不告警。
+        // 回到循环顶部，等待 flushOffset 释放 _flushLock 后继续轮询。
+        if (this._flushLock && e.name === 'AbortError') {
+          continue
+        }
         // 错误去抖：连续相同的错误（如长轮询超时）只在首次/状态变化时打印，
         // 避免 AI 处理长任务时 getUpdates 空转超时不断刷屏。
         const msg = e.message || 'unknown'
@@ -392,6 +414,10 @@ export class TelegramListener {
         }
         await this._sleep(this._retryDelay)
         this._retryDelay = Math.min(this._retryDelay * 2, this.maxRetryDelay)
+      } finally {
+        // 请求结束（成功/失败/abort）— 清理挂起状态，供 flushOffset 判断 poll 已让出
+        this._polling = false
+        this._pollAbort = null
       }
     }
   }
@@ -694,10 +720,28 @@ export class TelegramListener {
    * 同步强杀进程，没有机会再 poll 一次 → 未确认的 update 残留在服务器。
    * 调用 getUpdates(offset=lastUpdateId+1) 可让 Telegram 立即确认消费。
    * 返回 Promise，调用方应 await 后再退出。
+   *
+   * 加固：Telegram 同一 bot token 同时只允许一个 getUpdates 长轮询，
+   * 若 flush 与 _poll 正在挂起的长轮询并发，会触发 409 Conflict。
+   * 因此 flush 先通过 AbortController 取消当前 _poll 请求、独占 bot 连接，
+   * 再发起自己的 getUpdates，彻底消除 409 竞态。
    */
   async flushOffset() {
     if (!this.bot) return
+    // 已持有排他锁（理论上不会重入，防御性直接返回）
+    if (this._flushLock) return
+
+    // 1. 取得排他锁：先取消正在挂起的 _poll 长轮询，再等它完全让出连接。
+    this._flushLock = true
     try {
+      if (this._pollAbort) this._pollAbort.abort()
+      // 等待 _poll 从 await 返回并清理 _polling（最长 2s，防止极端情况下卡死退出）
+      const deadline = Date.now() + 2000
+      while (this._polling && Date.now() < deadline) {
+        await this._sleep(20)
+      }
+
+      // 2. 独占发起 getUpdates 确认消费（timeout:0 立即返回，不挂长轮询）
       const url = `${this.bot.apiBase}/getUpdates`
       const res = await this._fetch(url, {
         method: 'POST',
@@ -716,7 +760,12 @@ export class TelegramListener {
           return
         }
       }
-    } catch {}
+    } catch {
+      // flush 失败不影响退出，offset 已持久化到磁盘，双保险兜底
+    } finally {
+      // 3. 释放排他锁，_poll 循环顶部检测到后继续轮询（进程随即退出，正常路径用不到）
+      this._flushLock = false
+    }
   }
 }
 

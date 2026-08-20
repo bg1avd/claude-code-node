@@ -279,12 +279,28 @@ export async function fetchViaSocks5(url, options = {}, proxyAddr) {
       reject(new Error('HTTP request timeout'))
     }, timeoutMs)
 
+    // 支持 AbortController 取消（如 flushOffset 想中断挂起的长轮询以独占 bot 连接）。
+    // 触发 abort 时销毁 socket，使挂起的请求立即以 AbortError 结束，而不是等 HTTP 超时。
+    const signal = options.signal
+    const onAbort = () => {
+      const err = new Error('The operation was aborted')
+      err.name = 'AbortError'
+      clearTimeout(timeout)
+      socket.destroy()
+      reject(err)
+    }
+    if (signal) {
+      if (signal.aborted) return onAbort()
+      signal.addEventListener('abort', onAbort, { once: true })
+    }
+
     socket.write(reqBuf)
     socket.on('data', (chunk) => {
       responseData += chunk.toString()
     })
     socket.on('end', () => {
       clearTimeout(timeout)
+      if (signal) signal.removeEventListener('abort', onAbort)
       // 解析 HTTP 响应
       const headerEnd = responseData.indexOf('\r\n\r\n')
       if (headerEnd < 0) {
@@ -306,6 +322,7 @@ export async function fetchViaSocks5(url, options = {}, proxyAddr) {
     })
     socket.on('error', (err) => {
       clearTimeout(timeout)
+      if (signal) signal.removeEventListener('abort', onAbort)
       reject(err)
     })
   })

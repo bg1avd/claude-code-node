@@ -1,5 +1,21 @@
 # CHANGELOG
 
+## v2.7.8 (未发布) — Telegram 退出 409 竞态加固
+
+### 🐛 修复
+- **Telegram `/quit` 退出时偶发 `HTTP 409 Conflict`**：Telegram Bot API 规定同一 bot token
+  同一时刻只允许一个 `getUpdates` 长轮询。`/quit` 前 `flushOffset()` 会再发一个 `getUpdates`
+  确认消费，若与 `_poll` 循环中仍在挂起的长轮询（timeout:30s）并发，Telegram 会拒绝并返回
+  `409 Conflict`（"terminated by other getUpdates request"）。
+  - **排他锁机制**：`flushOffset()` 先通过 `AbortController` 取消当前挂起的 `_poll` 长轮询、
+    等待其完全让出连接，再独占发起自己的 `getUpdates`（`timeout:0` 立即返回），彻底消除 409 竞态。
+  - **`_poll` 让位**：检测到 flush 持有排他锁时不再发起新请求，等待锁释放后继续轮询；
+    被 abort 中断视为预期操作，静默处理不告警。
+  - **代理路径支持 abort**：`fetchViaSocks5` 增加对 `AbortSignal` 的监听，abort 时销毁 socket，
+    使挂起的长轮询立即以 `AbortError` 结束（而非等 60s HTTP 超时）。
+  - 涉及：`src/channel/tg-listener.js`、`src/channel/tg-proxy.js`，新增测试
+    `src/__tests__/tg-listener-flush.test.js`。
+
 ## v2.7.7 (2026-08-19) — AskUserQuestion 改为异步发问（取消 pending 挂起结构）
 
 ### 🎯 重构
