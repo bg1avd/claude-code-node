@@ -353,20 +353,15 @@ claude-code-node/              33 文件 · 4307 行
 
 ## 📡 通讯通道 (Notification Channels)
 
-cc-node 支持多平台消息推送，任务完成或出错时自动通知到手机。
+cc-node 通过 **Telegram** 消息推送，任务完成或出错时自动通知到手机，并支持远程编程。
 
 ### 支持的通道
 
 | 通道 | 配置方式 | 说明 |
 |------|----------|------|
-| **Telegram** | Bot Token + Chat ID | 最推荐，支持 Markdown |
-| **企业微信** | Webhook URL | 群机器人 |
-| **飞书** | Webhook URL | 群机器人 |
-| **Discord** | Webhook URL | 服务器频道 |
-| **Slack** | Webhook URL | Incoming Webhook |
-| **自定义** | HTTP URL + Method | 任意 Webhook |
+| **Telegram** | Bot Token + Chat ID | 唯一支持通道，支持富媒体、Markdown、远程编程 |
 
-### 快速配置 (Telegram 为例)
+### 快速配置 (Telegram)
 
 ```bash
 # 1. 在 Telegram 找 @BotFather 创建 Bot，拿到 Token
@@ -464,7 +459,7 @@ cc-notify 是独立的通知守护进程，**不需要 cc-node 在前台运行**
 ### v2.0 新特性
 
 - ✅ **Telegram 监听** — 速率限制、Markdown 安全编码、多轮对话
-- ✅ **统一消息处理器** — 所有通道共享同一路由逻辑
+- ✅ **统一消息处理器** — Telegram 通道共享同一路由逻辑
 - ✅ **长消息分段** — 自动切分超过 4000 字符的回复
 - ✅ **API Key 持久化** — 自动生成并保存，重启不丢失
 
@@ -484,7 +479,7 @@ cc-notify 是独立的通知守护进程，**不需要 cc-node 在前台运行**
 你好                     → 当作一次性任务发给 cc-node 执行
 /ping                    → 检查服务是否在线
 /run ls -la              → 执行 shell 命令
-/notify 任务完成！       → 向所有通道广播通知
+/notify 任务完成！       → 通过 Telegram 广播通知
 /status                  → 查看服务状态
 /cancel                  → 取消当前操作
 ```
@@ -638,4 +633,6 @@ PRMergePolicy 支持以下检查（可配置）：
 - GitTool 已内置到 cc-node 工具集中
 - 可通过 `/tools` 查看
 - 审查结果可与 Telegram 通道集成，发送通知
+
+
 

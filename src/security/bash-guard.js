@@ -77,6 +77,33 @@ const DANGEROUS_PATTERNS = [
   { pattern: /\bmodprobe\b/, reason: '自动加载内核模块', severity: 'high' },
 ]
 
+// === PowerShell 危险命令模式（v1.2 新增，跨平台支持）===
+// 当 shell 为 PowerShell / cmd 时同样拦截破坏性操作
+const POWERSHELL_DANGEROUS_PATTERNS = [
+  // 破坏性删除
+  { pattern: /\bRemove-Item\b.*-[a-zA-Z]*Recurse[a-zA-Z]*.*-[a-zA-Z]*Force[a-zA-Z]*/i, reason: 'PowerShell 递归强制删除', severity: 'critical' },
+  { pattern: /\brm\s+-recurse\b.*-force\b/i, reason: 'PowerShell rm 递归强制删除', severity: 'critical' },
+  { pattern: /\bRemove-Item\b.*[A-Z]:\\/i, reason: 'PowerShell 删除磁盘根目录内容', severity: 'critical' },
+  { pattern: /\b(Remove-Item|rmdir|rd)\s+\/\s*[a-z]:\s*(\\|$)/i, reason: '删除盘符根目录', severity: 'critical' },
+  // 格式化 / 磁盘
+  { pattern: /\bFormat-Volume\b/i, reason: 'PowerShell 格式化卷', severity: 'critical' },
+  { pattern: /\bformat\s+[a-z]:/i, reason: 'cmd 格式化磁盘', severity: 'critical' },
+  { pattern: /\bClear-Disk\b/i, reason: 'PowerShell 清空磁盘', severity: 'critical' },
+  // 远程执行 / 下载执行
+  { pattern: /\bInvoke-Expression\b.*\b(Invoke-WebRequest|iwr|curl|wget|New-Object.*WebClient)\b/i, reason: 'PowerShell 下载并执行（IEX）', severity: 'critical' },
+  { pattern: /\bIEX\s*\(?\s*\(?\s*(New-Object|iwr|Invoke-WebRequest)/i, reason: 'PowerShell 下载并执行（IEX 简写）', severity: 'critical' },
+  { pattern: /\bStart-Process\b.*\b(Invoke-WebRequest|iwr)/i, reason: 'PowerShell 下载并启动进程', severity: 'critical' },
+  // 系统关键路径
+  { pattern: /(system32|Windows\\System|Program Files)\\?(\.+\\)/i, reason: '操作系统关键目录', severity: 'high' },
+  { pattern: /\b(Disable|Enable)-Firewall\b/i, reason: '修改防火墙', severity: 'high' },
+  { pattern: /\bSet-ExecutionPolicy\b/i, reason: '修改执行策略（可能绕过安全限制）', severity: 'high' },
+  { pattern: /\b(Add-LocalGroupMember|Set-LocalUser)\b.*administrators/i, reason: '修改管理员组成员（提权）', severity: 'critical' },
+  { pattern: /\bNew-LocalUser\b.*-Password/i, reason: '创建本地用户', severity: 'high' },
+  // 系统信息外泄
+  { pattern: /\b(Export-Csv|Out-File)\b.*(password|secret|credential|token)/i, reason: '导出敏感凭据', severity: 'critical' },
+  { pattern: /\b(Get-Credential|ConvertFrom-SecureString)\b.*(-Key|-AsPlainText)/i, reason: '导出解密凭据', severity: 'critical' },
+]
+
 /**
  * 命令替换注入检测
  * 检查 $(cmd) 和 `cmd` 在高危上下文中的使用
@@ -225,8 +252,18 @@ export function checkBashSafety(command) {
   const reasons = []
   let maxSeverity = 'none'
 
-  // 1. 危险模式匹配
+  // 1. 危险模式匹配（bash / POSIX 语法）
   for (const { pattern, reason, severity } of DANGEROUS_PATTERNS) {
+    if (pattern.test(command)) {
+      reasons.push(`[${severity.toUpperCase()}] ${reason}`)
+      if (severity === 'critical' || (severity === 'high' && maxSeverity !== 'critical')) {
+        maxSeverity = severity
+      }
+    }
+  }
+
+  // 1b. PowerShell / cmd 危险模式匹配（v1.2 跨平台）
+  for (const { pattern, reason, severity } of POWERSHELL_DANGEROUS_PATTERNS) {
     if (pattern.test(command)) {
       reasons.push(`[${severity.toUpperCase()}] ${reason}`)
       if (severity === 'critical' || (severity === 'high' && maxSeverity !== 'critical')) {

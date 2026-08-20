@@ -1,5 +1,28 @@
 # CHANGELOG
 
+## v2.8.0 (2026-08-20) — Bash 工具跨平台（Windows shell 探测 + PowerShell 安全检测）
+
+### ✨ 新特性
+- **Shell 探测抽象层** `src/utils/shell.js`：启动时自动探测当前平台可用的 shell 并缓存。
+  - **Linux/macOS** → `/bin/bash`（尊重 `SHELL` 环境变量，支持 zsh）。
+  - **Windows** 按优先级探测：`Git Bash` → `WSL bash` → `PowerShell`（pwsh 优先）→ `cmd.exe` 兜底。
+  - 提供 `detectShell()`（幂等缓存）、`getShellDescription()`（LLM 可读环境描述）、`isUnixShell()`。
+- **Bash 工具描述动态化**：`src/tools/bash.js` 不再固定声明 "bash" 语义，而是根据探测结果
+  生成 description，明确告知模型当前是 `Bash / WSL Bash / PowerShell / cmd`，并提示对应语法
+  （如 PowerShell 用 `Get-ChildItem` 而非 `ls`），避免 Windows 上写出 Linux 命令导致失败。
+
+### 🛡️ 安全增强
+- **PowerShell / cmd 危险命令检测** `src/security/bash-guard.js`（v1.2）：
+  - 拦截 `Remove-Item -Recurse -Force`、`rm -recurse -force` 递归强制删除、删除盘符根目录。
+  - 拦截 `Invoke-Expression`（含 `iex` 简写）下载并执行、`Format-Volume` / `format c:` 格式化磁盘。
+  - 拦截 `Add-LocalGroupMember` 提权、`New-LocalUser` 建户、凭据导出（`ConvertFrom-SecureString`）等。
+  - bash 与 PowerShell 两套规则同时生效，无论用户写哪种语法均受保护。
+
+### 🧪 测试
+- 新增 `src/__tests__/shell.test.js`：探测层 9 个用例（平台判定、SHELL 尊重、cmd 兜底、幂等缓存）。
+- 新增 `src/__tests__/bash-guard-crossplatform.test.js`：PowerShell 拦截 + 放行 + bash 回归共 10 个用例。
+- 新增测试全部通过；未改动 git-tool 等既有逻辑。
+
 ## v2.7.9 (2026-08-20) — 修复 NpmPublish 发布工具 EISDIR bug
 
 ### 🐛 修复
