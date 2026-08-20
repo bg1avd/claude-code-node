@@ -1,5 +1,15 @@
 # CHANGELOG
 
+## v2.8.1 (2026-08-20) — 全新机械臂机器人头标
+
+### 🎨 界面
+- **替换 CLI 启动头标图案** `src/core/headpiece.js`：从简单 "CC" 蓝块 + "NODE" 绿块，
+  升级为机械臂机器人图案（CC 机械眼睛蓝渐变 + N O D E 身体 + 黄色工具箱）。
+- **修复新图案右边缘不齐**：图案上 5 行（眼睛部分）宽度不足 20 列，在 `renderHeadpiece`
+  中新增逐行右填充对齐逻辑，统一补齐到 20 列，保证右边缘对齐。
+- **保持接口兼容**：`renderHeadpiece({ colWidth })` → `{ lines, height, width }` 不变，
+  CLI 3 栏 banner 用 `robotLines.length` 动态适配行数（8 行 → 10 行自动适配，无需改 cli.js）。
+
 ## v2.8.0 (2026-08-20) — Bash 工具跨平台（Windows shell 探测 + PowerShell 安全检测）
 
 ### ✨ 新特性
