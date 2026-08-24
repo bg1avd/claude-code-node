@@ -26,6 +26,16 @@ const DEFAULTS = {
     fileRead: { maxLines: 2000, maxSizeKB: 256 },
     webFetch: { timeout: 30, maxChars: 100000 },
   },
+  web: {
+    fetch: {
+      maxChars: 100000,
+      maxBytes: 10485760,  // 10MB
+      timeoutMs: 30000,
+      maxRedirects: 5,
+      fallbackProvider: 'safe-jina',  // 直连失败时的兜底 provider
+      jinaApiKey: '',                  // 可选（匿名约 20 RPM）
+    },
+  },
   channels: {},
   defaultChannel: null,
   qqbot: {

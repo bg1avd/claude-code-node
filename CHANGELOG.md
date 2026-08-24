@@ -1,6 +1,30 @@
 # CHANGELOG
 
-## v2.8.2 (未发布) — 上下文窗口自动感知 + 手动指定
+## v2.8.3 (未发布) — WebFetch 安全抓取管道 + Jina Reader 兜底
+
+### ✨ 新特性
+- **WebFetch 安全管道** `src/security/fetch-guard.js`（移植自 safe-jina-fetch 设计）：
+  - 协议白名单：仅 http/https，拒绝 file://、ftp://、data: 等。
+  - 连接级 SSRF 防护：注入 `lookup` 钩子，TCP 连接时对全部解析地址逐一校验（防 DNS rebinding），
+    并对 IP 字面量前置校验（Node 对 IP 不走 DNS lookup，此前存在绕过漏洞，已修复）。
+  - 重定向逐跳校验：默认最多 5 跳，每跳重新校验协议 + SSRF（防 302 → 内网绕过）。
+  - 响应大小上限 10MB、超时 30s、强制 SSL（证书错误直接拒绝）。
+- **敏感数据自动脱敏** `src/security/redact.js`：API Key / Bearer / AWS Key / 私钥 /
+  OpenAI `sk-` / Slack token 等命中即替换为 `[REDACTED:类型]` 并告警。
+- **Jina Reader 兜底** `src/tools/web-fetch-providers.js`：
+  - 直连失败（403/反爬/网络错误/超时）时自动经 `r.jina.ai` 清洗后返回 Markdown。
+  - 直连 200 但正文 < 200 字符（疑似 JS 挑战页）也触发兜底（对齐 DESIGN.md §8 增强）。
+  - 新增 `extractMode` 参数：`auto`（默认）/ `direct`（强制直连）/ `jina`（强制 Jina）。
+  - Jina 凭据三选一：环境变量 `JINA_API_KEY` > 配置 `web.fetch.jinaApiKey` > 匿名。
+
+### 🔧 内部
+- `src/tools/web-fetch.js` 全面重构：改用 `safeFetchWithRedirects`（替代裸 fetch）、内容脱敏、
+  直连优先 + Jina 兜底。
+- `src/core/query-engine.js`：`QueryEngineConfig` 新增 `configStore` 字段，供工具读取配置。
+- `src/core/config.js`：新增 `web.fetch.*` 配置项（maxChars/maxBytes/timeoutMs/maxRedirects/jinaApiKey）。
+- 新增 `src/__tests__/web-fetch-guard.test.js`（21 个测试：协议/SSRF/重定向/脱敏/Jina）。
+
+## v2.8.2 (2026-08-24) — 上下文窗口自动感知 + 手动指定
 
 ### ✨ 新特性
 - **上下文窗口感知** `src/core/context-window.js`：自动探测所用模型真实上下文窗口，

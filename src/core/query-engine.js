@@ -47,6 +47,7 @@ export class QueryEngineConfig {
     this.onAskUser = options.onAskUser || null            // AskUserQuestion 工具回调（宿主按来源分流，避免远程死锁）
     this.readline = options.readline || null              // 用于 AskUserQuestion 工具
     this.onDelta = options.onDelta || null                // 流式增量回调 {type:'text'|'reasoning', text}（供 VS Code 扩展等 UI 消费）
+    this.configStore = options.configStore || null        // 配置实例（供工具读取 web.fetch.jinaApiKey 等；可选）
   }
 }
 

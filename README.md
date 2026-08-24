@@ -166,7 +166,7 @@ cc-node 会自动感知当前所用模型的**上下文窗口长度**，并在�
 | **Write** | 创建/覆盖文件 | `ask` | ✅ 写入路径安全 |
 | **Glob** | 文件模式搜索 | `always-allow` | — |
 | **Grep** | 内容搜索（rg/grep） | `always-allow` | — |
-| **WebFetch** | 抓取网页内容 | `ask` | ✅ SSRF 防护 |
+| **WebFetch** | 抓取网页内容（安全管道 + Jina 兜底） | `ask` | ✅ SSRF + 重定向 + 脱敏 |
 | **WebSearch** | 网页搜索 | `ask` | 需要 API Key |
 | **GitTool** | GitHub PR 自动化（审查/合并/评论） | `high` | ✅ 预检查 |
 | **NpmPublish** | npm 发布一键工具（版本/打包/发布） | `ask` | ✅ token 校验 |
@@ -194,9 +194,27 @@ cc-node 会自动感知当前所用模型的**上下文窗口长度**，并在�
 ✅ ::1                 — IPv6 回环
 ```
 
+### 🕸️ WebFetch 安全抓取（安全管道 + Jina 兜底）
+
+`WebFetch` 内置完整安全管道（移植自 safe-jina-fetch 设计，`src/security/fetch-guard.js`）：
+
+- **协议白名单**：仅 `http/https`，拒绝 `file://`、`ftp://`、`data:` 等
+- **连接级 SSRF**：TCP 连接建立时对全部解析地址逐一校验（防 DNS rebinding），
+  并对 IP 字面量前置校验（Node 对 IP 不走 DNS lookup，必须显式拦截）
+- **重定向逐跳校验**：默认最多 5 跳，每跳重新校验协议 + SSRF（防 302 → 内网绕过）
+- **响应大小上限**：10MB；**超时**：30s；**强制 SSL**（证书错误直接拒绝）
+- **敏感数据自动脱敏**：API Key / Bearer / AWS Key / 私钥 / OpenAI `sk-` / Slack token 等
+  命中即替换为 `[REDACTED:类型]` 并告警（`src/security/redact.js`）
+
+**Jina Reader 兜底**（`src/tools/web-fetch-providers.js`）：
+
+- 直连失败（403 / 反爬 / 网络错误 / 超时）时，自动经 `r.jina.ai` 清洗后返回 Markdown
+- 直连返回 200 但正文 < 200 字符（疑似 JS 挑战页，如豆瓣）也触发兜底
+- `extractMode` 参数：`auto`（默认，直连优先 + 兜底）/ `direct`（强制直连）/ `jina`（强制 Jina）
+- Jina 凭据三选一（可选，匿名约 20 RPM）：环境变量 `JINA_API_KEY` > 配置 `web.fetch.jinaApiKey` > 匿名
+
 ### 2️⃣ Bash 命令安全（279 行）
 阻止 LLM 执行危险 shell 命令：
-
 | 类别 | 示例 | 严重性 |
 |------|------|--------|
 | 破坏性操作 | `rm -rf /`, `dd of=/dev/sda`, `mkfs` | 🚫 CRITICAL |

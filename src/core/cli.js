@@ -524,6 +524,7 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
     noStream: cliArgs.noStream,
     costTracker,
     tokenBudget,
+    configStore: config,
   })
   const engine = new QueryEngine(engineConfig)
 
