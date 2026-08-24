@@ -5,6 +5,14 @@ export { UserMessage, AssistantMessage, ToolCall } from "../types/index.js"
  */
 export { QueryEngine, QueryEngineConfig } from './query-engine.js'
 export { TokenBudget, estimateTokens } from './token-budget.js'
+export {
+  detectContextWindow,
+  parseWindowArg,
+  formatTokens,
+  windowSourceLabel,
+  WINDOW_SOURCE,
+  MODEL_CONTEXT_TABLE,
+} from './context-window.js'
 export { SessionManager } from './session.js'
 export { Config } from './config.js'
 export { parseStream, parseNonStreamResponse } from './streaming.js'

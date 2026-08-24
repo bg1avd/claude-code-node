@@ -24,6 +24,20 @@ export class TokenBudget {
     this.used = 0
     this.inputTokens = 0
     this.outputTokens = 0
+    // 当前窗口来源：'manual' | 'probe' | 'table' | 'fallback'（见 context-window.js）
+    this.windowSource = options.windowSource || 'fallback'
+  }
+
+  /**
+   * 更新上下文窗口上限（运行时生效，立即反映到 usagePercent）
+   * @param {number} maxTokens
+   * @param {string} [source] — 窗口来源标签
+   */
+  setWindow(maxTokens, source) {
+    if (Number.isFinite(maxTokens) && maxTokens > 0) {
+      this.maxTokens = maxTokens
+    }
+    if (source) this.windowSource = source
   }
 
   /** 可用于上下文的最大 token 数 */

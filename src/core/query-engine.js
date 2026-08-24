@@ -111,6 +111,20 @@ export class QueryEngine {
     let finalResponse = ''
 
     for (let turn = 0; turn < this.config.maxTurns; turn++) {
+      // 发送前硬校验：估算即将发送的消息是否超出窗口，超限则先压缩（最终兜底，防止溢出）
+      if (this.tokenBudget) {
+        const est = this.tokenBudget.estimateMessages(this.state.messages)
+        if (est > this.tokenBudget.maxTokens - this.tokenBudget.reservedForOutput) {
+          const { compacted, messages } = autoCompact(this.state.messages, this.tokenBudget, {
+            maxTokens: Math.floor(this.tokenBudget.maxTokens * 0.6),
+          })
+          if (compacted) {
+            this.state.messages = messages
+            if (this.config.verbose) console.error('[compact] Pre-send hard check: compressed to stay within window')
+          }
+        }
+      }
+
       const requestMessages = this._buildRequest(this.state.messages)
       const response = await this._callLLM(requestMessages, this.state.messages)
 

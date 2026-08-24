@@ -1,5 +1,30 @@
 # CHANGELOG
 
+## v2.8.2 (未发布) — 上下文窗口自动感知 + 手动指定
+
+### ✨ 新特性
+- **上下文窗口感知** `src/core/context-window.js`：自动探测所用模型真实上下文窗口，
+  替代原先固定的 100 万/20 万默认预算，让自动压缩真正按"模型窗口"触发。
+  - 窗口来源优先级：**手动指定 > API 探测 > 内置模型表 > 安全兜底(64K)**。
+  - 内置常见模型上下文表（DeepSeek/OpenAI/Claude/Qwen/GLM/Kimi/本地开源）。
+  - 从 `GET /models` 响应中提取窗口（兼容 vLLM `context_length`、Ollama `model_info` 等）。
+  - 探测结果**不落盘**，每次启动重新探测；手动指定才持久化（方案 A）。
+- **新增 `/window` 命令**：查看/手动指定当前上下文窗口。
+  - `/window` — 显示当前窗口 + 来源 + 用量。
+  - `/window 128k` / `/window 64k` / `/window 1m` — 手动指定（支持 K/M 后缀，持久化到 config）。
+  - `/window auto` — 清除手动指定，回到自动探测；`/window reset` — 清除并立即重探测。
+- **`/model` 切换联动**：切换模型后自动重新探测上下文窗口（非手动指定时）。
+- **`/budget` 增强**：追加显示当前上下文窗口、来源与 80% 触发阈值。
+
+### 🛡️ 健壮性
+- **发送前硬校验兜底** `src/core/query-engine.js`：`_runToolLoop` 每次发送前用
+  `estimateMessages` 估算，若超窗先压缩再发，作为"上下文永不溢出"的最终保险。
+- **`TokenBudget.setWindow()`**：运行时更新窗口上限，立即反映到 `usagePercent`。
+
+### 🔧 内部
+- `src/core/token-budget.js`：新增 `windowSource` 属性与 `setWindow()` 方法。
+- `src/core/index.js`：导出 context-window 模块。
+
 ## v2.8.1 (2026-08-20) — 全新机械臂机器人头标
 
 ### 🎨 界面

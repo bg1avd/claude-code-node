@@ -111,9 +111,49 @@ printf '{"jsonrpc":"2.0","id":1,"method":"initialize"}\n' | cc-node --stdio
 | `/clear` | 清空当前对话 |
 | `/config KEY` | 查看配置（支持点号路径如 `tools.bash.timeout`） |
 | `/budget` | 查看 Token 预算使用情况 |
+| `/window [N]` | 查看/设置上下文窗口（如 `/window 128k`、`/window auto`） |
 | `/exit` `/quit` | 退出（Ctrl+C 也可以） |
 
 [![npm version](https://img.shields.io/npm/v/@raolin2025/claude-code-node.svg)](https://www.npmjs.com/package/@raolin2025/claude-code-node) [![GitHub](https://img.shields.io/badge/GitHub-bg1avd%2Fclaude--code--node-blue)](https://github.com/bg1avd/claude-code-node) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+---
+
+## 🧠 上下文窗口感知（自动压缩）
+
+cc-node 会自动感知当前所用模型的**上下文窗口长度**，并在接近上限时**自动压缩**对话历史，
+确保上下文**永不超出**模型窗口。
+
+### 窗口来源优先级
+
+| 优先级 | 来源 | 说明 |
+|--------|------|------|
+| 1 | **手动指定**（`/window N`） | 持久化到 config，每次启动优先采用 |
+| 2 | **API 探测** | 从 `GET /models` 响应提取（vLLM `context_length`、Ollama `model_info` 等） |
+| 3 | **内置模型表** | 内置 40+ 常见模型上下文表（DeepSeek/OpenAI/Qwen/GLM/Kimi 等） |
+| 4 | **安全兜底** | 64K（探测不到且表里没有时） |
+
+> 探测结果**不落盘**，每次启动重新探测；只有 `/window N` 手动指定才会持久化（方案 A）。
+> 探测不精确时，用 `/window N` 手动纠正即可。
+
+### 自动压缩机制
+
+- 当已用 token 达到窗口的 **80%** 时自动触发压缩（`autoCompact`）。
+- 压缩策略：保留最近 4 轮完整对话，早期历史压缩为摘要（用户意图、用到的工具、关键结果），
+  并将过长工具结果截断，目标压到窗口的 60%。
+- **发送前硬校验**：每次发请求前估算消息量，超窗先压缩再发，作为最终兜底保险。
+
+### `/window` 命令用法
+
+```
+/window              → 查看当前窗口 + 来源 + 用量
+/window 128k         → 手动指定 128K（持久化到 config）
+/window 64k          → 手动指定 64K
+/window 1m           → 手动指定 100 万
+/window auto         → 清除手动指定，回到自动探测
+/window reset        → 清除手动指定并立即重探测
+```
+
+> 切换模型（`/model`）后会自动重新探测窗口。`/budget` 也会显示当前窗口与 80% 触发阈值。
+
 ---
 
 ## 🛠️ 内置工具（10 个）
@@ -259,7 +299,7 @@ cc-node --api-base http://localhost:11434/v1
 {
   "model": "deepseek-chat",
   "maxTurns": 100,
-  "maxBudgetTokens": 1000000,
+  "maxBudgetTokens": 128000,
   "permissionMode": "ask",
   "tools": {
     "bash": { "timeout": 120 },
@@ -271,6 +311,10 @@ cc-node --api-base http://localhost:11434/v1
   }
 }
 ```
+
+> **`maxBudgetTokens`**：手动指定的上下文窗口上限（token 数）。
+> 为 `0` 或未设置时，自动探测模型真实窗口；手动指定后优先于自动探测，
+> 等价于 `/window N` 的效果，并持久化保存。
 
 [![npm version](https://img.shields.io/npm/v/@raolin2025/claude-code-node.svg)](https://www.npmjs.com/package/@raolin2025/claude-code-node) [![GitHub](https://img.shields.io/badge/GitHub-bg1avd%2Fclaude--code--node-blue)](https://github.com/bg1avd/claude-code-node) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ---

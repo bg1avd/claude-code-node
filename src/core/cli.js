@@ -17,6 +17,13 @@ import { TokenBudget } from './token-budget.js'
 import { ChannelManager } from '../channel/index.js'
 import { CostTracker } from './cost-tracker.js'
 import { autoCompact } from './compact.js'
+import {
+  detectContextWindow,
+  parseWindowArg,
+  formatTokens,
+  windowSourceLabel,
+  WINDOW_SOURCE,
+} from './context-window.js'
 import { isLocalLlmServer } from '../utils/index.js'
 import { SOCK_DIR, SOCK_PATH, CC_NODE_PID } from './paths.js'
 import { renderHeadpiece } from './headpiece.js'
@@ -254,6 +261,7 @@ Commands:
   /stop          — Stop current AI work (when stuck/long)
   /config KEY    — Show config value
   /budget        — Show token budget
+  /window [N]    — Show/set context window (e.g. /window 128k, /window auto)
   /channel CMD   — Manage notification channels (list|send|test)
   /cost          — Show API cost report
   /compact       — Manually compact conversation context
@@ -291,6 +299,8 @@ const DETAILED_HELP = {
   config:  "/config [key]\n  Without key: show the entire config as JSON.\n  With a key path: show the value for that specific path.\n\n  Example: /config\n  Example: /config model",
 
   budget:  "/budget\n  Show token budget usage for the current session.\n  Displays how many tokens have been used vs the limit.",
+
+  window:  "/window [N|auto|reset]\n  Show or set the LLM context window (max tokens allowed in conversation).\n  This is the hard ceiling for auto-compression — context will never exceed it.\n\n  Subcommands:\n    (no arg)   — Show current window + its source (manual/probe/table/fallback) + usage\n    /window 128k — Manually set window (persisted to config). Accepts K/M suffix:\n                  64k, 128k, 200k, 1m, or a raw number like 131072.\n    /window auto  — Clear manual override, return to auto-detection (next message re-detects).\n    /window reset — Clear manual override AND re-detect now.\n\n  Manual setting takes priority over auto-detection and survives restart.\n  Auto-detection itself is NOT persisted (re-runs at each startup).\n\n  Examples:\n    /window\n    /window 128k\n    /window 64k\n    /window auto\n    /window reset",
 
   channel: "/channel <list|send|test>\n  Manage notification channels.\n\n  Subcommands:\n    list       — List all configured notification channels\n    send <msg> — Send a message via all channels\n    test       — Send a test message to verify channels\n\n  Requires channel environment variables to be set at startup.",
 
@@ -481,7 +491,31 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
   }
 
   // M1 fix: tokenBudget 必须在 engineConfig 之前定义，否则 TDZ ReferenceError
-  const tokenBudget = new TokenBudget({ maxTokens: config.get('maxBudgetTokens') || 200_000 })
+  // 上下文窗口来源：手动指定 > API 探测 > 内置表 > 安全兜底
+  //   - 手动指定（config.maxBudgetTokens > 0）优先，且持久化
+  //   - 自动探测结果不落盘，每次启动重新探测（方案 A）
+  let windowSource = WINDOW_SOURCE.FALLBACK
+  const tokenBudget = new TokenBudget({
+    maxTokens: config.get('maxBudgetTokens') || 0,
+  })
+
+  /** 重新探测并应用上下文窗口（供启动 & /window reset & /model 切换后调用） */
+  async function reapplyWindow() {
+    const manual = config.get('maxBudgetTokens') || 0
+    const { window: win, source } = await detectContextWindow({
+      model,
+      apiBase,
+      apiKey,
+      manualWindow: manual,
+    })
+    tokenBudget.setWindow(win, source)
+    windowSource = source
+    return { window: win, source }
+  }
+
+  // 启动即探测一次（若已手动指定，则直接应用手动值）
+  await reapplyWindow()
+
   const costTracker = new CostTracker({ model })
 
   const engineConfig = new QueryEngineConfig({
@@ -684,10 +718,48 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
             } else {
               engine.config.model = rest.join(' ')
             }
+            model = engine.config.model
             console.log(`Model → ${engine.config.model}`)
+            // 切换模型后重新探测上下文窗口（仅当非手动指定时自动更新）
+            if ((config.get('maxBudgetTokens') || 0) <= 0) {
+              const { window: win, source } = await reapplyWindow()
+              console.log(`  ↳ Context window → ${formatTokens(win)} (${windowSourceLabel(source)})`)
+            }
           }
           else console.log(`Model: ${engine.config.model}`)
           break
+        case 'window': {
+          const arg = rest[0] ? rest.join(' ').trim() : ''
+          if (!arg) {
+            // 无参数：显示当前窗口
+            console.log(`Context window: ${formatTokens(tokenBudget.maxTokens)} (${windowSourceLabel(windowSource)})`)
+            console.log(`  Input used: ${tokenBudget.inputTokens.toLocaleString()} / ${tokenBudget.maxTokens.toLocaleString()} (${tokenBudget.usagePercent}%)`)
+            const manual = config.get('maxBudgetTokens') || 0
+            if (manual > 0) console.log(`  Manual override: ${formatTokens(manual)} (persisted in config)`)
+            break
+          }
+          const lower = arg.toLowerCase()
+          if (lower === 'auto' || lower === 'reset') {
+            // 清除手动指定并重新探测
+            config.set('maxBudgetTokens', 0)
+            try { await config.saveToUser() } catch {}
+            const { window: win, source } = await reapplyWindow()
+            console.log(`Cleared manual override. Context window → ${formatTokens(win)} (${windowSourceLabel(source)})`)
+            break
+          }
+          const win = parseWindowArg(arg)
+          if (!win) {
+            console.log(`❌ Invalid window: "${arg}". Use a number or K/M suffix, e.g. /window 128k, /window 64k, /window 1m`)
+            break
+          }
+          // 手动指定：立即生效 + 持久化
+          tokenBudget.setWindow(win, WINDOW_SOURCE.MANUAL)
+          windowSource = WINDOW_SOURCE.MANUAL
+          config.set('maxBudgetTokens', win)
+          try { await config.saveToUser() } catch (e) { console.log(`⚠️  Failed to persist to config: ${e.message}`) }
+          console.log(`Context window → ${formatTokens(win)} (${windowSourceLabel(WINDOW_SOURCE.MANUAL)}, persisted)`)
+          break
+        }
         case 'models': {
           const apiBase = engine.config.apiBase
           const apiKey = engine.config.apiKey
@@ -818,7 +890,11 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
             console.log(JSON.stringify(config.toJSON(), null, 2))
           }
           break
-        case 'budget': console.log(tokenBudget.format()); break
+        case 'budget': {
+          console.log(tokenBudget.format())
+          console.log(`Context window: ${formatTokens(tokenBudget.maxTokens)} (${windowSourceLabel(windowSource)}) | trigger: ${Math.round((tokenBudget.maxTokens * 0.8)).toLocaleString()} (80%)`)
+          break
+        }
         case 'channel': {
           const subCmd = rest.join(' ')
           if (subCmd === 'list' || subCmd === '') {
