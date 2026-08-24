@@ -316,15 +316,33 @@ export class TelegramListener {
     this.running = true
     log(`[TG] Starting long polling...`)
 
-    // 设置命令菜单
+    // 设置命令菜单（Telegram 输入框 / 提示，最多 100 个命令）
     try {
       await this.bot.setMyCommands([
+        // —— 系统命令（本进程处理）——
         { command: 'ping', description: '🏓 检查服务状态' },
         { command: 'status', description: '📊 查看 cc-node 状态' },
         { command: 'run', description: '💻 执行 shell 命令（如 /run ls -la）' },
         { command: 'notify', description: '📢 广播通知消息' },
-        { command: 'help', description: '❓ 查看帮助' },
         { command: 'cancel', description: '🚫 取消当前操作' },
+        { command: 'help', description: '❓ 查看帮助' },
+        // —— AI 编程命令（转发给 cc-node）——
+        { command: 'model', description: '🤖 切换模型（如 /model gpt-4o）' },
+        { command: 'models', description: '📋 列出可用模型' },
+        { command: 'window', description: '🧠 查看/设置上下文窗口（如 /window 128k）' },
+        { command: 'budget', description: '💰 查看 token 预算使用' },
+        { command: 'compact', description: '🗜️ 手动压缩上下文' },
+        { command: 'clear', description: '🧹 清空当前对话' },
+        { command: 'session', description: '🗂️ 查看会话信息' },
+        { command: 'sessions', description: '📂 列出所有会话' },
+        { command: 'resume', description: '↩️ 恢复会话（/resume <id>）' },
+        { command: 'config', description: '⚙️ 查看配置（/config model）' },
+        { command: 'cost', description: '💲 查看 API 费用' },
+        { command: 'channel', description: '🔔 管理通知通道' },
+        { command: 'cd', description: '📁 切换工作目录' },
+        { command: 'tools', description: '🛠️ 列出可用工具' },
+        { command: 'stop', description: '⏹️ 停止当前 AI 任务' },
+        { command: 'allow', description: '🔓 工具权限管理' },
       ])
     } catch {}
 
@@ -536,8 +554,12 @@ export class TelegramListener {
 
     switch (cmd) {
       case '/start':
-      case '/help':
         return this._helpText()
+
+      case '/help':
+        // 无参数 → 返回完整帮助；带参数（/help <cmd>）→ 转发给 cc-node 输出详细用法
+        if (!args) return this._helpText()
+        return null // 交由 cli.js processInputLine 处理 /help <cmd> 详细帮助
 
       case '/ping':
         return '🏓 pong! cc-notify is alive.'
@@ -592,24 +614,44 @@ export class TelegramListener {
     }
   }
 
-  /** 生成帮助文本 */
+  /** 生成帮助文本（含 cc-notify 系统命令 + cc-node AI 编程命令） */
   _helpText() {
     return [
       '🤖 *cc-notify — AI Code Agent*',
       '',
       '通过 Telegram 远程操控 AI 编程助手。',
+      '直接发消息 → AI 处理；发 / 开头命令 → 执行对应操作。',
       '',
-      '*命令*',
+      '*🔧 系统命令*',
       '• `/ping` — 检查服务状态',
       '• `/status` — 查看详细状态',
       '• `/run <cmd>` — 直接执行 shell 命令',
       '• `/notify <msg>` — 广播通知到所有通道',
       '• `/cancel` — 取消当前操作',
-      '• `/help` — 显示帮助',
+      '',
+      '*🤖 AI 编程命令*（转发给 cc-node 处理）',
+      '• `/model NAME` — 切换模型（如 /model gpt-4o）',
+      '• `/models` — 列出可用模型',
+      '• `/window [N]` — 查看/设置上下文窗口（/window 128k、/window auto）',
+      '• `/budget` — 查看 token 预算使用',
+      '• `/compact` — 手动压缩上下文',
+      '• `/clear` — 清空当前对话',
+      '• `/session` — 查看会话信息',
+      '• `/sessions` — 列出所有会话',
+      '• `/resume <id>` — 恢复历史会话',
+      '• `/config KEY` — 查看配置（如 /config model）',
+      '• `/cost` — 查看 API 费用',
+      '• `/channel` — 管理通知通道',
+      '• `/cd PATH` — 切换工作目录',
+      '• `/tools` — 列出可用工具',
+      '• `/stop` — 停止当前 AI 任务',
+      '• `/allow` — 工具权限管理',
       '',
       '*普通消息*',
-      '直接发送文字消息 → 自动发给 AI 处理',
+      '直接发送文字 → 自动发给 AI 处理',
       '支持发送图片（AI 无法看图，但会作为附件）',
+      '',
+      '💡 任意 `/help <命令>` 查看某个命令的详细用法。',
       '',
     ].join('\n')
   }

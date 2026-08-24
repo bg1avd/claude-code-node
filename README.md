@@ -544,7 +544,17 @@ cc-notify 是独立的通知守护进程，**不需要 cc-node 在前台运行**
 /notify 任务完成！       → 通过 Telegram 广播通知
 /status                  → 查看服务状态
 /cancel                  → 取消当前操作
+/help                    → 查看完整帮助（含 AI 编程命令）
+/model gpt-4o            → 切换模型
+/window 128k             → 设置上下文窗口
+/budget                  → 查看 token 预算
+/compact                 → 压缩上下文
+/clear                   → 清空对话
 ```
+
+> 除上述系统命令外，所有 `/help` 列出的 AI 编程命令（`/model`、`/window`、`/budget`、
+> `/compact`、`/clear`、`/sessions`、`/config`、`/cost`、`/cd`、`/tools`、`/stop`、`/allow`
+> 等）都会自动转发给 cc-node 处理，结果回发到 Telegram。`/help <命令>` 可查看详细用法。
 
 ### HTTP API（守护模式可用）
 

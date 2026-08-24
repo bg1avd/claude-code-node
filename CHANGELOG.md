@@ -1,6 +1,22 @@
 # CHANGELOG
 
-## v2.8.3 (未发布) — WebFetch 安全抓取管道 + Jina Reader 兜底
+## v2.8.4 (未发布) — Telegram 帮助信息与命令菜单补全
+
+### ✨ 改进
+- **Telegram `/help` 帮助补全** `src/channel/tg-listener.js`：
+  - 原帮助只列出 6 个系统命令（ping/status/run/notify/cancel），未展示第二层 cc-node
+    能处理的大量 AI 编程命令。
+  - 现分两栏展示：**系统命令**（本进程处理）+ **AI 编程命令**（转发给 cc-node），
+    共 26 个命令：/model、/models、/window、/budget、/compact、/clear、/session、
+    /sessions、/resume、/config、/cost、/channel、/cd、/tools、/stop、/allow 等。
+- **Telegram 命令菜单补全**：`setMyCommands` 从 6 个扩充到 22 个，
+  Telegram 输入框 `/` 提示现在覆盖全部可用命令。
+- **`/help <cmd>` 支持**：带参数时转发给 cc-node，输出该命令的详细用法（DETAILED_HELP）。
+
+### 🧪 测试
+- tg-listener-flush 测试通过，无回归。
+
+## v2.8.3 (2026-08-24) — WebFetch 安全抓取管道 + Jina Reader 兜底
 
 ### ✨ 新特性
 - **WebFetch 安全管道** `src/security/fetch-guard.js`（移植自 safe-jina-fetch 设计）：
