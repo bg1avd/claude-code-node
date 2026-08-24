@@ -169,3 +169,71 @@ export function autoCompact(messages, tokenBudget, options = {}) {
 
   return { compacted: false, messages }
 }
+
+/**
+ * 滑动窗口裁剪 — 保证上下文永不超出窗口
+ *
+ * 与摘要式压缩（compactMessages）不同，本函数采用"精确裁剪"：
+ *   1. 计算当前消息总 token；
+ *   2. 若超出窗口上限，从【最早】的消息逐条裁剪（最新信息始终保留在末尾）；
+ *   3. 直到总 token ≤ 窗口，保证新信息能拼接到末尾。
+ *
+ * 约束：
+ *   - system 提示（首条 system 消息）永不裁剪，作为稳定上下文保留；
+ *   - 极端情况（单条非 system 消息就超窗）：仍保留 system + 最近的一条，
+ *     其余裁剪，保证至少能发出请求（宁可截断信息也不报错/无法输入）。
+ *
+ * @param {Array} messages — 完整消息列表
+ * @param {object} options
+ * @param {number} options.maxTokens — 窗口上限（token）
+ * @param {number} options.reservedForOutput — 为输出预留的 token（默认 8192）
+ * @param {object} options.tokenBudget — 可选的 TokenBudget 实例（用其 estimateMessages）
+ * @returns {{ trimmed: boolean, messages: Array, removed: number }}
+ */
+export function trimToWindow(messages, options = {}) {
+  const budget = options.tokenBudget
+  const maxTokens = options.maxTokens || 160_000
+  const reservedForOutput = options.reservedForOutput || (budget ? budget.reservedForOutput : 8192)
+  const limit = maxTokens - reservedForOutput
+
+  const estimate = (msgs) => budget
+    ? budget.estimateMessages(msgs)
+    : estimateTokens(msgs.map(m => typeof m.content === 'string' ? m.content : JSON.stringify(m.content)).join(''))
+
+  // 先计算总 token
+  let total = estimate(messages)
+  if (total <= limit) {
+    return { trimmed: false, messages, removed: 0 }
+  }
+
+  // 分离 system 提示（首条 system 永不裁剪）与普通消息
+  const systemMsgs = []
+  const body = []
+  for (const m of messages) {
+    if (m.role === 'system' && systemMsgs.length === 0) {
+      systemMsgs.push(m)
+    } else {
+      body.push(m)
+    }
+  }
+
+  // 从头部逐条裁剪（最新信息保留在末尾），直到 ≤ 上限
+  let removed = 0
+  while (body.length > 0) {
+    // 极端保护：至少保留最后一条非 system 消息（system + 最近 1 条总能发出去）
+    if (body.length === 1) break
+    body.shift() // 挤掉最早的消息
+    removed++
+    total = estimate([...systemMsgs, ...body])
+    if (total <= limit) break
+  }
+
+  const result = [...systemMsgs, ...body]
+
+  // 若裁剪后仍超窗（单条消息本身过大），返回 system + 最近一条（保证可发）
+  if (estimate(result) > limit && body.length === 1) {
+    return { trimmed: removed > 0, messages: result, removed }
+  }
+
+  return { trimmed: removed > 0, messages: result, removed }
+}

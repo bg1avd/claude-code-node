@@ -1,6 +1,27 @@
 # CHANGELOG
 
-## v2.8.4 (未发布) — Telegram 帮助信息与命令菜单补全
+## v2.8.5 (未发布) — 上下文滑动窗口：修复上下文满后无法输入
+
+### 🐛 修复（重要）
+- **修复"上下文满了以后后面的信息无法被输入"的 bug**：
+  - 原 `autoCompact` 为"摘要式"压缩：保留最近 N 轮 + 早期摘要，依赖 `usagePercent`
+    触发，且压缩后不校验是否真的 ≤ 窗口。上下文一满，新消息 push 后整体超窗，
+    摘要仍放不下 → 新信息无法输入。
+  - 新增**滑动窗口精确裁剪** `trimToWindow`（`src/core/compact.js`）：
+    - 计算消息总 token；
+    - 超窗时从【最早】消息逐条裁剪（最新信息始终保留在末尾）；
+    - 直到总 token ≤ 窗口上限，保证新信息能拼接到末尾；
+    - system 提示永不裁剪；极端情况仍保留 system + 最近一条，保证至少能发出请求。
+- **`QueryEngine` 新增 `_ensureFitWindow()`**（`src/core/query-engine.js`）：
+  - 新消息 push 后 / 工具循环每轮发送前调用，确保上下文永不超窗；
+  - 策略：摘要优先（信息量高）→ 仍超窗则滑动窗口精确裁剪兜底。
+  - 替换原先不可靠的 `usagePercent` 触发 + 无兜底的硬校验。
+
+### 🧪 测试
+- 新增 `src/__tests__/compact-window.test.js`（8 个测试）：未超窗不动、从最早裁剪、
+  最新消息保留末尾、system 不裁剪、连续无空洞、极端单条超窗、自动估算。
+
+## v2.8.4 (2026-08-24) — Telegram 帮助信息与命令菜单补全
 
 ### ✨ 改进
 - **Telegram `/help` 帮助补全** `src/channel/tg-listener.js`：
