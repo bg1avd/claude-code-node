@@ -356,6 +356,20 @@ export class QueryEngine {
       ...(useStream && { stream: true }),
     }
 
+    // [debug] 打印实际发送请求的关键信息，用于排查"模型为何不调用工具"
+    if (this.config.verbose) {
+      const sysCount = messages.filter(m => m.role === 'system').length
+      const toolCallsInHistory = messages.filter(m => m.role === 'assistant' && m.tool_calls).length
+      console.error(`[debug] → ${url}`)
+      console.error(`[debug]   model=${body.model} | messages=${messages.length} (system=${sysCount}, user=${messages.filter(m=>m.role==='user').length}, assistant=${messages.filter(m=>m.role==='assistant').length}, tool=${messages.filter(m=>m.role==='tool').length}) | tools=${tools.length} | max_tokens=${body.max_tokens}`)
+      console.error(`[debug]   history tool_calls=${toolCallsInHistory} | 首条=${messages[0]?.role}:${String(messages[0]?.content).slice(0,40)} | 末条=${messages[messages.length-1]?.role}:${String(messages[messages.length-1]?.content).slice(0,40)}`)
+      if (tools.length) {
+        console.error(`[debug]   工具名: ${tools.map(t=>t.function.name).join(', ')}`)
+      } else {
+        console.error(`[debug]   ⚠️ tools 为空！请求未携带工具定义，模型不会调用工具`)
+      }
+    }
+
     // DeepSeek V4: 默认启用 thinking mode → 要求回传 reasoning_content
     // 这里显式关闭，避免 tool call 场景下的 400 错误
     // thinking 参数是 DeepSeek 私有扩展，直接放在 body 顶层

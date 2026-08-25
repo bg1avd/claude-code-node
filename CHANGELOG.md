@@ -1,5 +1,15 @@
 # CHANGELOG
 
+## v2.8.9 (未发布) — verbose 打印实际请求诊断（排查"模型不调用工具"）
+
+### 🐛 诊断
+- **`-v` 模式新增请求诊断日志**（`src/core/query-engine.js` `_callLLM`）：
+  打印实际发送的请求关键信息，用于排查"模型为何不调用工具 / 复读 / 幻觉"：
+  - 请求 URL、`model`、消息条数（system/user/assistant/tool 各多少）
+  - 历史中 `tool_calls` 数量、首条/末条消息内容
+  - `tools` 定义数量及工具名；若 `tools` 为空则醒目警告
+- 仅新增 `console.error` 打印，**不改变任何请求/响应逻辑**。
+
 ## v2.8.8 (未发布) — `/window`、`/budget` 显示真实 context 用量
 
 ### 🐛 修复
