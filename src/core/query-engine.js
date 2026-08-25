@@ -347,6 +347,7 @@ export class QueryEngine {
 
     const useStream = !this.config.noStream
     const modelLower = this.config.model.toLowerCase()
+    const url = apiBase.replace(/\/+$/, '') + '/chat/completions'
 
     const body = {
       model: this.config.model,
@@ -376,8 +377,6 @@ export class QueryEngine {
     if (modelLower.startsWith('deepseek-v')) {
       body.thinking = { type: 'disabled' }
     }
-
-    const url = apiBase.replace(/\/+$/, '') + '/chat/completions'
 
     // apiBase 是用户显式指定的配置（--api-base），不是外部输入，跳过 SSRF 检查
     // SSRF 防护仅适用于 web-fetch/web-search 等工具发起的请求
