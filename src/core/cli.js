@@ -16,7 +16,7 @@ import { Config } from './config.js'
 import { TokenBudget } from './token-budget.js'
 import { ChannelManager } from '../channel/index.js'
 import { CostTracker } from './cost-tracker.js'
-import { autoCompact } from './compact.js'
+import { compactMessages } from './compact.js'
 import {
   detectContextWindow,
   parseWindowArg,
@@ -957,12 +957,19 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
           break
         case 'compact': {
           if (engine.tokenBudget) {
-            const { compacted, messages } = autoCompact(engine.state.messages, engine.tokenBudget, { keepRecentTurns: 4 })
-            if (compacted) {
+            // 手动压缩：用实时 token 估算判断是否需要压缩（而非滞后的 usagePercent），
+            // 用户主动触发时总能真正压缩。
+            const limit = engine.tokenBudget.maxTokens - engine.tokenBudget.reservedForOutput
+            const est = engine.tokenBudget.estimateMessages(engine.state.messages)
+            if (est > limit) {
+              const messages = compactMessages(engine.state.messages, {
+                maxTokens: Math.floor(engine.tokenBudget.maxTokens * 0.6),
+                keepRecentTurns: 4,
+              })
               engine.state.messages = messages
-              console.log('✅ Context compressed')
+              console.log(`✅ Context compressed (${est} → ${engine.tokenBudget.estimateMessages(messages)} tokens)`)
             } else {
-              console.log('ℹ️  No compression needed')
+              console.log(`ℹ️  Context within window (${est}/${limit} tokens), no compression needed`)
             }
           } else {
             console.log('Token budget not configured')

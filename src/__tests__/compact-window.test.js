@@ -5,8 +5,9 @@
  *   - 未超窗不动；
  *   - 超窗时从【最早】消息精确裁剪（最新信息保留在末尾）；
  *   - system 提示永不裁剪；
- *   - 极端情况（单条消息超窗）仍保留 system + 最近一条；
- *   - 裁剪后总 token 一定 ≤ 窗口上限。
+ *   - 被裁剪历史压缩成摘要保留（不丢上下文，keepSummary 默认开启）；
+ *   - 裁剪后总 token 一定 ≤ 窗口上限；
+ *   - 极端情况（单条消息超窗）仍保留 system + 最近一条。
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -34,48 +35,72 @@ test('滑动窗口：未超窗时消息原样保留', () => {
   const r = trimToWindow(msgs, { tokenBudget: tb, maxTokens: tb.maxTokens })
   assert.equal(r.trimmed, false)
   assert.equal(r.removed, 0)
+  assert.equal(r.summary, null)
   assert.equal(r.messages.length, msgs.length)
 })
 
-test('滑动窗口：超窗时从最早消息精确裁剪', () => {
-  const tb = makeBudget(100)
-  const msgs = makeMessages(10) // 21 条
+test('滑动窗口：超窗时从最早消息精确裁剪，且总 token ≤ 窗口', () => {
+  const tb = makeBudget(300)
+  const msgs = makeMessages(20) // 41 条，超窗
   const r = trimToWindow(msgs, { tokenBudget: tb, maxTokens: tb.maxTokens })
   assert.equal(r.trimmed, true)
   assert.ok(r.removed > 0)
   // 裁剪后总 token ≤ 窗口上限（减去输出预留）
-  assert.ok(tb.estimateMessages(r.messages) <= tb.maxTokens - tb.reservedForOutput)
+  assert.ok(tb.estimateMessages(r.messages) <= tb.maxTokens - tb.reservedForOutput,
+    `裁剪后 ${tb.estimateMessages(r.messages)} 应 ≤ ${tb.maxTokens - tb.reservedForOutput}`)
   // 消息数变少
   assert.ok(r.messages.length < msgs.length)
 })
 
 test('滑动窗口：最新消息始终保留在末尾', () => {
-  const tb = makeBudget(100)
-  const msgs = makeMessages(10)
+  const tb = makeBudget(300)
+  const msgs = makeMessages(20)
   const r = trimToWindow(msgs, { tokenBudget: tb, maxTokens: tb.maxTokens })
   const last = r.messages[r.messages.length - 1]
   assert.equal(last.role, 'assistant')
-  assert.ok(last.content.includes('assistant reply 9'), '最后一条应为最新回复')
+  assert.ok(last.content.includes('assistant reply 19'), '最后一条应为最新回复')
 })
 
 test('滑动窗口：system 提示永不裁剪', () => {
-  const tb = makeBudget(100)
-  const msgs = makeMessages(10)
+  const tb = makeBudget(300)
+  const msgs = makeMessages(20)
   const r = trimToWindow(msgs, { tokenBudget: tb, maxTokens: tb.maxTokens })
   assert.equal(r.messages[0].role, 'system')
   assert.equal(r.messages[0].content, 'SYS')
 })
 
 test('滑动窗口：裁剪后保留最近连续对话（无空洞）', () => {
-  const tb = makeBudget(100)
-  const msgs = makeMessages(10)
+  const tb = makeBudget(300)
+  const msgs = makeMessages(20)
   const r = trimToWindow(msgs, { tokenBudget: tb, maxTokens: tb.maxTokens })
-  // 检查裁剪后 body 部分是连续的 user/assistant 对
-  const body = r.messages.slice(1) // 去掉 system
+  // 裁剪后 = 原始 system + (摘要 system) + 连续的 user/assistant 对
+  const body = r.messages.filter(m => m.role !== 'system') // 去掉 system（含摘要 system）
   for (let i = 0; i < body.length; i++) {
     if (i % 2 === 0) assert.equal(body[i].role, 'user', `第 ${i} 条应为 user`)
     else assert.equal(body[i].role, 'assistant', `第 ${i} 条应为 assistant`)
   }
+})
+
+test('滑动窗口：被裁剪历史压缩成摘要保留（不丢失上下文）', () => {
+  const tb = makeBudget(300)
+  const msgs = makeMessages(20) // 41 条，超窗
+  const r = trimToWindow(msgs, { tokenBudget: tb, maxTokens: tb.maxTokens })
+  assert.equal(r.trimmed, true)
+  assert.ok(r.summary, '应生成被裁剪历史的摘要')
+  // 摘要作为 system 消息保留在结果中
+  assert.ok(r.messages.some(m => m.role === 'system' && m.content.includes('Context Summary')),
+    '结果中应包含摘要 system')
+  // 摘要里应包含被裁掉的早期用户意图
+  assert.ok(r.summary.includes('user msg'), '摘要应包含早期用户内容')
+})
+
+test('滑动窗口：keepSummary=false 时不保留摘要', () => {
+  const tb = makeBudget(300)
+  const msgs = makeMessages(20)
+  const r = trimToWindow(msgs, { tokenBudget: tb, maxTokens: tb.maxTokens, keepSummary: false })
+  assert.equal(r.trimmed, true)
+  assert.equal(r.summary, null)
+  assert.ok(!r.messages.some(m => m.role === 'system' && m.content.includes('Context Summary')))
 })
 
 test('滑动窗口：极端情况（单条消息超窗）仍保留 system + 最近一条', () => {
@@ -95,7 +120,7 @@ test('滑动窗口：极端情况（单条消息超窗）仍保留 system + 最�
 
 test('滑动窗口：自动估算（无 tokenBudget 时用 estimateTokens）', () => {
   const msgs = makeMessages(10, { pad: 50 })
-  const r = trimToWindow(msgs, { maxTokens: 50 })
+  const r = trimToWindow(msgs, { maxTokens: 200 })
   // 没有 tokenBudget，用内置 estimateTokens，仍能裁剪
   assert.equal(r.trimmed, true)
   assert.ok(r.messages.length < msgs.length)

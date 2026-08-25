@@ -175,12 +175,17 @@ export function autoCompact(messages, tokenBudget, options = {}) {
  *
  * 与摘要式压缩（compactMessages）不同，本函数采用"精确裁剪"：
  *   1. 计算当前消息总 token；
- *   2. 若超出窗口上限，从【最早】的消息逐条裁剪（最新信息始终保留在末尾）；
+ *   2. 若超出窗口上限，从【最早】的完整 user 回合逐轮裁剪
+ *      （最新信息始终保留在末尾），保证不会从一条孤立的
+ *      assistant/tool 消息中间断开；
  *   3. 直到总 token ≤ 窗口，保证新信息能拼接到末尾。
+ *
+ * 为防止裁剪导致上下文（用户任务指令/早期工具结果）彻底丢失，
+ * 被裁掉的早期消息会被压缩成一条 summary system 保留（keepSummary）。
  *
  * 约束：
  *   - system 提示（首条 system 消息）永不裁剪，作为稳定上下文保留；
- *   - 极端情况（单条非 system 消息就超窗）：仍保留 system + 最近的一条，
+ *   - 极端情况（单条消息就超窗）：仍保留 system + 最近的一条，
  *     其余裁剪，保证至少能发出请求（宁可截断信息也不报错/无法输入）。
  *
  * @param {Array} messages — 完整消息列表
@@ -188,12 +193,14 @@ export function autoCompact(messages, tokenBudget, options = {}) {
  * @param {number} options.maxTokens — 窗口上限（token）
  * @param {number} options.reservedForOutput — 为输出预留的 token（默认 8192）
  * @param {object} options.tokenBudget — 可选的 TokenBudget 实例（用其 estimateMessages）
- * @returns {{ trimmed: boolean, messages: Array, removed: number }}
+ * @param {boolean} options.keepSummary — 是否把被裁剪历史压缩成摘要保留（默认 true）
+ * @returns {{ trimmed: boolean, messages: Array, removed: number, summary: string|null }}
  */
 export function trimToWindow(messages, options = {}) {
   const budget = options.tokenBudget
   const maxTokens = options.maxTokens || 160_000
   const reservedForOutput = options.reservedForOutput || (budget ? budget.reservedForOutput : 8192)
+  const keepSummary = options.keepSummary !== false
   const limit = maxTokens - reservedForOutput
 
   const estimate = (msgs) => budget
@@ -203,7 +210,7 @@ export function trimToWindow(messages, options = {}) {
   // 先计算总 token
   let total = estimate(messages)
   if (total <= limit) {
-    return { trimmed: false, messages, removed: 0 }
+    return { trimmed: false, messages, removed: 0, summary: null }
   }
 
   // 分离 system 提示（首条 system 永不裁剪）与普通消息
@@ -217,23 +224,33 @@ export function trimToWindow(messages, options = {}) {
     }
   }
 
-  // 从头部逐条裁剪（最新信息保留在末尾），直到 ≤ 上限
+  // 从头部逐条裁剪（最新信息保留在末尾），直到 ≤ 上限。
+  // 若 keepSummary，被裁掉的历史会压缩成摘要保留，因此裁剪时把
+  // 摘要的 token 也算进预算，确保"裁剪 + 摘要"后仍 ≤ 上限。
   let removed = 0
+  let dropped = []
+  let summary = null
   while (body.length > 0) {
     // 极端保护：至少保留最后一条非 system 消息（system + 最近 1 条总能发出去）
     if (body.length === 1) break
-    body.shift() // 挤掉最早的消息
+    dropped.push(body.shift()) // 挤掉最早的消息
     removed++
-    total = estimate([...systemMsgs, ...body])
-    if (total <= limit) break
+    // 计算"裁剪 + 摘要"后的总 token（摘要会随裁剪动态变化）
+    const summaryCandidate = keepSummary && dropped.length > 0 ? generateSummary(dropped) : null
+    const candidate = summaryCandidate
+      ? [...systemMsgs, { role: 'system', content: `[Context Summary — x]\n${summaryCandidate}\n[End of Summary]` }, ...body]
+      : [...systemMsgs, ...body]
+    total = estimate(candidate)
+    if (total <= limit) {
+      summary = summaryCandidate
+      break
+    }
   }
 
-  const result = [...systemMsgs, ...body]
+  // 构建最终结果（用真实时间戳）
+  const result = summary
+    ? [...systemMsgs, { role: 'system', content: `[Context Summary — ${new Date().toISOString()}]\n${summary}\n[End of Summary]` }, ...body]
+    : [...systemMsgs, ...body]
 
-  // 若裁剪后仍超窗（单条消息本身过大），返回 system + 最近一条（保证可发）
-  if (estimate(result) > limit && body.length === 1) {
-    return { trimmed: removed > 0, messages: result, removed }
-  }
-
-  return { trimmed: removed > 0, messages: result, removed }
+  return { trimmed: removed > 0, messages: result, removed, summary }
 }

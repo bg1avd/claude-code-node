@@ -14,7 +14,7 @@
 import crypto from 'crypto'
 import { UserMessage, AssistantMessage, ToolCall, ToolResult, SessionState } from '../types/index.js'
 import { parseStream, parseNonStreamResponse } from './streaming.js'
-import { autoCompact, trimToWindow } from './compact.js'
+import { compactMessages, trimToWindow } from './compact.js'
 import { CostTracker } from './cost-tracker.js'
 import { EnhancedPermissionChecker } from '../security/enhanced-permission.js'
 import { isLocalLlmServer, buildAuthHeaders } from '../utils/index.js'
@@ -101,10 +101,13 @@ export class QueryEngine {
    * 确保上下文 ≤ 窗口（滑动窗口语义）
    *
    * 处理顺序：
-   *   1. 估算当前消息总 token；
+   *   1. 估算当前消息总 token（实时估算，反映 state.messages 真实大小）；
    *   2. 若未超窗 → 不做任何事；
-   *   3. 若超窗 → 先尝试摘要式压缩（保留最近 N 轮 + 早期摘要，信息量更高）；
-   *   4. 摘要后仍超窗（或摘要未触发）→ 滑动窗口精确裁剪：从最早消息挤出，
+   *   3. 若超窗 → 先做摘要式压缩（保留最近 N 轮 + 早期摘要，信息量更高）。
+   *      注意：这里直接用实时 token 估算判断是否压缩，而非依赖滞后的
+   *      usagePercent（那会导致"判定超窗但压缩永不触发"）。
+   *   4. 摘要后仍超窗 → 滑动窗口精确裁剪兜底：从最早完整 user 回合挤出，
+   *      并把被裁掉的历史压缩成摘要 system 保留，避免 AI 失忆。
    *      保证最新信息（含刚加入的用户消息）保留在末尾，上下文永不超出窗口。
    */
   _ensureFitWindow() {
@@ -113,27 +116,29 @@ export class QueryEngine {
     const est = this.tokenBudget.estimateMessages(this.state.messages)
     if (est <= limit) return
 
-    // 1) 摘要式压缩优先
-    const { compacted, messages } = autoCompact(this.state.messages, this.tokenBudget, {
+    // 1) 摘要式压缩优先：用实时估算直接决定是否压缩（不再依赖滞后的 usagePercent）
+    const summarized = compactMessages(this.state.messages, {
       maxTokens: Math.floor(this.tokenBudget.maxTokens * 0.6),
     })
-    if (compacted) {
-      const reEst = this.tokenBudget.estimateMessages(messages)
-      if (reEst <= limit) {
-        this.state.messages = messages
-        if (this.config.verbose) console.error('[compact] Context summarized to fit token budget')
-        return
-      }
+    const reEst = this.tokenBudget.estimateMessages(summarized)
+    if (reEst <= limit) {
+      this.state.messages = summarized
+      if (this.config.verbose) console.error('[compact] Context summarized to fit token budget')
+      return
     }
 
-    // 2) 滑动窗口精确裁剪兜底（摘要仍超窗 / 未触发）
-    const { trimmed, messages: trimmedMsgs, removed } = trimToWindow(this.state.messages, {
+    // 2) 滑动窗口精确裁剪兜底（摘要仍超窗）：裁剪时保留被裁剪历史的摘要
+    const { trimmed, messages: trimmedMsgs, removed, summary } = trimToWindow(this.state.messages, {
       tokenBudget: this.tokenBudget,
       maxTokens: this.tokenBudget.maxTokens,
+      keepSummary: true,
     })
     if (trimmed) {
       this.state.messages = trimmedMsgs
-      if (this.config.verbose) console.error(`[compact] Sliding-window trimmed ${removed} oldest messages to fit window`)
+      if (this.config.verbose) {
+        console.error(`[compact] Sliding-window trimmed ${removed} oldest messages (summary kept) to fit window`)
+        if (summary) console.error('[compact] 被裁剪历史已压缩为摘要保留：\n' + summary)
+      }
     }
   }
 

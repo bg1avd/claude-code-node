@@ -1,5 +1,34 @@
 # CHANGELOG
 
+## v2.8.6 (未发布) — 修复滑动窗口裁剪导致上下文丢失（AI"变傻子"）
+
+### 🐛 关键修复
+- **修复 v2.8.5 引入的"裁剪反了 → 上下文被直接删除，AI 失忆什么也不干"问题**：
+  - **根因**：`_ensureFitWindow` 用实时 `estimateMessages` 判定超窗，但调用的
+    `autoCompact` 却用**滞后的 `usagePercent`**（`inputTokens/maxTokens`，只在 LLM
+    返回 usage 后才更新）判断是否压缩。两者不一致 → 一旦超窗，`autoCompact` 几乎
+    永远返回"不压缩" → 直接走 `trimToWindow` 兜底，把最早的对话（含用户任务指令、
+    早期工具结果）**直接删除且不保留摘要**，导致 AI 丢失全部上下文主线。
+  - **修复**（`src/core/query-engine.js`）：
+    - `_ensureFitWindow` 改用 `compactMessages`（基于实时 token 估算）**强制**摘要压缩，
+      不再依赖滞后的 `usagePercent`；
+    - 摘要仍超窗时才走 `trimToWindow` 滑动窗口兜底，且 `trimToWindow` **默认保留
+      被裁剪历史的摘要**（`keepSummary`），避免上下文丢失。
+
+### ✨ 改进
+- **`trimToWindow` 支持摘要保留**（`src/core/compact.js`）：
+  - 新增 `keepSummary` 选项（默认 `true`）：被裁掉的早期消息压缩成 `[Context Summary]`
+    system 保留，AI 仍保有任务主线；
+  - 裁剪时把摘要 token 计入预算，确保"裁剪 + 摘要"后仍 ≤ 窗口上限；
+  - 返回结构新增 `summary` 字段。
+- **`/compact` 手动命令**（`src/core/cli.js`）：改用实时估算判断是否需要压缩，用户主动
+  触发时总能真正压缩（不再因 `usagePercent` 未达标而拒绝）。
+
+### 🧪 测试
+- `src/__tests__/compact-window.test.js` 扩充到 10 个：新增"被裁剪历史压缩成摘要保留"、
+  "keepSummary=false 不保留摘要"，并修正预算使裁剪+摘要 ≤ 窗口。
+- 全量单元测试 121 通过，无回归。
+
 ## v2.8.5 (未发布) — 上下文滑动窗口：修复上下文满后无法输入
 
 ### 🐛 修复（重要）
