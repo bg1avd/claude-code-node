@@ -1,5 +1,25 @@
 # CHANGELOG
 
+## v2.8.8 (未发布) — `/window`、`/budget` 显示真实 context 用量
+
+### 🐛 修复
+- **修复 `/window`、`/budget` 在本地网关（不返回 usage）时 context 用量恒为 0%**：
+  - 原实现 `Input used` 依赖 API 上报的 `inputTokens`。当网关流式响应不返回
+    `usage` 时（本地 Ollama/llama.cpp 常见），`inputTokens` 恒为 0，即使对话
+    一轮后真实 context 已有内容，仍显示 `0 / 128,000 (0%)`，不符合逻辑。
+  - **修复**（`src/core/cli.js`）：改用**实时估算** `estimateMessages(state.messages)`
+    反映"当前 context 真实填充了多少窗口"，并显示占可用窗口（减去输出预留）的百分比；
+    同时附带显示 API 上报的 input token 作为对照。
+
+### 📝 展示效果（修复后）
+```
+/window
+Context window: 128.0K (手动指定)
+  Context used: 4,820 / 128,000 (4% of usable window)
+  (real-time estimate; API-reported input: 0 tok)
+  Manual override: 128.0K (persisted in config)
+```
+
 ## v2.8.7 (未发布) — 修复上下文压缩摘要丢失核心任务（AI"变傻"）
 
 ### 🐛 关键修复

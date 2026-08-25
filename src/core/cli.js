@@ -732,9 +732,19 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
         case 'window': {
           const arg = rest[0] ? rest.join(' ').trim() : ''
           if (!arg) {
-            // 无参数：显示当前窗口
+            // 无参数：显示当前窗口 + 真实 context 用量
+            // 用实时估算（estimateMessages）反映"当前 context 填充了多少窗口"，
+            // 而非依赖 usage 上报的 inputTokens——本地网关不返回 usage 时
+            // inputTokens 恒为 0，无法反映真实填充情况。
+            const estTokens = engine.tokenBudget.estimateMessages(engine.state.messages)
+            const windowTokens = engine.tokenBudget.maxTokens
+            const reserved = engine.tokenBudget.reservedForOutput || 0
+            const pct = windowTokens > 0
+              ? Math.min(100, Math.round((estTokens / (windowTokens - reserved)) * 100))
+              : 0
             console.log(`Context window: ${formatTokens(tokenBudget.maxTokens)} (${windowSourceLabel(windowSource)})`)
-            console.log(`  Input used: ${tokenBudget.inputTokens.toLocaleString()} / ${tokenBudget.maxTokens.toLocaleString()} (${tokenBudget.usagePercent}%)`)
+            console.log(`  Context used: ${estTokens.toLocaleString()} / ${windowTokens.toLocaleString()} (${pct}% of usable window)`)
+            console.log(`  (real-time estimate; API-reported input: ${tokenBudget.inputTokens.toLocaleString()} tok)`)
             const manual = config.get('maxBudgetTokens') || 0
             if (manual > 0) console.log(`  Manual override: ${formatTokens(manual)} (persisted in config)`)
             break
@@ -893,6 +903,11 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
           break
         case 'budget': {
           console.log(tokenBudget.format())
+          // 追加实时估算的 context 用量（本地网关不返回 usage 时 inputTokens 为 0，无法反映真实填充）
+          const estTokens = engine.tokenBudget.estimateMessages(engine.state.messages)
+          const winTk = engine.tokenBudget.maxTokens
+          const pct = winTk > 0 ? Math.min(100, Math.round((estTokens / winTk) * 100)) : 0
+          console.log(`  Context (est): ${estTokens.toLocaleString()} / ${winTk.toLocaleString()} (${pct}% of window)`)
           console.log(`Context window: ${formatTokens(tokenBudget.maxTokens)} (${windowSourceLabel(windowSource)}) | trigger: ${Math.round((tokenBudget.maxTokens * 0.8)).toLocaleString()} (80%)`)
           break
         }
