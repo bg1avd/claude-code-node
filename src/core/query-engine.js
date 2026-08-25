@@ -32,6 +32,8 @@ export class QueryEngineConfig {
     this.model = options.model || ''
     this.maxTurns = options.maxTurns || 100
     this.maxBudgetTokens = options.maxBudgetTokens || 1_000_000
+    // 压缩触发保守系数（0~1）：估算到可用窗口的该比例即触发压缩，留出 tokenization 差异余量
+    this.compressSafetyFactor = options.compressSafetyFactor ?? 0.85
     this.permissionMode = options.permissionMode || 'ask'
     this.verbose = options.verbose || false
     // API 配置 — 通用 OpenAI 兼容协议
@@ -109,29 +111,42 @@ export class QueryEngine {
    *   4. 摘要后仍超窗 → 滑动窗口精确裁剪兜底：从最早完整 user 回合挤出，
    *      并把被裁掉的历史压缩成摘要 system 保留，避免 AI 失忆。
    *      保证最新信息（含刚加入的用户消息）保留在末尾，上下文永不超出窗口。
+   *
+   * 保守化（v2.8.11）：
+   *   estimateMessages 是启发式估算，可能比模型真实 token 偏少。若等到估算真正
+   *   超过 hardLimit 才压缩，实际 token 可能已超模型窗口（如 400 exceed_context_size）。
+   *   因此压缩触发点提前到 hardLimit × SAFETY_FACTOR（默认 85%），给 tokenization
+   *   差异留余量，确保实际请求永远 ≤ 模型窗口。
    */
   _ensureFitWindow() {
     if (!this.tokenBudget) return
-    const limit = this.tokenBudget.maxTokens - this.tokenBudget.reservedForOutput
+    const maxTokens = this.tokenBudget.maxTokens
+    const hardLimit = maxTokens - (this.tokenBudget.reservedForOutput || 0)
+    // 保守触发阈值：估算到可用窗口的 85% 就开始压缩，避免估算偏差导致实际超窗
+    const safetyFactor = this.config.compressSafetyFactor ?? 0.85
+    const triggerLimit = Math.max(1, Math.floor(hardLimit * safetyFactor))
     const est = this.tokenBudget.estimateMessages(this.state.messages)
-    if (est <= limit) return
+    if (est <= triggerLimit) return
 
     // 1) 摘要式压缩优先：用实时估算直接决定是否压缩（不再依赖滞后的 usagePercent）
+    //    压缩目标也用保守阈值（而非 hardLimit），确保压缩后实际 token 远离窗口上限
     const summarized = compactMessages(this.state.messages, {
-      maxTokens: Math.floor(this.tokenBudget.maxTokens * 0.6),
+      maxTokens: Math.floor(maxTokens * 0.6),
     })
     const reEst = this.tokenBudget.estimateMessages(summarized)
-    if (reEst <= limit) {
+    if (reEst <= triggerLimit) {
       this.state.messages = summarized
-      if (this.config.verbose) console.error('[compact] Context summarized to fit token budget')
+      if (this.config.verbose) console.error(`[compact] Context summarized to fit token budget (${est} → ${reEst}, trigger<${triggerLimit})`)
       return
     }
 
     // 2) 滑动窗口精确裁剪兜底（摘要仍超窗）：裁剪时保留被裁剪历史的摘要
     const { trimmed, messages: trimmedMsgs, removed, summary } = trimToWindow(this.state.messages, {
       tokenBudget: this.tokenBudget,
-      maxTokens: this.tokenBudget.maxTokens,
+      maxTokens,
       keepSummary: true,
+      // 裁剪也需满足保守阈值（估算 ≤ triggerLimit），避免估算偏差导致实际超窗
+      limitOverride: triggerLimit,
     })
     if (trimmed) {
       this.state.messages = trimmedMsgs

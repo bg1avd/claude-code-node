@@ -1,5 +1,23 @@
 # CHANGELOG
 
+## v2.8.11 (未发布) — 保守压缩触发，防止 context 实际超窗（400 exceed_context_size）
+
+### 🐛 修复
+- **修复 `exceed_context_size_error` 400 错误**：请求 context（131496 token）超过模型
+  实际上限（131072）。根因是 `_ensureFitWindow` 用启发式估算判断是否压缩，而估算可能
+  比模型真实 token **偏少**——估算认为"没超窗"时实际已超限，压缩触发太晚，context 涨过
+  模型窗口。
+- **保守化**（`src/core/query-engine.js`）：
+  - 压缩触发点从"估算 > 可用窗口"提前到"估算 > 可用窗口 × **85%**"
+    （`compressSafetyFactor`，默认 0.85，可在 `QueryEngineConfig` 配置）；
+  - 压缩目标 / `trimToWindow` 兜底也用同一保守阈值（`limitOverride`），
+    确保实际请求永远 ≤ 模型窗口，给 tokenization 差异留余量。
+- **`trimToWindow` 新增 `limitOverride`**（`src/core/compact.js`）：可直接指定裁剪上限。
+
+### 🧪 测试
+- `compact-window.test.js` 新增"limitOverride 保守裁剪上限"测试，共 13 个。
+- 全量单元测试通过，无回归。
+
 ## v2.8.10 (未发布) — 修复 v2.8.9 诊断日志的 TDZ 错误
 
 ### 🐛 修复

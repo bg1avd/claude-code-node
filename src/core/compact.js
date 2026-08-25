@@ -276,7 +276,10 @@ export function trimToWindow(messages, options = {}) {
   const maxTokens = options.maxTokens || 160_000
   const reservedForOutput = options.reservedForOutput || (budget ? budget.reservedForOutput : 8192)
   const keepSummary = options.keepSummary !== false
-  const limit = maxTokens - reservedForOutput
+  // 可直接指定裁剪上限（覆盖 maxTokens - reservedForOutput），用于保守触发场景
+  const limit = options.limitOverride != null
+    ? options.limitOverride
+    : maxTokens - reservedForOutput
 
   const estimate = (msgs) => budget
     ? budget.estimateMessages(msgs)

@@ -103,6 +103,19 @@ test('滑动窗口：keepSummary=false 时不保留摘要', () => {
   assert.ok(!r.messages.some(m => m.role === 'system' && m.content.includes('Context Summary')))
 })
 
+test('滑动窗口：limitOverride 指定保守裁剪上限（提前触发，防实际超窗）', () => {
+  const tb = makeBudget(500)
+  const msgs = makeMessages(20) // 41 条
+  // 用 limitOverride 指定一个更保守的裁剪上限（模拟估算偏差预留余量）
+  const hardLimit = tb.maxTokens - tb.reservedForOutput // 490
+  const conservative = Math.floor(hardLimit * 0.85) // 416
+  const r = trimToWindow(msgs, { tokenBudget: tb, maxTokens: tb.maxTokens, keepSummary: true, limitOverride: conservative })
+  assert.equal(r.trimmed, true)
+  // 裁剪后估算 ≤ 保守上限
+  assert.ok(tb.estimateMessages(r.messages) <= conservative,
+    `裁剪后 ${tb.estimateMessages(r.messages)} 应 ≤ 保守上限 ${conservative}`)
+})
+
 test('滑动窗口：极端情况（单条消息超窗）仍保留 system + 最近一条', () => {
   const tb = makeBudget(50) // 窗口很小
   // 构造：每条消息都较大，导致任何单条都可能超窗
