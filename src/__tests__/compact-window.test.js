@@ -40,7 +40,7 @@ test('滑动窗口：未超窗时消息原样保留', () => {
 })
 
 test('滑动窗口：超窗时从最早消息精确裁剪，且总 token ≤ 窗口', () => {
-  const tb = makeBudget(300)
+  const tb = makeBudget(500)
   const msgs = makeMessages(20) // 41 条，超窗
   const r = trimToWindow(msgs, { tokenBudget: tb, maxTokens: tb.maxTokens })
   assert.equal(r.trimmed, true)
@@ -53,7 +53,7 @@ test('滑动窗口：超窗时从最早消息精确裁剪，且总 token ≤ 窗
 })
 
 test('滑动窗口：最新消息始终保留在末尾', () => {
-  const tb = makeBudget(300)
+  const tb = makeBudget(500)
   const msgs = makeMessages(20)
   const r = trimToWindow(msgs, { tokenBudget: tb, maxTokens: tb.maxTokens })
   const last = r.messages[r.messages.length - 1]
@@ -62,7 +62,7 @@ test('滑动窗口：最新消息始终保留在末尾', () => {
 })
 
 test('滑动窗口：system 提示永不裁剪', () => {
-  const tb = makeBudget(300)
+  const tb = makeBudget(500)
   const msgs = makeMessages(20)
   const r = trimToWindow(msgs, { tokenBudget: tb, maxTokens: tb.maxTokens })
   assert.equal(r.messages[0].role, 'system')
@@ -70,7 +70,7 @@ test('滑动窗口：system 提示永不裁剪', () => {
 })
 
 test('滑动窗口：裁剪后保留最近连续对话（无空洞）', () => {
-  const tb = makeBudget(300)
+  const tb = makeBudget(500)
   const msgs = makeMessages(20)
   const r = trimToWindow(msgs, { tokenBudget: tb, maxTokens: tb.maxTokens })
   // 裁剪后 = 原始 system + (摘要 system) + 连续的 user/assistant 对
@@ -82,7 +82,7 @@ test('滑动窗口：裁剪后保留最近连续对话（无空洞）', () => {
 })
 
 test('滑动窗口：被裁剪历史压缩成摘要保留（不丢失上下文）', () => {
-  const tb = makeBudget(300)
+  const tb = makeBudget(500)
   const msgs = makeMessages(20) // 41 条，超窗
   const r = trimToWindow(msgs, { tokenBudget: tb, maxTokens: tb.maxTokens })
   assert.equal(r.trimmed, true)
@@ -95,7 +95,7 @@ test('滑动窗口：被裁剪历史压缩成摘要保留（不丢失上下文�
 })
 
 test('滑动窗口：keepSummary=false 时不保留摘要', () => {
-  const tb = makeBudget(300)
+  const tb = makeBudget(500)
   const msgs = makeMessages(20)
   const r = trimToWindow(msgs, { tokenBudget: tb, maxTokens: tb.maxTokens, keepSummary: false })
   assert.equal(r.trimmed, true)
@@ -137,4 +137,40 @@ test('摘要式压缩 compactMessages 仍可用（信息量更高路径）', () 
   assert.ok(r.length < msgs.length, '摘要应减少消息数')
   // 摘要作为 system 上下文插入
   assert.equal(r[0].role, 'system')
+})
+
+test('摘要改进：Main goal 保留最早的核心任务（不丢早期主线）', () => {
+  const tb = makeBudget(128000, 8192)
+  // 触发摘要分支：纯对话量大（无超长工具结果可截断），必须靠摘要压缩
+  const msgs = [
+    { role: 'user', content: '【核心任务】修复撮合引擎 bug' },
+    { role: 'assistant', content: '定位中，使用工具查看', toolCalls: [{ id: 'a', name: 'Grep', input: { pattern: 'x' } }] },
+    { role: 'tool', tool_call_id: 'a', content: 'result' },
+    { role: 'assistant', content: '关键发现：价格优先排序错误' },
+  ]
+  for (let i = 0; i < 400; i++) {
+    msgs.push({ role: 'user', content: `例行检查 ${i} 确认行情 ` + 'x'.repeat(600) })
+    msgs.push({ role: 'assistant', content: `完成 ${i} ` + 'y'.repeat(500) })
+  }
+  const r = compactMessages(msgs, { maxTokens: Math.floor(tb.maxTokens * 0.6) })
+  const all = r.map(m => (typeof m.content === 'string' ? m.content : '')).join('\n')
+  assert.ok(r.some(m => m.role === 'system' && m.content.includes('Context Summary')), '应生成摘要')
+  assert.ok(all.includes('Main goal'), '摘要应包含 Main goal')
+  assert.ok(all.includes('撮合引擎'), '核心任务应在 Main goal 中保留')
+  assert.ok(all.includes('价格优先'), '早期关键发现应在 Key results 中保留')
+})
+
+test('摘要改进：数字归一化去重，避免例行序号占满摘要', () => {
+  const tb = makeBudget(128000, 8192)
+  const msgs = []
+  for (let i = 0; i < 400; i++) {
+    msgs.push({ role: 'user', content: `例行检查 ${i} 确认数据 ` + 'x'.repeat(600) })
+    msgs.push({ role: 'assistant', content: `检查 ${i} 完成 ` + 'y'.repeat(500) })
+  }
+  const r = compactMessages(msgs, { maxTokens: Math.floor(tb.maxTokens * 0.6) })
+  const sm = r.find(m => m.role === 'system' && m.content.includes('Context Summary'))
+  assert.ok(sm, '应有摘要')
+  // 数字归一化后，"例行检查 0/1/2..." 应被归并为一条，而不是每个序号都出现
+  const intentCount = (sm.content.match(/例行检查/g) || []).length
+  assert.ok(intentCount <= 2, `例行意图应被去重（实际 ${intentCount} 条）`)
 })

@@ -91,12 +91,74 @@ export function compactMessages(messages, options = {}) {
 
 /**
  * 从消息列表生成摘要
+ *
+ * 摘要策略（v2.8.7 改进）：
+ *   - **Main goal**：显式标注对话【最早】的明确用户意图（通常就是核心任务/主线），
+ *     避免早期核心指令被后续例行内容挤掉；
+ *   - 其余用户意图按出现顺序去重保留（前 10 条），不再用 slice(-5) 丢弃早期；
+ *   - **Key results**：保留【最早】的关键发现 + 【最新】的关键结果（首尾各一），
+ *     兼顾"任务进展"与"最终结论"。
+ */
+/**
+ * 压缩连续重复字符（去掉无意义的填充，如 "xxx...xxx" → "x"）。
+ * 用于意图/结果去重归一化，避免"例行检查 10 xxx..." 与 "例行检查 100 xxx..." 因
+ * 填充长度不同而被误判为不同意图。
+ */
+function squashRepeats(str) {
+  let out = ''
+  let last = ''
+  for (const ch of str) {
+    if (ch !== last) {
+      out += ch
+      last = ch
+    }
+  }
+  return out
+}
+
+/**
+ * 判断一条文本是否"有实质内容"（去掉填充后仍有意义）。
+ */
+function hasSubstance(content) {
+  if (!content) return false
+  const squashed = squashRepeats(String(content))
+  // 去掉空白后仍有足够的信息量（至少 6 个非重复字符，或含中文/冒号等结构化标记）
+  const meaningful = squashed.replace(/\s+/g, '')
+  return meaningful.length >= 6
+}
+
+// 结论性关键词：用于挑选 Key results 里"有价值"的结论，而非过渡性话术
+// （注意避开"定位中/正在/好的/让我"等过渡词）
+const CONCLUSION_HINTS = [
+  '关键', '发现', '错误', '原因', '结论', '问题', '修复',
+  '成功', '失败', '是因为', '在于', '导致', '需要', '找到', '定位到',
+]
+
+/**
+ * 判断一条文本是否像"结论"（含结论性关键词）。
+ */
+function isConclusionLike(text) {
+  const s = String(text)
+  return CONCLUSION_HINTS.some(k => s.includes(k))
+}
+
+/**
+ * 从消息列表生成摘要
+ *
+ * 摘要策略（v2.8.7 改进）：
+ *   - **Main goal**：显式标注对话【最早】的明确用户意图（通常就是核心任务/主线），
+ *     避免早期核心指令被后续例行内容挤掉；
+ *   - 其余用户意图按出现顺序去重保留（前 10 条），数字归一化 + 去填充，
+ *     让"例行检查 0/1/2"归并为一条，不占满摘要；
+ *   - **Key results**：优先保留【最早的一条结论性内容】+【最新的一条结果】，
+ *     过滤纯填充/过渡性话术，避免例行内容淹没核心结论。
  */
 function generateSummary(messages) {
-  const topics = new Set()
+  const topics = [] // 保留出现顺序，不丢早期
+  const seenIntents = new Set() // 归一化去重
   const toolsUsed = new Set()
-  const keyResults = []
-  let lastUserIntent = ''
+  const keyResults = [] // 有实质内容的结果（保留顺序）
+  let firstIntent = ''
 
   for (const msg of messages) {
     if (msg.role === 'user' && msg.content) {
@@ -104,8 +166,15 @@ function generateSummary(messages) {
       const intent = typeof msg.content === 'string'
         ? msg.content.split('\n')[0].slice(0, 80)
         : ''
-      if (intent) lastUserIntent = intent
-      topics.add(intent)
+      if (intent) {
+        if (!firstIntent) firstIntent = intent
+        // 数字归一化 + 去填充去重："例行检查 10 xxx..." 与 "例行检查 100 xxx..." → 同一条
+        const norm = squashRepeats(intent.replace(/\d+/g, 'N'))
+        if (!seenIntents.has(norm)) {
+          seenIntents.add(norm)
+          topics.push(intent)
+        }
+      }
     }
 
     if (msg.role === 'assistant') {
@@ -115,16 +184,16 @@ function generateSummary(messages) {
           toolsUsed.add(tc.name)
         }
       }
-      // 收集关键文本结果（取最后一条重要的 assistant 回复）
-      if (msg.content && typeof msg.content === 'string' && msg.content.length > 20) {
+      // 收集有实质内容的关键文本结果
+      if (typeof msg.content === 'string' && hasSubstance(msg.content)) {
         keyResults.push(msg.content.slice(0, 300))
       }
     }
 
     if (msg.role === 'tool' && msg.content) {
-      // 记录工具结果摘要
+      // 记录工具结果摘要（去填充后判断）
       const content = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)
-      if (content.length > 100) {
+      if (hasSubstance(content)) {
         keyResults.push(`[tool result]: ${content.slice(0, 150)}...`)
       }
     }
@@ -132,16 +201,22 @@ function generateSummary(messages) {
 
   // 组装摘要
   const parts = []
-  if (topics.size > 0) {
-    const topicList = [...topics].slice(-5).map(t => `- ${t}`).join('\n')
-    parts.push(`User intents:\n${topicList}`)
+  if (firstIntent) {
+    parts.push(`Main goal: ${firstIntent}`)
+  }
+  const restTopics = topics.filter(t => t !== firstIntent).slice(0, 10)
+  if (restTopics.length > 0) {
+    parts.push(`User intents:\n${restTopics.map(t => `- ${t}`).join('\n')}`)
   }
   if (toolsUsed.size > 0) {
     parts.push(`Tools used: ${[...toolsUsed].join(', ')}`)
   }
   if (keyResults.length > 0) {
-    const lastResult = keyResults[keyResults.length - 1]
-    parts.push(`Last key result: ${lastResult}`)
+    // 优先取【最早的结论性内容】；若无结论性内容，退回最早一条
+    const firstConclusion = keyResults.find(k => isConclusionLike(k)) || keyResults[0]
+    const last = keyResults[keyResults.length - 1]
+    const kr = firstConclusion === last ? [firstConclusion] : [firstConclusion, last]
+    parts.push(`Key results:\n${kr.map(k => `- ${k}`).join('\n')}`)
   }
 
   return parts.join('\n\n') || 'Previous conversation context was compacted.'
