@@ -53,6 +53,11 @@ export class QueryEngineConfig {
     //   - 工具数量精简 + 意图引导
     // 默认关闭，通过 config.smallModel=true 或 --small-model 开启
     this.smallModel = options.smallModel || false
+    // 单次输出上限动态计算：
+    //   outputRatio — 输出占窗口比例（默认 1/16），窗口越大输出越大
+    //   maxOutputTokens — 输出下限（默认 4096），也可作为硬性覆盖
+    this.outputRatio = options.outputRatio != null ? options.outputRatio : 1 / 16
+    this.maxOutputTokens = options.maxOutputTokens || 0
     this.permissionMode = options.permissionMode || 'ask'
     this.verbose = options.verbose || false
     // API 配置 — 通用 OpenAI 兼容协议
@@ -313,6 +318,32 @@ export class QueryEngine {
   }
 
   /**
+   * 动态计算单次输出上限 max_tokens
+   *
+   * 不再写死 4096，而是根据当前上下文窗口（/window 设置、tokenBudget.maxTokens）
+   * 按比例动态得出——窗口越大，允许的单次输出越大，避免小模型写大文件时被截断。
+   *
+   * 公式：max_tokens = max(基础下限, 窗口 × 输出比例)
+   *   - 输出比例默认 1/16（6.25%）：131072 窗口 → 8192；65536 → 4096
+   *   - 下限 4096：窗口很小时也有足够输出空间
+   *   - 上限不超过窗口的一半（留足输入空间，绝不超窗）
+   *
+   * @returns {number}
+   */
+  _computeMaxOutputTokens() {
+    const windowSize = this.tokenBudget?.maxTokens
+    // 可配置：默认输出比例 1/16，下限 4096
+    const ratio = this.config.outputRatio != null ? this.config.outputRatio : 1 / 16
+    const min = this.config.maxOutputTokens || 4096
+    if (!windowSize || !Number.isFinite(windowSize) || windowSize <= 0) return min
+    const byWindow = Math.floor(windowSize * ratio)
+    // 上限 = 窗口一半，保证输入有足够空间，绝不超窗
+    const cap = Math.floor(windowSize / 2)
+    const maxOut = Math.min(cap, Math.max(min, byWindow))
+    return maxOut
+  }
+
+  /**
    * 构建 LLM 请求消息列表 — 统一 OpenAI 兼容格式
    */
   _buildRequest(messages) {
@@ -475,7 +506,8 @@ export class QueryEngine {
     const body = {
       model: this.config.model,
       messages,
-      max_tokens: 4096,
+      // 根据当前上下文窗口动态计算输出上限（不再写死 4096）
+      max_tokens: this._computeMaxOutputTokens(),
       ...(tools.length && { tools }),
       ...(useStream && { stream: true }),
     }

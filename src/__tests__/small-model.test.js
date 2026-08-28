@@ -189,3 +189,40 @@ test('多步计划：普通任务走简单意图引导', () => {
   assert.ok(g, '应生成引导')
   assert.ok(g.includes('任务引导'), '应走简单意图引导')
 })
+
+// ---- 动态 max_tokens 计算 ----
+test('max_tokens：根据窗口大小动态计算', async () => {
+  const { QueryEngine } = await import('../core/query-engine.js')
+  const { TokenBudget } = await import('../core/token-budget.js')
+  // 131072 窗口 → 8192（窗口的 1/16）
+  const qe1 = new QueryEngine({ tokenBudget: new TokenBudget({ maxTokens: 131072 }) })
+  assert.equal(qe1._computeMaxOutputTokens(), 8192)
+  // 65536 → 4096
+  const qe2 = new QueryEngine({ tokenBudget: new TokenBudget({ maxTokens: 65536 }) })
+  assert.equal(qe2._computeMaxOutputTokens(), 4096)
+  // 无窗口 → 兜底 4096
+  const qe3 = new QueryEngine({})
+  assert.equal(qe3._computeMaxOutputTokens(), 4096)
+})
+
+test('max_tokens：可配置输出比例与下限覆盖', async () => {
+  const { QueryEngine } = await import('../core/query-engine.js')
+  const { TokenBudget } = await import('../core/token-budget.js')
+  // outputRatio=0.1 → 131072*0.1=13107
+  const qe1 = new QueryEngine({ tokenBudget: new TokenBudget({ maxTokens: 131072 }), outputRatio: 0.1 })
+  assert.equal(qe1._computeMaxOutputTokens(), 13107)
+  // maxOutputTokens=8192 作为下限
+  const qe2 = new QueryEngine({ tokenBudget: new TokenBudget({ maxTokens: 131072 }), maxOutputTokens: 8192 })
+  assert.equal(qe2._computeMaxOutputTokens(), 8192)
+})
+
+test('max_tokens：绝不超过窗口一半（防超窗）', async () => {
+  const { QueryEngine } = await import('../core/query-engine.js')
+  const { TokenBudget } = await import('../core/token-budget.js')
+  // 小窗口 8192：窗口一半 = 4096，1/16 = 512，取 max(4096,512)=4096 ≤ 4096
+  const qe1 = new QueryEngine({ tokenBudget: new TokenBudget({ maxTokens: 8192 }) })
+  assert.ok(qe1._computeMaxOutputTokens() <= 4096, `max_tokens=${qe1._computeMaxOutputTokens()} 不应超过窗口一半 4096`)
+  // 极端 outputRatio=1.0 也不应超过窗口一半
+  const qe2 = new QueryEngine({ tokenBudget: new TokenBudget({ maxTokens: 10000 }), outputRatio: 1.0 })
+  assert.ok(qe2._computeMaxOutputTokens() <= 5000, `max_tokens=${qe2._computeMaxOutputTokens()} 不应超过窗口一半 5000`)
+})
