@@ -1,5 +1,23 @@
 # CHANGELOG
 
+## v2.8.18
+
+## v2.8.18 — 折叠/裁剪时隔离所有 system 消息，彻底消除中间 system
+
+### 🐛 修复
+- **`foldHistoryByCount` 和 `trimToWindow` 改为收集【所有】 system 消息**，不再只取第一条。
+  此前多次折叠/裁剪后，旧的摘要 system 会被当成普通消息塞进 body，最终被挤到
+  对话中间，触发 llama.cpp "System message must be at the beginning" (500)。
+  现在无论折叠多少次，所有 system 都隔离到开头。
+- 配合 v2.8.17 的 `_buildRequest` 前置修复，形成双重保障：
+  - 状态层：折叠/裁剪不再把 system 塞进 body；
+  - 请求层：即便状态异常，`_buildRequest` 也把所有 system 前置。
+
+### 🧪 测试
+- `compact-window.test.js` 新增 2 个回归测试（折叠/裁剪后 system 全在开头），共 23 个。
+- 全量 162 个单元测试通过，无回归。
+
+
 ## v2.8.18 (未发布) — 折叠/裁剪时隔离所有 system 消息，彻底消除中间 system
 
 ### 🐛 修复
