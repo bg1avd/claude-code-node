@@ -330,6 +330,7 @@ function parseArgs(argv) {
     apiBase: 'https://api.deepseek.com/v1',
     resume: null,
     noStream: false,
+    maxMessages: 0,
   }
 
   let i = 2
@@ -345,6 +346,7 @@ function parseArgs(argv) {
       case '--resume': case '-r': args.resume = argv[++i]; break
       case '--verbose': case '-v': args.verbose = true; break
       case '--no-stream': args.noStream = true; break
+      case '--max-messages': args.maxMessages = parseInt(argv[++i], 10); break
       case '--stdio': args.stdio = true; break
       case '--with-notify': args.withNotify = true; break
       case '--version':
@@ -365,6 +367,7 @@ Options:
   --version                 Show version
   -v, --verbose             Verbose mode
   --no-stream               Disable streaming
+  --max-messages N          Fold history when message count exceeds N (default: 0 = off)
   --with-notify             Start built-in channel listener (Telegram)
                             (replaces cc-notify daemon — no external script needed)
   -h, --help                Show this help
@@ -525,6 +528,8 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
     costTracker,
     tokenBudget,
     configStore: config,
+    // 消息条数上限（折叠早期历史，解决本地小模型"条数过多变傻"）；0 = 关闭
+    maxMessages: cliArgs.maxMessages || config.get('maxMessages') || 0,
   })
   const engine = new QueryEngine(engineConfig)
 

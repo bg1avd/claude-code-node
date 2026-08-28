@@ -143,6 +143,115 @@ function isConclusionLike(text) {
 }
 
 /**
+ * 发送前常驻工具结果截断 — 不依赖是否超窗
+ *
+ * 背景：长对话中工具结果（命令回显、git 输出等）会不断累积，即便单条不长，
+ * 条数一多也会让模型（尤其本地小模型）"迷失"在过程噪音里。旧逻辑只在 token
+ * 超窗时才截断，导致 token 未超窗（如 37%）但 200+ 条消息让模型变傻。
+ *
+ * 本函数在【每次发送前】都对工具结果做上限截断（默认 6000 字符），
+ * 阈值比压缩时的 maxToolResultChars（2000）宽松，避免频繁误截，
+ * 同时把"超长噪音"从源头上压住。
+ *
+ * @param {Array} messages — 消息列表
+ * @param {number} [maxChars=6000] — 工具结果保留的最大字符数
+ * @returns {Array} 截断后的消息列表（原列表被浅拷贝修改，不影响调用方原始引用结构）
+ */
+export function trimToolResults(messages, maxChars = 6000) {
+  return messages.map(msg => {
+    if (msg.role === 'tool' && typeof msg.content === 'string' && msg.content.length > maxChars) {
+      return {
+        ...msg,
+        content: msg.content.slice(0, maxChars) + `\n[...tool result truncated: kept ${maxChars} chars]`,
+      }
+    }
+    return msg
+  })
+}
+
+/**
+ * 按消息条数折叠历史 — 解决"条数过多、token 不高却变傻"
+ *
+ * 背景：27B 等本地小模型对"消息条数"比"token 数"更敏感。一个 session 塞进
+ * 200+ 条消息（113 条工具结果 + 84 条 assistant + 多个 user），即便 token 只占
+ * 窗口 37%，模型也会因为角色切换频繁、工具结果噪音堆积而"迷失"当前指令。
+ *
+ * 本函数在消息条数超过 maxMessages 时，把早期历史折叠成一条摘要
+ * （保留 Main goal + 工具使用 + 关键结果），仅保留最近 keepRecentTurns 轮的
+ * 完整对话，把消息条数压到可管理范围，同时不丢主线。
+ *
+ * @param {Array} messages — 完整消息列表
+ * @param {object} options
+ * @param {number} [options.maxMessages=80] — 超过此条数即触发折叠
+ * @param {number} [options.keepRecentTurns=4] — 保留最近 N 轮完整对话
+ * @param {number} [options.maxToolResultChars=2000] — 折叠时工具结果截断长度
+ * @returns {{ folded: boolean, messages: Array, removed: number, summary: string|null }}
+ */
+export function foldHistoryByCount(messages, options = {}) {
+  const maxMessages = options.maxMessages || 80
+  const keepRecentTurns = options.keepRecentTurns ?? 4
+  const maxToolResultChars = options.maxToolResultChars || 2000
+
+  // 未超过条数阈值 → 不折叠
+  if (messages.length <= maxMessages) {
+    return { folded: false, messages, removed: 0, summary: null }
+  }
+
+  // 分离 system 提示（首条 system 永不折叠）与普通消息
+  const systemMsgs = []
+  const body = []
+  for (const m of messages) {
+    if (m.role === 'system' && systemMsgs.length === 0) {
+      systemMsgs.push(m)
+    } else {
+      body.push(m)
+    }
+  }
+
+  // 找到分界点：保留最近 keepRecentTurns 轮
+  // 一轮 = user + assistant(+tool_calls) + tool 结果们 + assistant 最终回复
+  // 从末尾倒推，数到第 keepRecentTurns 个 user 即分界（splitIndex 指向该轮起点，
+  // 使得 recentMessages 恰好包含最近 keepRecentTurns 轮完整对话）
+  let turnCount = 0
+  let splitIndex = body.length
+  for (let i = body.length - 1; i >= 0; i--) {
+    if (body[i].role === 'user') {
+      turnCount++
+      if (turnCount >= keepRecentTurns) {
+        splitIndex = i
+        break
+      }
+    }
+  }
+
+  // 没有可折叠的早期消息（全都要保留）→ 不折叠
+  if (splitIndex <= 0 || splitIndex >= body.length) {
+    return { folded: false, messages, removed: 0, summary: null }
+  }
+
+  const earlyMessages = body.slice(0, splitIndex)
+  const recentMessages = body.slice(splitIndex)
+
+  // 对折叠掉的历史生成摘要（保留 Main goal / 工具 / 关键结果）
+  const summary = generateSummary(earlyMessages)
+
+  // 构建折叠后的消息列表：system + (摘要 system) + 最近 N 轮完整对话
+  const folded = [...systemMsgs]
+  folded.push({
+    role: 'system',
+    content: `[Context Summary — ${new Date().toISOString()}]\n${summary}\n[End of Summary — recent conversation follows]`,
+  })
+  folded.push(...recentMessages)
+
+  return {
+    folded: true,
+    messages: folded,
+    removed: earlyMessages.length,
+    summary,
+  }
+}
+
+/**
  * 从消息列表生成摘要
  *
  * 摘要策略（v2.8.7 改进）：

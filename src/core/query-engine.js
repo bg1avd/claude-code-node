@@ -14,7 +14,7 @@
 import crypto from 'crypto'
 import { UserMessage, AssistantMessage, ToolCall, ToolResult, SessionState } from '../types/index.js'
 import { parseStream, parseNonStreamResponse } from './streaming.js'
-import { compactMessages, trimToWindow } from './compact.js'
+import { compactMessages, trimToWindow, foldHistoryByCount, trimToolResults } from './compact.js'
 import { CostTracker } from './cost-tracker.js'
 import { EnhancedPermissionChecker } from '../security/enhanced-permission.js'
 import { isLocalLlmServer, buildAuthHeaders } from '../utils/index.js'
@@ -34,6 +34,11 @@ export class QueryEngineConfig {
     this.maxBudgetTokens = options.maxBudgetTokens || 1_000_000
     // 压缩触发保守系数（0~1）：估算到可用窗口的该比例即触发压缩，留出 tokenization 差异余量
     this.compressSafetyFactor = options.compressSafetyFactor ?? 0.85
+    // 消息条数上限：超过则强制折叠早期历史（解决本地小模型"条数过多、token不高却变傻"）
+    // 0 表示不启用条数折叠（仅按 token）
+    this.maxMessages = options.maxMessages || 0
+    // 发送前常驻工具结果截断长度（字符），防止超长工具结果堆积（0 表示不截断）
+    this.maxToolResultChars = options.maxToolResultChars || 6000
     this.permissionMode = options.permissionMode || 'ask'
     this.verbose = options.verbose || false
     // API 配置 — 通用 OpenAI 兼容协议
@@ -100,14 +105,17 @@ export class QueryEngine {
   }
 
   /**
-   * 确保上下文 ≤ 窗口（滑动窗口语义）
+   * 确保上下文 ≤ 窗口（滑动窗口语义）+ 消息条数可控
    *
-   * 处理顺序：
-   *   1. 估算当前消息总 token（实时估算，反映 state.messages 真实大小）；
-   *   2. 若未超窗 → 不做任何事；
+   * 处理顺序（每层都基于上一层的输出，逐层收敛）：
+   *   0. 发送前常驻工具结果截断（trimToolResults）—— 不依赖是否超窗，从源头压住
+   *      超长工具结果噪音，防止"token 未超窗但工具结果堆积"。
+   *   1. 消息条数折叠（foldHistoryByCount）—— 当 state.messages 条数超过
+   *      maxMessages 时，把早期历史折叠成摘要，保留最近 N 轮完整对话。
+   *      解决本地小模型"200+ 条消息、token 仅 37% 却变傻不干活"的核心问题。
+   *   2. 估算当前消息总 token（实时估算，反映 state.messages 真实大小）；
+   *      若未超窗 → 不做 token 层处理；
    *   3. 若超窗 → 先做摘要式压缩（保留最近 N 轮 + 早期摘要，信息量更高）。
-   *      注意：这里直接用实时 token 估算判断是否压缩，而非依赖滞后的
-   *      usagePercent（那会导致"判定超窗但压缩永不触发"）。
    *   4. 摘要后仍超窗 → 滑动窗口精确裁剪兜底：从最早完整 user 回合挤出，
    *      并把被裁掉的历史压缩成摘要 system 保留，避免 AI 失忆。
    *      保证最新信息（含刚加入的用户消息）保留在末尾，上下文永不超出窗口。
@@ -120,6 +128,33 @@ export class QueryEngine {
    */
   _ensureFitWindow() {
     if (!this.tokenBudget) return
+
+    // ---- 0) 发送前常驻工具结果截断（不依赖超窗）----
+    // 避免超长工具结果持续堆积成噪音；阈值宽松（默认 6000），仅在确实过长时截断
+    if (this.config.maxToolResultChars > 0) {
+      const beforeTrim = this.state.messages.length
+      this.state.messages = trimToolResults(this.state.messages, this.config.maxToolResultChars)
+      if (this.config.verbose && this.state.messages.length !== beforeTrim) {
+        console.error('[compact] 工具结果已按上限截断（常驻）')
+      }
+    }
+
+    // ---- 1) 消息条数折叠（解决本地小模型"条数过多变傻"）----
+    // 不依赖 token 是否超窗：只要消息条数超过 maxMessages，就折叠早期历史为摘要
+    if (this.config.maxMessages > 0) {
+      const { folded, messages: foldedMsgs, removed, summary } = foldHistoryByCount(this.state.messages, {
+        maxMessages: this.config.maxMessages,
+        keepRecentTurns: 4,
+      })
+      if (folded) {
+        this.state.messages = foldedMsgs
+        if (this.config.verbose) {
+          console.error(`[compact] 消息条数 ${removed + foldedMsgs.length} > ${this.config.maxMessages}，已折叠早期 ${removed} 条为摘要（保留最近 4 轮）`)
+          if (summary) console.error('[compact] 折叠摘要：\n' + summary)
+        }
+      }
+    }
+
     const maxTokens = this.tokenBudget.maxTokens
     const hardLimit = maxTokens - (this.tokenBudget.reservedForOutput || 0)
     // 保守触发阈值：估算到可用窗口的 85% 就开始压缩，避免估算偏差导致实际超窗
@@ -128,7 +163,7 @@ export class QueryEngine {
     const est = this.tokenBudget.estimateMessages(this.state.messages)
     if (est <= triggerLimit) return
 
-    // 1) 摘要式压缩优先：用实时估算直接决定是否压缩（不再依赖滞后的 usagePercent）
+    // 2) 摘要式压缩优先：用实时估算直接决定是否压缩（不再依赖滞后的 usagePercent）
     //    压缩目标也用保守阈值（而非 hardLimit），确保压缩后实际 token 远离窗口上限
     const summarized = compactMessages(this.state.messages, {
       maxTokens: Math.floor(maxTokens * 0.6),
@@ -140,7 +175,7 @@ export class QueryEngine {
       return
     }
 
-    // 2) 滑动窗口精确裁剪兜底（摘要仍超窗）：裁剪时保留被裁剪历史的摘要
+    // 3) 滑动窗口精确裁剪兜底（摘要仍超窗）：裁剪时保留被裁剪历史的摘要
     const { trimmed, messages: trimmedMsgs, removed, summary } = trimToWindow(this.state.messages, {
       tokenBudget: this.tokenBudget,
       maxTokens,

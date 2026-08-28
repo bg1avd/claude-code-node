@@ -11,7 +11,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { trimToWindow, compactMessages } from '../core/compact.js'
+import { trimToWindow, compactMessages, foldHistoryByCount, trimToolResults } from '../core/compact.js'
 import { TokenBudget } from '../core/token-budget.js'
 
 /** 构造一个固定窗口的 TokenBudget */
@@ -186,4 +186,101 @@ test('摘要改进：数字归一化去重，避免例行序号占满摘要', ()
   // 数字归一化后，"例行检查 0/1/2..." 应被归并为一条，而不是每个序号都出现
   const intentCount = (sm.content.match(/例行检查/g) || []).length
   assert.ok(intentCount <= 2, `例行意图应被去重（实际 ${intentCount} 条）`)
+})
+
+// ============================================================
+// foldHistoryByCount — 按消息条数折叠（解决"条数过多、token不高却变傻"）
+// ============================================================
+
+/** 构造带工具结果的对话：system + n 轮（每轮 user + assistant(tool_calls) + tool + assistant） */
+function makeToolMessages(n, { sysContent = 'SYS' } = {}) {
+  const msgs = [{ role: 'system', content: sysContent }]
+  for (let i = 0; i < n; i++) {
+    msgs.push({ role: 'user', content: `用户任务 ${i}：做点事` })
+    msgs.push({ role: 'assistant', content: '', toolCalls: [{ id: `c${i}`, name: 'Bash', input: { command: 'ls' } }] })
+    msgs.push({ role: 'tool', tool_call_id: `c${i}`, content: `工具结果 ${i} 的内容` })
+    msgs.push({ role: 'assistant', content: `完成 ${i} 的汇报` })
+  }
+  return msgs
+}
+
+test('条数折叠：未超过 maxMessages 时原样保留', () => {
+  const msgs = makeToolMessages(5) // 1 + 20 = 21 条
+  const r = foldHistoryByCount(msgs, { maxMessages: 80 })
+  assert.equal(r.folded, false)
+  assert.equal(r.removed, 0)
+  assert.equal(r.messages.length, msgs.length)
+})
+
+test('条数折叠：超过 maxMessages 时把早期历史折叠为摘要', () => {
+  const msgs = makeToolMessages(30) // 1 + 120 = 121 条 > 80
+  const r = foldHistoryByCount(msgs, { maxMessages: 80, keepRecentTurns: 4 })
+  assert.equal(r.folded, true)
+  assert.ok(r.removed > 0, '应移除早期消息')
+  assert.ok(r.messages.length < msgs.length, '折叠后消息数应减少')
+  // 折叠后消息数应显著降低（远低于 121）
+  assert.ok(r.messages.length < 60, `折叠后应降到可管理数量（实际 ${r.messages.length}）`)
+  // 摘要 system 保留
+  assert.ok(r.messages.some(m => m.role === 'system' && m.content.includes('Context Summary')),
+    '应插入折叠摘要 system')
+  // Main goal 保留最早的核心任务
+  assert.ok(r.summary.includes('用户任务 0'), '摘要应保留最早的核心任务')
+})
+
+test('条数折叠：最新 4 轮完整对话保留在末尾（含工具调用链无空洞）', () => {
+  const msgs = makeToolMessages(20) // 1 + 80 = 81 条 > 80
+  const r = foldHistoryByCount(msgs, { maxMessages: 80, keepRecentTurns: 4 })
+  // 保留最近 4 轮 = 16 条 + system + 摘要 system
+  // 检查末尾保留了最新的用户任务
+  const lastUser = [...r.messages].reverse().find(m => m.role === 'user')
+  assert.ok(lastUser, '应有 user 消息')
+  assert.ok(lastUser.content.includes('用户任务 19'), '最新一轮应保留')
+})
+
+test('条数折叠：system 提示永不折叠', () => {
+  const msgs = makeToolMessages(30)
+  const r = foldHistoryByCount(msgs, { maxMessages: 80 })
+  assert.equal(r.messages[0].role, 'system')
+  assert.equal(r.messages[0].content, 'SYS')
+})
+
+test('条数折叠：keepRecentTurns=1 时只保留最新一轮', () => {
+  const msgs = makeToolMessages(10) // 1 + 40 = 41 条
+  const r = foldHistoryByCount(msgs, { maxMessages: 20, keepRecentTurns: 1 })
+  assert.equal(r.folded, true)
+  // 1(system) + 1(摘要) + 4(最新一轮) = 6
+  assert.equal(r.messages.length, 6, `应保留 system+摘要+最新一轮（实际 ${r.messages.length}）`)
+})
+
+// ============================================================
+// trimToolResults — 发送前常驻工具结果截断（不依赖超窗）
+// ============================================================
+
+test('工具结果截断：超长工具结果被截断到 maxChars', () => {
+  const msgs = [
+    { role: 'tool', tool_call_id: 'a', content: 'x'.repeat(10000) },
+  ]
+  const r = trimToolResults(msgs, 6000)
+  assert.ok(r[0].content.length <= 6000 + 50, `截断后长度 ${r[0].content.length} 应 ≤ 6000`)
+  assert.ok(r[0].content.includes('truncated'), '应有截断标记')
+})
+
+test('工具结果截断：未超长的不受影响', () => {
+  const msgs = [
+    { role: 'tool', tool_call_id: 'a', content: 'short' },
+    { role: 'user', content: 'hello' },
+  ]
+  const r = trimToolResults(msgs, 6000)
+  assert.equal(r[0].content, 'short')
+  assert.equal(r[1].content, 'hello')
+})
+
+test('工具结果截断：非 tool 消息与空内容不受影响', () => {
+  const msgs = [
+    { role: 'user', content: 'x'.repeat(10000) }, // user 不截断
+    { role: 'tool', tool_call_id: 'a', content: '' },
+  ]
+  const r = trimToolResults(msgs, 100)
+  assert.equal(r[0].content.length, 10000, 'user 消息不应被截断')
+  assert.equal(r[1].content, '')
 })

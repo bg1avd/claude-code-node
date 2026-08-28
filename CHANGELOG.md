@@ -1,5 +1,24 @@
 # CHANGELOG
 
+## v2.8.12 (未发布) — 消息条数感知的历史折叠，解决本地小模型"条数过多变傻"
+
+### 🚀 新特性
+- **新增按消息条数折叠历史 `foldHistoryByCount`**（`src/core/compact.js`）：
+  - 当上下文消息条数超过 `maxMessages`（默认 80，可用 `--max-messages N` 或
+    `config.maxMessages` 开启）时，把早期历史折叠成一条摘要
+    （保留 Main goal / 工具使用 / 关键结果），仅保留最近 4 轮完整对话。
+  - 解决 **token 未超窗（如 37%）但 200+ 条消息（113 条工具结果 + 84 条 assistant）
+    让本地 27B 小模型"迷失"当前指令、只回 `Solved after next action`** 的核心问题。
+- **新增发送前常驻工具结果截断 `trimToolResults`**（`src/core/compact.js`）：
+  - 每次发送前（不依赖是否超窗）对超长工具结果（>6000 字符）做截断，
+    从源头压住"工具结果过程噪音"堆积。
+- **`_ensureFitWindow` 三层收敛**（`src/core/query-engine.js`）：
+  ① 工具结果常驻截断 → ② 消息条数折叠 → ③ token 超窗压缩/滑动窗口裁剪兜底。
+
+### 🧪 测试
+- `compact-window.test.js` 新增 8 个测试（条数折叠 5 个 + 工具结果截断 3 个），共 21 个。
+- 全量单元测试通过，无回归。
+
 ## v2.8.11 (未发布) — 保守压缩触发，防止 context 实际超窗（400 exceed_context_size）
 
 ### 🐛 修复

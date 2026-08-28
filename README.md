@@ -67,6 +67,7 @@ cc-node --resume session-1747000000000-abc123
 | `--resume` | `-r` | 恢复会话 ID | |
 | `--verbose` | `-v` | 详细输出 | `false` |
 | `--no-stream` | | 禁用流式响应 | `false` |
+| `--max-messages` | | 消息条数上限，超过则折叠早期历史为摘要（解决本地小模型"条数过多变傻"） | `0`（关闭） |
 | `--stdio` | | **JSON-RPC 服务器模式**（供桥接层/外部客户端接入，见下） | |
 | `--help` | `-h` | 显示帮助 | |
 
@@ -136,16 +137,25 @@ cc-node 会自动感知当前所用模型的**上下文窗口长度**，并在�
 
 ### 自动压缩机制（滑动窗口）
 
-上下文**永不超出窗口**，采用"摘要优先 + 滑动窗口裁剪兜底"的双层策略：
+上下文**永不超出窗口**，采用"条数折叠 + 摘要优先 + 滑动窗口裁剪兜底"的多层策略：
 
-1. **摘要式压缩**（信息量更高）：每次新消息加入 / 工具结果返回 / 发送前，用**实时 token
+**0. 发送前常驻工具结果截断**（v2.8.12）：每次发送前（不依赖是否超窗）对**超长工具结果**
+（默认 >6000 字符）做截断，从源头压住"工具结果过程噪音"堆积，避免它们淹没模型对最新
+指令的注意力。
+
+**1. 消息条数折叠**（v2.8.12，`--max-messages N` 开启，默认关闭）：当上下文**消息条数**
+超过 `N`（如 80）时，把早期历史折叠成一条摘要（保留 `Main goal` / 工具使用 / 关键结果），
+仅保留最近 4 轮完整对话。这解决**本地小模型（如 27B）"token 未超窗但 200+ 条消息却变傻、
+不干活"**的问题——这类模型对"消息条数"比"token 数"更敏感。
+
+**2. 摘要式压缩**（信息量更高）：每次新消息加入 / 工具结果返回 / 发送前，用**实时 token
    估算**判断是否超窗；超窗时把早期对话压缩为摘要（保留最近 4 轮 + 摘要），目标压到窗口
    的 60%。摘要会**显式标注最早的 `Main goal`（核心任务主线）**，并保留最早的关键发现与
    最新结果，避免例行内容淹没核心任务（防止 AI 压缩后失忆）。
    > **保守触发（v2.8.11）**：由于启发式估算可能比模型真实 token 偏少，压缩**提前到
    > 可用窗口的 85%** 即触发（`compressSafetyFactor`，默认 0.85），给 tokenization 差异
    > 留余量，避免实际请求超过模型窗口（如 `exceed_context_size_error` 400 错误）。
-2. **滑动窗口精确裁剪**（兜底，保证永不超窗）：摘要压缩后仍超窗时，从**最早的消息**逐条
+**3. 滑动窗口精确裁剪**（兜底，保证永不超窗）：摘要压缩后仍超窗时，从**最早的消息**逐条
    挤出，**最新信息始终保留在末尾**，直到总 token ≤ 窗口上限。system 提示永不裁剪；
    **被裁剪的早期历史会压缩成一条摘要 system 保留**（避免 AI 丢失上下文主线）；极端情况
    （单条消息超窗）仍保留 system + 最近一条，保证至少能发出请求。
@@ -330,6 +340,7 @@ cc-node --api-base http://localhost:11434/v1
   "model": "deepseek-chat",
   "maxTurns": 100,
   "maxBudgetTokens": 128000,
+  "maxMessages": 80,
   "permissionMode": "ask",
   "tools": {
     "bash": { "timeout": 120 },
@@ -345,6 +356,10 @@ cc-node --api-base http://localhost:11434/v1
 > **`maxBudgetTokens`**：手动指定的上下文窗口上限（token 数）。
 > 为 `0` 或未设置时，自动探测模型真实窗口；手动指定后优先于自动探测，
 > 等价于 `/window N` 的效果，并持久化保存。
+>
+> **`maxMessages`**：消息条数上限（可选，默认关闭/`0`）。当上下文消息条数超过该值时，
+> 自动折叠早期历史为摘要（保留 Main goal + 最近 4 轮完整对话），解决本地小模型
+> "条数过多、token 不高却变傻"的问题。等价于 `--max-messages N`。
 
 [![npm version](https://img.shields.io/npm/v/@raolin2025/claude-code-node.svg)](https://www.npmjs.com/package/@raolin2025/claude-code-node) [![GitHub](https://img.shields.io/badge/GitHub-bg1avd%2Fclaude--code--node-blue)](https://github.com/bg1avd/claude-code-node) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ---
