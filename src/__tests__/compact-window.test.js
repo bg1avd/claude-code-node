@@ -284,3 +284,39 @@ test('工具结果截断：非 tool 消息与空内容不受影响', () => {
   assert.equal(r[0].content.length, 10000, 'user 消息不应被截断')
   assert.equal(r[1].content, '')
 })
+
+test('折叠/裁剪：多次折叠后所有 system 仍在开头（防 llama.cpp 500）', () => {
+  // 模拟：一次折叠后 body 里有摘要 system 残留的场景
+  const msgs = [
+    { role: 'system', content: 'ROOT SYS' },
+    { role: 'system', content: '[Context Summary — 旧的折叠摘要]' }, // 已存在第二条 system
+    { role: 'user', content: '任务1' },
+    { role: 'assistant', content: '结果1' },
+    { role: 'user', content: '任务2' },
+    { role: 'assistant', content: '结果2' },
+  ]
+  // foldHistoryByCount 折叠后，所有 system 都应在最前，body 里无 system
+  const r = foldHistoryByCount(msgs, { maxMessages: 5, keepRecentTurns: 1 })
+  const roles = r.messages.map(m => m.role)
+  // 找到第一个非 system 的索引，之后不应再有 system
+  const firstBody = roles.findIndex(x => x !== 'system')
+  const afterBody = roles.slice(firstBody + 1)
+  assert.ok(!afterBody.includes('system'), `折叠后 body 中不应有 system（实际 roles=${roles.join(',')}）`)
+})
+
+test('trimToWindow：所有 system 均在开头，body 中无 system', () => {
+  const msgs = [
+    { role: 'system', content: 'ROOT SYS' },
+    { role: 'system', content: '[Context Summary — 旧摘要]' },
+    { role: 'user', content: 'a'.repeat(50) },
+    { role: 'assistant', content: 'b'.repeat(50) },
+    { role: 'user', content: 'c'.repeat(50) },
+    { role: 'assistant', content: 'd'.repeat(50) },
+  ]
+  const tb = makeBudget(200, 0)
+  const r = trimToWindow(msgs, { tokenBudget: tb, maxTokens: tb.maxTokens })
+  const roles = r.messages.map(m => m.role)
+  const firstBody = roles.findIndex(x => x !== 'system')
+  const afterBody = roles.slice(firstBody + 1)
+  assert.ok(!afterBody.includes('system'), `trim 后 body 中不应有 system（实际 roles=${roles.join(',')}）`)
+})

@@ -197,11 +197,14 @@ export function foldHistoryByCount(messages, options = {}) {
     return { folded: false, messages, removed: 0, summary: null }
   }
 
-  // 分离 system 提示（首条 system 永不折叠）与普通消息
+  // 分离 system 提示与普通消息
+  // 注意：把所有 system 都收集到 systemMsgs（不只是第一条）——多次折叠后 body 里
+  // 可能残留旧的摘要 system，若不全部隔离，折叠结果会把 system 挤到对话中间，
+  // 触发 llama.cpp "System message must be at the beginning" (500)。
   const systemMsgs = []
   const body = []
   for (const m of messages) {
-    if (m.role === 'system' && systemMsgs.length === 0) {
+    if (m.role === 'system') {
       systemMsgs.push(m)
     } else {
       body.push(m)
@@ -400,11 +403,13 @@ export function trimToWindow(messages, options = {}) {
     return { trimmed: false, messages, removed: 0, summary: null }
   }
 
-  // 分离 system 提示（首条 system 永不裁剪）与普通消息
+  // 分离 system 提示与普通消息
+  // 注意：收集【所有】 system（不只第一条），避免多次裁剪后旧的摘要 system
+  // 残留在 body 里、被挤到对话中间，触发 llama.cpp "System message must be at the beginning" (500)。
   const systemMsgs = []
   const body = []
   for (const m of messages) {
-    if (m.role === 'system' && systemMsgs.length === 0) {
+    if (m.role === 'system') {
       systemMsgs.push(m)
     } else {
       body.push(m)
