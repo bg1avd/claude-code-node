@@ -18,6 +18,8 @@ import {
   buildSmallModelSystemPrompt,
   SMALL_MODEL_SYSTEM_PROMPT,
   isSmallModelEnabled,
+  buildMultiStepPlan,
+  buildCombinedGuidance,
 } from '../core/small-model.js'
 
 // ---- 敷衍输出检测 ----
@@ -144,4 +146,46 @@ test('小模型开关判断', () => {
   assert.equal(isSmallModelEnabled({ smallModel: true }), true)
   assert.equal(isSmallModelEnabled({ smallModel: false }), false)
   assert.equal(isSmallModelEnabled(undefined), false)
+})
+
+// ---- system prompt 注入 cwd ----
+test('system prompt 强化：注入当前工作目录', () => {
+  const base = 'You are cc-node.'
+  const enhanced = buildSmallModelSystemPrompt(base, { cwd: 'D:\\workspace\\miniQMT-trader' })
+  assert.ok(enhanced.includes('当前工作目录'), '应包含工作目录说明')
+  assert.ok(enhanced.includes('miniQMT-trader'), '应包含实际 cwd 路径')
+  assert.ok(enhanced.includes('不要猜测其它绝对路径'), '应提示不要瞎猜路径')
+})
+
+// ---- 多步计划拆解 ----
+test('多步计划：识别"按计划实现"任务', () => {
+  const r = buildMultiStepPlan('按计划实现第一阶段', { cwd: 'D:\\x' })
+  assert.ok(r && r.isMultiStep, '应识别为多步任务')
+  assert.ok(r.plan.includes('步骤 1'), '应有步骤 1')
+  assert.ok(r.plan.includes('Read'), '步骤 1 应用 Read')
+  assert.ok(r.plan.includes('DEVELOPMENT_PLAN.md'), '应引用计划文件')
+})
+
+test('多步计划：提取指令里的计划文件名', () => {
+  const r = buildMultiStepPlan('实现DEV_PLAN.md里的第二阶段', { cwd: 'D:\\x' })
+  assert.ok(r && r.plan.includes('DEV_PLAN.md'), '应提取指令中的计划文件名')
+})
+
+test('多步计划：非实现任务返回 null', () => {
+  assert.equal(buildMultiStepPlan('阅读DEVELOPMENT_PLAN.md', { enable: true }), null)
+  assert.equal(buildMultiStepPlan('你好', { enable: true }), null)
+  assert.equal(buildMultiStepPlan('按计划实现第一阶段', { enable: false }), null)
+})
+
+test('多步计划：combined guidance 优先走多步拆解', () => {
+  const g = buildCombinedGuidance('按计划实现第一阶段', { cwd: 'D:\\x', enable: true })
+  assert.ok(g, '应生成引导')
+  assert.ok(g.includes('多步执行计划'), '应走多步计划')
+  assert.ok(g.includes('步骤 1'), '应包含步骤引导')
+})
+
+test('多步计划：普通任务走简单意图引导', () => {
+  const g = buildCombinedGuidance('阅读DEVELOPMENT_PLAN.md文档', { cwd: 'D:\\x', enable: true })
+  assert.ok(g, '应生成引导')
+  assert.ok(g.includes('任务引导'), '应走简单意图引导')
 })

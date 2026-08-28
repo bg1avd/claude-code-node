@@ -97,10 +97,18 @@ export const SMALL_MODEL_SYSTEM_PROMPT = `
 /**
  * 生成小模型模式下的完整 system prompt（基础 prompt + 强化引导）
  * @param {string} basePrompt — 基础 system prompt
+ * @param {object} [opts]
+ * @param {string} [opts.cwd] — 当前工作目录（注入给模型，避免它瞎猜文件路径）
  * @returns {string}
  */
-export function buildSmallModelSystemPrompt(basePrompt) {
-  return basePrompt + SMALL_MODEL_SYSTEM_PROMPT
+export function buildSmallModelSystemPrompt(basePrompt, opts = {}) {
+  let prompt = basePrompt + SMALL_MODEL_SYSTEM_PROMPT
+  // 注入当前工作目录：小模型没有上下文意识，不知道用户在哪个项目目录，
+  // 不给 cwd 它会瞎猜绝对路径（如 /home/user/repos/...），导致 File not found。
+  if (opts.cwd) {
+    prompt += `\n\n## 当前工作目录\n用户当前的工作目录是：\`${opts.cwd}\`\n查找/读取/写入文件时，优先在此目录（或此目录的子目录）中定位文件，不要猜测其它绝对路径。\n`
+  }
+  return prompt
 }
 
 // ---- 重试追加强引导（层 A）----
@@ -118,6 +126,21 @@ export const RETRY_GUIDANCE = `[系统提示] 你刚才没有调用任何工具�
 //   note: 给模型的动作说明
 
 const INTENT_RULES = [
+  {
+    // 实现/开发任务：按计划实现、开始写代码、实现模块等 —— 多步复杂任务
+    // 这类任务 detectIntent 只给工具提示，真正的分步拆解由 buildMultiStepPlan 完成
+    pattern: /(按计划|依据计划|根据计划).*(实现|开发|完成|写代码|编码|落地)/i,
+    plan: ['Read（读计划）', 'Glob/Grep（看现状）', 'Write/Edit（实现）', 'Bash（验证）'],
+    note: '这是按计划实现代码的多步任务，需要先读计划再逐步实现。',
+    toolHint: 'Bash, Read, Edit, Write, Glob, Grep',
+  },
+  {
+    // 实现/开发任务（不带"按计划"）：实现模块/功能/代码
+    pattern: /(实现|开发|编写|写出|完成).*(模块|功能|代码|接口|函数|类|系统|第一阶段|阶段)/i,
+    plan: ['Read（读相关文件）', 'Glob/Grep（看现状）', 'Write/Edit（实现）', 'Bash（验证）'],
+    note: '这是实现代码的多步任务，先了解现状再实现并验证。',
+    toolHint: 'Bash, Read, Edit, Write, Glob, Grep',
+  },
   {
     // 读/查看/阅读文档或文件 → 读取任务（优先于写规则，避免"阅读XX文档"被误判为写）
     pattern: /(读|阅读|查看|打开|展示|显示|看看|浏览).*(文档|文件|内容|md|readme|代码|计划)/i,
@@ -208,6 +231,96 @@ export function buildIntentGuidance(userInput, opts = {}) {
   const intent = detectIntent(userInput)
   if (!intent) return null
   return `[任务引导] 根据用户指令，建议按此思路用工具推进：${intent.intent}。\n说明：${intent.note}\n可用工具：${intent.toolHint}`
+}
+
+// 常见计划文档文件名（供多步拆解时定位计划文件）
+const PLAN_FILE_CANDIDATES = [
+  'DEVELOPMENT_PLAN.md',
+  'development_plan.md',
+  'DEV_PLAN.md',
+  'PLAN.md',
+  'plan.md',
+  'PROJECT_PLAN.md',
+  'ROADMAP.md',
+]
+
+/**
+ * 框架深度拆解：为"按计划实现"类多步任务生成分步执行计划（层 B 深化）
+ *
+ * 背景：小模型（27B Q3）撑不住"按计划实现第一阶段"这类多步复杂任务——
+ * 它常常不读计划就瞎写，或干脆敷衍。框架必须【接管规划】，把任务拆成
+ * 明确、可执行的步骤注入给模型。
+ *
+ * 针对"按计划实现/开发"任务，生成强制分步引导，核心是：
+ *   第 1 步必须 Read 计划文件（定位要实现的模块/函数）；
+ *   后续步骤按"看现状 → 实现 → 验证"推进。
+ *
+ * @param {string} userInput — 用户指令
+ * @param {object} [opts]
+ * @param {string} [opts.cwd] — 当前工作目录（用于给计划文件相对路径）
+ * @param {boolean} [opts.enable=true] — 是否启用
+ * @returns {{ isMultiStep: boolean, plan: string } | null}
+ *          isMultiStep=true 表示识别为多步实现任务；plan 为注入给模型的分步引导
+ */
+export function buildMultiStepPlan(userInput, opts = {}) {
+  if (opts.enable === false) return null
+  if (!userInput) return null
+  const s = userInput
+
+  // 识别"按计划实现/开发"类任务
+  const isPlanImplement = /(按计划|依据计划|根据计划|按开发计划|按照计划).*(实现|开发|完成|写|落地|推进)/i.test(s)
+    || /实现.*(计划|第一阶段|阶段|模块)/i.test(s)
+
+  if (!isPlanImplement) return null
+
+  // 定位计划文件：从指令里提取文件名，否则用常见候选
+  let planFile = ''
+  const m = s.match(/([\w./-]+\.md)/i)
+  if (m) {
+    planFile = m[1]
+  } else {
+    planFile = PLAN_FILE_CANDIDATES[0] // 默认 DEVELOPMENT_PLAN.md
+  }
+  // 若非绝对路径且给了 cwd，拼成相对提示
+  const planRef = planFile
+
+  const plan = `[多步执行计划] 这是一个按计划实现代码的任务，请【严格按以下步骤】用工具推进，不要跳过，不要一次做太多：
+
+步骤 1（必做）：用 Read 读取计划文件 \`${planRef}\`，从中找出用户要求实现的阶段/模块/函数（明确要做什么、涉及哪些文件、有哪些要求）。
+步骤 2：用 Glob 查看项目当前文件结构（cwd 下），用 Grep 搜索计划里提到的模块/函数是否已有代码。
+步骤 3：对每个需要实现的目标，先 Read 相关现有文件了解现状，再用 Write 创建新文件 / 用 Edit 修改已有文件来落地实现。
+步骤 4：实现完成后，用 Bash 运行测试或编译命令验证（如有），并总结实现了什么。
+
+严格遵守：第 1 步必须先 Read 计划文件；每一步完成后再进行下一步；不要在没有读计划的情况下直接写代码。`
+
+  return { isMultiStep: true, plan }
+}
+
+/**
+ * 生成注入到 system 的完整小模型引导（意图引导 + 多步计划 + cwd）
+ *
+ * 把多个引导源合并成一段，追加到首条 system 消息末尾。
+ *
+ * @param {string} userInput — 用户指令
+ * @param {object} [opts]
+ * @param {string} [opts.cwd] — 当前工作目录
+ * @param {boolean} [opts.enable=true]
+ * @returns {string|null} 合并后的引导文本
+ */
+export function buildCombinedGuidance(userInput, opts = {}) {
+  if (opts.enable === false) return null
+  const parts = []
+  // 多步计划优先（复杂实现任务走深度拆解）
+  const multi = buildMultiStepPlan(userInput, opts)
+  if (multi) {
+    parts.push(multi.plan)
+  } else {
+    // 否则用简单意图引导
+    const g = buildIntentGuidance(userInput, opts)
+    if (g) parts.push(g)
+  }
+  if (parts.length === 0) return null
+  return parts.join('\n\n')
 }
 
 /**
