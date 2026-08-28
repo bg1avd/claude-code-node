@@ -320,3 +320,63 @@ test('trimToWindow：所有 system 均在开头，body 中无 system', () => {
   const afterBody = roles.slice(firstBody + 1)
   assert.ok(!afterBody.includes('system'), `trim 后 body 中不应有 system（实际 roles=${roles.join(',')}）`)
 })
+
+test('条数折叠：保留当前进行中的任务链，只折叠已完成的早期历史', () => {
+  // 场景：正在工具循环中（最近 user 之后有完整工具链），早期有已完成任务
+  const msgs = [
+    { role: 'system', content: 'SYS' },
+    // 早期已完成历史
+    { role: 'user', content: '任务1' },
+    { role: 'assistant', content: 'a1', toolCalls: [{ id: 't1', name: 'Bash', input: {} }] },
+    { role: 'tool', tool_call_id: 't1', content: 'r1' },
+    { role: 'assistant', content: '完成1' },
+    // 当前进行中的任务（工具链未完成）
+    { role: 'user', content: '按计划实现第一阶段' },
+    { role: 'assistant', content: '', toolCalls: [{ id: 'c1', name: 'Read', input: {} }] },
+    { role: 'tool', tool_call_id: 'c1', content: '计划内容' },
+    { role: 'assistant', content: '', toolCalls: [{ id: 'c2', name: 'Write', input: {} }] },
+    { role: 'tool', tool_call_id: 'c2', content: '写入成功' },
+  ]
+  const r = foldHistoryByCount(msgs, { maxMessages: 8, keepRecentTurns: 2 })
+  assert.equal(r.folded, true)
+  const all = JSON.stringify(r.messages)
+  // 当前任务（最近的 user 及其后的工具链）必须完整保留
+  assert.ok(all.includes('按计划实现第一阶段'), '当前任务 user 应保留')
+  assert.ok(all.includes('计划内容'), '当前任务的 Read 结果应保留')
+  assert.ok(all.includes('写入成功'), '当前任务的 Write 结果应保留')
+  // 早期已完成历史应被折叠
+  assert.ok(!all.includes('完成1'), '早期已完成历史应被折叠')
+})
+
+test('条数折叠：当前任务很大时按完整 user 轮次折叠，不截断工具链', () => {
+  const msgs = [{ role: 'system', content: 'SYS' }]
+  // 早期历史
+  for (let i = 0; i < 5; i++) {
+    msgs.push({ role: 'user', content: '旧任务' + i })
+    msgs.push({ role: 'assistant', content: '旧完成' + i })
+  }
+  // 当前大任务（多轮工具循环）
+  msgs.push({ role: 'user', content: '实现第一阶段' })
+  for (let i = 0; i < 15; i++) {
+    msgs.push({ role: 'assistant', content: '', toolCalls: [{ id: 'c' + i, name: 'Write', input: {} }] })
+    msgs.push({ role: 'tool', tool_call_id: 'c' + i, content: '写模块' + i })
+  }
+  const r = foldHistoryByCount(msgs, { maxMessages: 20, keepRecentTurns: 3 })
+  assert.equal(r.folded, true)
+  const all = JSON.stringify(r.messages)
+  // 当前任务 user 保留
+  assert.ok(all.includes('实现第一阶段'), '当前任务 user 应保留')
+  // 折叠后工具链连续（无中间截断）
+  const roles = r.messages.map(m => m.role).filter(x => x !== 'system')
+  let expectUser = true
+  for (const role of roles) {
+    if (role === 'user') { expectUser = false }
+  }
+  // 验证角色序列是 user,assistant,tool,assistant,tool... 的连续模式（无孤立 tool）
+  for (let i = 0; i < roles.length; i++) {
+    if (roles[i] === 'tool') {
+      // tool 之前必须是 assistant
+      assert.ok(i > 0 && roles[i - 1] === 'assistant', `第 ${i} 个 tool 前应为 assistant（实际 ${roles.join(',')}）`)
+    }
+  }
+})

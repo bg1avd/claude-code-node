@@ -198,9 +198,6 @@ export function foldHistoryByCount(messages, options = {}) {
   }
 
   // 分离 system 提示与普通消息
-  // 注意：把所有 system 都收集到 systemMsgs（不只是第一条）——多次折叠后 body 里
-  // 可能残留旧的摘要 system，若不全部隔离，折叠结果会把 system 挤到对话中间，
-  // 触发 llama.cpp "System message must be at the beginning" (500)。
   const systemMsgs = []
   const body = []
   for (const m of messages) {
@@ -211,18 +208,55 @@ export function foldHistoryByCount(messages, options = {}) {
     }
   }
 
-  // 找到分界点：保留最近 keepRecentTurns 轮
-  // 一轮 = user + assistant(+tool_calls) + tool 结果们 + assistant 最终回复
-  // 从末尾倒推，数到第 keepRecentTurns 个 user 即分界（splitIndex 指向该轮起点，
-  // 使得 recentMessages 恰好包含最近 keepRecentTurns 轮完整对话）
-  let turnCount = 0
-  let splitIndex = body.length
+  // 找到分界点。
+  // 核心原则：**绝不能破坏"当前正在进行的任务链"的完整性**。
+  // 小模型"工作到一半变傻"的根因，就是折叠把正在进行的任务（最近的 user 指令
+  // 及其后的 tool 调用链）折叠成模糊摘要，模型丢失了"当前任务状态"（在做什么、
+  // 做到哪、下一步干什么）而停止调用工具。
+  // 因此：
+  //   1. 优先只折叠【最近 user 指令之前】的早期历史——当前任务（最近 user 指令
+  //      之后所有消息，含进行中的工具调用链）完整保留，永不折叠。
+  //   2. 若当前任务本身消息仍过多（单个任务几十轮），再从当前任务内部按
+  //      【完整 user 轮次】为单位折叠（保留最近 keepRecentTurns 个 user 任务），
+  //      绝不从 tool/assistant 消息中间截断工具链。
+  let splitIndex = -1
+  // 找最近的 user 指令位置
+  let lastUserIdx = -1
   for (let i = body.length - 1; i >= 0; i--) {
     if (body[i].role === 'user') {
-      turnCount++
-      if (turnCount >= keepRecentTurns) {
-        splitIndex = i
-        break
+      lastUserIdx = i
+      break
+    }
+  }
+  // 最近的 user 之后的消息数（当前任务的大小）
+  const currentTaskSize = lastUserIdx === -1 ? body.length : body.length - lastUserIdx
+  if (lastUserIdx > 0 && currentTaskSize <= maxMessages) {
+    // 当前任务本身未超限 → 折叠当前任务之前的历史（保留最近 user 指令起全部）
+    splitIndex = lastUserIdx
+  } else if (lastUserIdx >= 0) {
+    // 当前任务本身也超限 → 从当前任务内部按完整 user 轮次折叠
+    let turnCount = 0
+    splitIndex = lastUserIdx
+    for (let i = body.length - 1; i >= lastUserIdx; i--) {
+      if (body[i].role === 'user') {
+        turnCount++
+        if (turnCount >= keepRecentTurns) {
+          splitIndex = i
+          break
+        }
+      }
+    }
+  } else {
+    // 没有 user 消息（异常）→ 用 keepRecentTurns 兜底
+    let turnCount = 0
+    splitIndex = body.length
+    for (let i = body.length - 1; i >= 0; i--) {
+      if (body[i].role === 'user') {
+        turnCount++
+        if (turnCount >= keepRecentTurns) {
+          splitIndex = i
+          break
+        }
       }
     }
   }
@@ -238,7 +272,7 @@ export function foldHistoryByCount(messages, options = {}) {
   // 对折叠掉的历史生成摘要（保留 Main goal / 工具 / 关键结果）
   const summary = generateSummary(earlyMessages)
 
-  // 构建折叠后的消息列表：system + (摘要 system) + 最近 N 轮完整对话
+  // 构建折叠后的消息列表：system + (摘要 system) + 当前任务完整对话
   const folded = [...systemMsgs]
   folded.push({
     role: 'system',
