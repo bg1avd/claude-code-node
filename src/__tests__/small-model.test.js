@@ -52,6 +52,13 @@ test('意图识别：写文档任务', () => {
   assert.ok(r2 && r2.toolHint.includes('Write'))
 })
 
+test('意图识别：阅读文档是读取任务（不误判为写）', () => {
+  const r = detectIntent('阅读DEVELOPMENT_PLAN.md文档')
+  assert.ok(r, '应识别到意图')
+  assert.ok(r.toolHint.includes('Read'), '应提示用 Read')
+  assert.ok(!r.toolHint.includes('Write'), '读取任务不应提示 Write')
+})
+
 test('意图识别：找文件任务', () => {
   const r = detectIntent('查找src目录下的文件')
   assert.ok(r && r.toolHint.includes('Glob'))

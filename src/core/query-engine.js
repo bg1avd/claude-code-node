@@ -228,12 +228,25 @@ export class QueryEngine {
       // 发送前硬校验：工具结果可能已使上下文超窗，确保 ≤ 窗口（摘要优先 + 滑动窗口裁剪兜底）
       this._ensureFitWindow()
 
-      // 小模型模式：首轮若识别到明确意图，注入意图引导 system 消息
+      // 小模型模式：首轮若识别到明确意图，把引导【追加到首条 system 消息】。
+      // 注意：不能 push 一条新的 system 消息到中间——llama.cpp/Jinja 严格要求
+      // system 消息必须在对话开头，中间插 system 会报 "System message must be at the beginning" (500)。
       if (smallModel && !intentGuided && this.state.messages.length > 0) {
         const guidance = buildIntentGuidance(userMessage.content, { enable: true })
         if (guidance) {
-          this.state.messages.push({ role: 'system', content: guidance })
-          if (this.config.verbose) console.error('[small-model] 已注入意图引导：' + guidance.slice(0, 80) + '...')
+          // 找到第一条 system 消息，把引导拼接进去（保持 system 全在开头）
+          const sysIdx = this.state.messages.findIndex(m => m.role === 'system')
+          if (sysIdx !== -1) {
+            const sysMsg = this.state.messages[sysIdx]
+            this.state.messages[sysIdx] = {
+              ...sysMsg,
+              content: (typeof sysMsg.content === 'string' ? sysMsg.content : '') + '\n\n' + guidance,
+            }
+          } else {
+            // 没有 system 消息 → 作为 user 引导插入（跟随在最新 user 之后作为新 user）
+            this.state.messages.push({ role: 'user', content: guidance })
+          }
+          if (this.config.verbose) console.error('[small-model] 已注入意图引导（并入首条 system）：' + guidance.slice(0, 60) + '...')
         }
         intentGuided = true
       }
