@@ -1,6 +1,29 @@
 # CHANGELOG
 
-## v2.8.12
+## v2.8.13 (未发布) — 小模型适配模式：让弱模型也能可靠完成编程任务
+
+### 🚀 新特性
+- **新增小模型适配模式**（`--small-model` / `config.smallModel=true`，默认关闭）：
+  专为本地小模型（如 27B Q3 量化）设计，把智能从"模型端"转移到"框架端"，
+  解决小模型"只回空话不调工具、多轮往返丢目标"的痛点。
+  - **层 A · 兜底**：
+    - **强化 system prompt**：追加"工具使用铁律"，明确告诉模型必须调用工具完成任务；
+    - **敷衍输出检测 + 重试**：检测到 `Solved by...` / 空话 / 太短 / 无工具调用时，
+      追加强引导重试一次（`isFillerResponse` + `RETRY_GUIDANCE`）；
+    - **工具数量精简**：按用户指令意图只暴露核心工具子集（`selectRelevantTools`），
+      降低小模型的选择负担。
+  - **层 B · 替代**：
+    - **意图识别 + 引导**：用规则把"写文档/找文件/跑命令/改代码/联网搜索"映射到
+      明确工具（`detectIntent` + `buildIntentGuidance`），首轮注入任务引导，
+      不完全依赖模型自主规划。
+
+### 🧪 测试
+- 新增 `small-model.test.js`，17 个测试（敷衍检测 4 + 意图识别 6 + 引导 2 + 工具精简 3 +
+  system prompt 1 + 开关 1）。
+- 全量单元测试通过，无回归。
+
+### 📝 文档
+- README：新增"小模型适配模式"章节、`--small-model` 参数、`smallModel` 配置项。
 
 ## v2.8.12 — 消息条数感知的历史折叠 + 常驻工具结果截断
 
@@ -24,26 +47,6 @@
 - README：新增 `--max-messages` 参数、自动压缩机制"条数折叠 + 工具截断"层、
   `maxMessages` 配置项说明。
 - CHANGELOG：本条目。
-
-
-## v2.8.12 (未发布) — 消息条数感知的历史折叠，解决本地小模型"条数过多变傻"
-
-### 🚀 新特性
-- **新增按消息条数折叠历史 `foldHistoryByCount`**（`src/core/compact.js`）：
-  - 当上下文消息条数超过 `maxMessages`（默认 80，可用 `--max-messages N` 或
-    `config.maxMessages` 开启）时，把早期历史折叠成一条摘要
-    （保留 Main goal / 工具使用 / 关键结果），仅保留最近 4 轮完整对话。
-  - 解决 **token 未超窗（如 37%）但 200+ 条消息（113 条工具结果 + 84 条 assistant）
-    让本地 27B 小模型"迷失"当前指令、只回 `Solved after next action`** 的核心问题。
-- **新增发送前常驻工具结果截断 `trimToolResults`**（`src/core/compact.js`）：
-  - 每次发送前（不依赖是否超窗）对超长工具结果（>6000 字符）做截断，
-    从源头压住"工具结果过程噪音"堆积。
-- **`_ensureFitWindow` 三层收敛**（`src/core/query-engine.js`）：
-  ① 工具结果常驻截断 → ② 消息条数折叠 → ③ token 超窗压缩/滑动窗口裁剪兜底。
-
-### 🧪 测试
-- `compact-window.test.js` 新增 8 个测试（条数折叠 5 个 + 工具结果截断 3 个），共 21 个。
-- 全量单元测试通过，无回归。
 
 ## v2.8.11 (未发布) — 保守压缩触发，防止 context 实际超窗（400 exceed_context_size）
 

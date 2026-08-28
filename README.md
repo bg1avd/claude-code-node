@@ -68,6 +68,7 @@ cc-node --resume session-1747000000000-abc123
 | `--verbose` | `-v` | 详细输出 | `false` |
 | `--no-stream` | | 禁用流式响应 | `false` |
 | `--max-messages` | | 消息条数上限，超过则折叠早期历史为摘要（解决本地小模型"条数过多变傻"） | `0`（关闭） |
+| `--small-model` | | 小模型适配模式（强制工具调用 + 敷衍重试 + 意图引导 + 工具精简） | `false` |
 | `--stdio` | | **JSON-RPC 服务器模式**（供桥接层/外部客户端接入，见下） | |
 | `--help` | `-h` | 显示帮助 | |
 
@@ -175,6 +176,29 @@ cc-node 会自动感知当前所用模型的**上下文窗口长度**，并在�
 ```
 
 > 切换模型（`/model`）后会自动重新探测窗口。`/budget` 也会显示当前窗口与 80% 触发阈值。
+
+### 🤖 小模型适配模式（--small-model）
+
+> 专为 **本地小模型**（如 27B Q3 量化）设计，让编程工具在弱模型下也能可靠工作。
+> 默认关闭，通过 `--small-model` 或 `config.smallModel=true` 开启。
+
+小模型的核心弱点是"规划 + 工具调用 + 自我纠错"不稳定——常只回 `Solved by sharing best practices.`
+这类空话、不调工具，或多轮往返后"丢"了目标。该模式把智能从"模型端"转移到"框架端"：
+
+| 层 | 机制 | 作用 |
+|----|------|------|
+| **A · 兜底** | 强化 system prompt | 明确告诉模型"必须调用工具完成任务，不能只回文字" |
+| **A · 兜底** | 敷衍输出检测 + 重试 | 检测到空话/太短/无工具调用时，追加强引导重试一次 |
+| **A · 兜底** | 工具数量精简 | 按用户指令意图只暴露核心工具子集，降低选择负担 |
+| **B · 替代** | 意图识别 + 引导 | 用规则把"写文档/找文件/跑命令/改代码"映射到明确工具，注入任务引导 |
+
+```bash
+cc-node --api-base http://127.0.0.1:18080/v1 --model ./local-model.gguf \
+  --with-notify --small-model --max-messages 80
+```
+
+> **配合 `--max-messages N`**：两者互补——`--max-messages` 解决"条数过多"，
+> `--small-model` 解决"模型不会自主调工具"。小模型场景建议一起开启。
 
 ---
 
@@ -341,6 +365,7 @@ cc-node --api-base http://localhost:11434/v1
   "maxTurns": 100,
   "maxBudgetTokens": 128000,
   "maxMessages": 80,
+  "smallModel": true,
   "permissionMode": "ask",
   "tools": {
     "bash": { "timeout": 120 },
@@ -360,6 +385,10 @@ cc-node --api-base http://localhost:11434/v1
 > **`maxMessages`**：消息条数上限（可选，默认关闭/`0`）。当上下文消息条数超过该值时，
 > 自动折叠早期历史为摘要（保留 Main goal + 最近 4 轮完整对话），解决本地小模型
 > "条数过多、token 不高却变傻"的问题。等价于 `--max-messages N`。
+>
+> **`smallModel`**：小模型适配模式（可选，默认关闭/`false`）。开启后启用强制工具调用
+> 引导、敷衍输出检测重试、意图识别 + 工具精简，让弱模型（如 27B Q3 量化）也能可靠
+> 完成编程任务。等价于 `--small-model`。
 
 [![npm version](https://img.shields.io/npm/v/@raolin2025/claude-code-node.svg)](https://www.npmjs.com/package/@raolin2025/claude-code-node) [![GitHub](https://img.shields.io/badge/GitHub-bg1avd%2Fclaude--code--node-blue)](https://github.com/bg1avd/claude-code-node) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ---

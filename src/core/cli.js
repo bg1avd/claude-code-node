@@ -331,6 +331,7 @@ function parseArgs(argv) {
     resume: null,
     noStream: false,
     maxMessages: 0,
+    smallModel: false,
   }
 
   let i = 2
@@ -347,6 +348,7 @@ function parseArgs(argv) {
       case '--verbose': case '-v': args.verbose = true; break
       case '--no-stream': args.noStream = true; break
       case '--max-messages': args.maxMessages = parseInt(argv[++i], 10); break
+      case '--small-model': args.smallModel = true; break
       case '--stdio': args.stdio = true; break
       case '--with-notify': args.withNotify = true; break
       case '--version':
@@ -368,6 +370,7 @@ Options:
   -v, --verbose             Verbose mode
   --no-stream               Disable streaming
   --max-messages N          Fold history when message count exceeds N (default: 0 = off)
+  --small-model             Enable small-model adaptation (tool-call enforcement, filler retry, intent guidance)
   --with-notify             Start built-in channel listener (Telegram)
                             (replaces cc-notify daemon — no external script needed)
   -h, --help                Show this help
@@ -530,6 +533,8 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
     configStore: config,
     // 消息条数上限（折叠早期历史，解决本地小模型"条数过多变傻"）；0 = 关闭
     maxMessages: cliArgs.maxMessages || config.get('maxMessages') || 0,
+    // 小模型适配模式（强制工具调用 + 敷衍重试 + 意图引导 + 工具精简）
+    smallModel: cliArgs.smallModel || config.get('smallModel') || false,
   })
   const engine = new QueryEngine(engineConfig)
 

@@ -15,6 +15,14 @@ import crypto from 'crypto'
 import { UserMessage, AssistantMessage, ToolCall, ToolResult, SessionState } from '../types/index.js'
 import { parseStream, parseNonStreamResponse } from './streaming.js'
 import { compactMessages, trimToWindow, foldHistoryByCount, trimToolResults } from './compact.js'
+import {
+  isSmallModelEnabled,
+  buildSmallModelSystemPrompt,
+  isFillerResponse,
+  buildIntentGuidance,
+  selectRelevantTools,
+  RETRY_GUIDANCE,
+} from './small-model.js'
 import { CostTracker } from './cost-tracker.js'
 import { EnhancedPermissionChecker } from '../security/enhanced-permission.js'
 import { isLocalLlmServer, buildAuthHeaders } from '../utils/index.js'
@@ -39,6 +47,12 @@ export class QueryEngineConfig {
     this.maxMessages = options.maxMessages || 0
     // 发送前常驻工具结果截断长度（字符），防止超长工具结果堆积（0 表示不截断）
     this.maxToolResultChars = options.maxToolResultChars || 6000
+    // 小模型适配模式（让弱模型可靠工作）：
+    //   - 强化 system prompt（强制工具调用）
+    //   - 敷衍输出检测 + 重试
+    //   - 工具数量精简 + 意图引导
+    // 默认关闭，通过 config.smallModel=true 或 --small-model 开启
+    this.smallModel = options.smallModel || false
     this.permissionMode = options.permissionMode || 'ask'
     this.verbose = options.verbose || false
     // API 配置 — 通用 OpenAI 兼容协议
@@ -74,6 +88,8 @@ export class QueryEngine {
     this.tokenBudget = this.config.tokenBudget || null
     // 最近一次 processMessage 是否已通过流式回调/直写把正文输出（供调用方避免重复打印 response）
     this.lastStreamed = false
+    // 当前正在处理的用户输入（小模型模式用于按意图精简工具集）
+    this.currentUserInput = ''
   }
 
   /**
@@ -89,6 +105,7 @@ export class QueryEngine {
     this.state.turnCount++
     this.lastStreamed = false  // 本轮是否已流式输出正文
     this.abortController = new AbortController()
+    this.currentUserInput = userInput  // 记录当前用户指令（小模型模式按意图精简工具）
     const userMsg = new UserMessage(userInput, images)
     this.state.messages.push(userMsg)
 
@@ -200,10 +217,26 @@ export class QueryEngine {
    */
   async _runToolLoop(userMessage) {
     let finalResponse = ''
+    const smallModel = isSmallModelEnabled(this.config)
+    // 小模型模式：首轮注入意图引导（层 B），帮助模型锁定该用哪些工具
+    let intentGuided = false
+    // 敷衍重试次数（层 A）：模型没调工具只回空话时，追加强引导重试
+    let fillerRetries = 0
+    const MAX_FILLER_RETRIES = 1
 
     for (let turn = 0; turn < this.config.maxTurns; turn++) {
       // 发送前硬校验：工具结果可能已使上下文超窗，确保 ≤ 窗口（摘要优先 + 滑动窗口裁剪兜底）
       this._ensureFitWindow()
+
+      // 小模型模式：首轮若识别到明确意图，注入意图引导 system 消息
+      if (smallModel && !intentGuided && this.state.messages.length > 0) {
+        const guidance = buildIntentGuidance(userMessage.content, { enable: true })
+        if (guidance) {
+          this.state.messages.push({ role: 'system', content: guidance })
+          if (this.config.verbose) console.error('[small-model] 已注入意图引导：' + guidance.slice(0, 80) + '...')
+        }
+        intentGuided = true
+      }
 
       const requestMessages = this._buildRequest(this.state.messages)
       const response = await this._callLLM(requestMessages, this.state.messages)
@@ -212,8 +245,20 @@ export class QueryEngine {
         throw new Error('操作已取消')
       }
 
-      // 没有工具调用 → 最终回复
+      // 没有工具调用 → 潜在最终回复
       if (!response.toolCalls || response.toolCalls.length === 0) {
+        // 小模型模式：检测敷衍输出（空话/太短/命中占位句），追加强引导重试
+        if (smallModel && fillerRetries < MAX_FILLER_RETRIES && isFillerResponse(response)) {
+          fillerRetries++
+          if (this.config.verbose) {
+            console.error(`[small-model] 检测到敷衍输出（第 ${fillerRetries} 次），追加强引导重试`)
+          }
+          // 把模型的空话 + 强制工具调用提醒注入上下文，再让模型重新决策
+          this.state.messages.push(new AssistantMessage(response.content, [], response.reasoningContent))
+          this.state.messages.push({ role: 'user', content: RETRY_GUIDANCE })
+          continue // 继续循环，重新请求模型
+        }
+
         finalResponse = response.content
         this.state.messages.push(new AssistantMessage(response.content, [], response.reasoningContent))
         break
@@ -257,9 +302,12 @@ export class QueryEngine {
   _buildRequest(messages) {
     const request = []
 
-    // 系统提示
+    // 系统提示（小模型模式：追加强制工具调用引导）
     if (this.config.systemPrompt) {
-      request.push({ role: 'system', content: this.config.systemPrompt })
+      const sysContent = isSmallModelEnabled(this.config)
+        ? buildSmallModelSystemPrompt(this.config.systemPrompt)
+        : this.config.systemPrompt
+      request.push({ role: 'system', content: sysContent })
     }
 
     // 历史消息 — 转换为 OpenAI 兼容格式
@@ -390,7 +438,16 @@ export class QueryEngine {
     }
 
     // 构建工具定义
-    const tools = this.config.tools.map(t => ({
+    // 小模型模式：按用户指令意图精简工具集，减少模型的选择负担（层 A）
+    let effectiveTools = this.config.tools
+    if (isSmallModelEnabled(this.config)) {
+      const reduced = selectRelevantTools(this.config.tools, this.currentUserInput, { enable: true })
+      effectiveTools = reduced
+      if (this.config.verbose && reduced.length !== this.config.tools.length) {
+        console.error(`[small-model] 按意图精简工具：${this.config.tools.length} → ${reduced.length}（${reduced.map(t => t.name).join(', ')}）`)
+      }
+    }
+    const tools = effectiveTools.map(t => ({
       type: 'function',
       function: { name: t.name, description: t.description, parameters: t.parameters },
     }))
