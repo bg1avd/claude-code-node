@@ -1,6 +1,17 @@
 # CHANGELOG
 
-## v2.8.16
+## v2.8.17 (未发布) — 根治 "System message must be at the beginning" 500 错误
+
+### 🐛 修复
+- **`_buildRequest` 把所有 system 消息统一前置到请求开头**，不再原样透传。
+  折叠/摘要/会话恢复可能让 system 摘要消息出现在 state.messages 中间，
+  原逻辑会把它们原样 push 进请求，导致 llama.cpp/Jinja 报
+  "System message must be at the beginning"（500）。
+  现在无论 state 里 system 位置如何，请求里 system 永远只在开头，彻底根治。
+
+### 🧪 测试
+- `small-model.test.js` 新增"_buildRequest 把中间 system 前置"回归测试，共 28 个。
+- 全量 160 个单元测试通过，无回归。
 
 ## v2.8.16 — 单次输出上限 max_tokens 根据上下文窗口动态计算
 

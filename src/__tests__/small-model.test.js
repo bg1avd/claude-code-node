@@ -226,3 +226,29 @@ test('max_tokens：绝不超过窗口一半（防超窗）', async () => {
   const qe2 = new QueryEngine({ tokenBudget: new TokenBudget({ maxTokens: 10000 }), outputRatio: 1.0 })
   assert.ok(qe2._computeMaxOutputTokens() <= 5000, `max_tokens=${qe2._computeMaxOutputTokens()} 不应超过窗口一半 5000`)
 })
+
+// ---- _buildRequest 把 system 统一前置（防 llama.cpp 500）----
+test('_buildRequest：把中间 system 统一前置到开头', async () => {
+  const { QueryEngine } = await import('../core/query-engine.js')
+  const qe = new QueryEngine({ systemPrompt: 'SYS-ROOT', tools: [] })
+  // 模拟 state.messages 里 system 摘要被插到中间（折叠/恢复导致）
+  const messages = [
+    { role: 'user', content: 'u1' },
+    { role: 'assistant', content: 'a1' },
+    { role: 'system', content: '[Context Summary] 中间摘要' },
+    { role: 'user', content: 'u2' },
+  ]
+  const req = qe._buildRequest(messages)
+  // 验证：所有 system 在开头，中间无 system
+  let seenBody = false, badSystem = false
+  for (const m of req) {
+    if (m.role !== 'system') seenBody = true
+    else if (seenBody) badSystem = true
+  }
+  assert.equal(badSystem, false, '中间不应出现 system（否则 llama.cpp 报 500）')
+  // 第一条是 system
+  assert.equal(req[0].role, 'system')
+  // 原始顺序（非 system 部分）应保持
+  const nonSys = req.filter(m => m.role !== 'system').map(m => m.role)
+  assert.deepEqual(nonSys, ['user', 'assistant', 'user'])
+})

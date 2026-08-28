@@ -358,10 +358,25 @@ export class QueryEngine {
     }
 
     // 历史消息 — 转换为 OpenAI 兼容格式
+    // 关键：把所有 system 消息【收集到一起放到最前面】，而不是原样透传。
+    // 原因：llama.cpp/Jinja 严格要求 system 消息必须在对话开头，中间出现 system
+    // 会报 "System message must be at the beginning" (500)。
+    // 折叠/压缩/引导注入可能在 state.messages 中间留下 system 摘要消息，
+    // 这里统一前置，彻底规避该错误。
+    const systemMsgs = []
+    const bodyMsgs = []
     for (const msg of messages) {
       if (msg.role === 'system') {
-        request.push({ role: 'system', content: msg.content })
-      } else if (msg.role === 'user') {
+        systemMsgs.push(msg)
+      } else {
+        bodyMsgs.push(msg)
+      }
+    }
+    for (const msg of systemMsgs) {
+      request.push({ role: 'system', content: msg.content })
+    }
+    for (const msg of bodyMsgs) {
+      if (msg.role === 'user') {
         request.push({ role: 'user', content: this._buildUserContent(msg) })
       } else if (msg.role === 'assistant') {
         // 构建 assistant 消息基础
