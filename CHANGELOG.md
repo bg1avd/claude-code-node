@@ -1,5 +1,23 @@
 # CHANGELOG
 
+## v2.8.14
+
+## v2.8.14 — 修复小模型意图引导的两处 bug
+
+### 🐛 修复
+- **修复 llama.cpp 500 错误 "System message must be at the beginning"**：
+  小模型模式的意图引导此前作为独立 `system` 消息插入对话中间，但 llama.cpp/Jinja
+  严格要求 system 消息必须位于对话开头。现在改为**把引导合并进首条 system 消息**
+  （保持 system 全在开头），不再产生非法的中间 system 消息。
+- **修复意图误判：阅读文档被当成写文档**：
+  新增"读/阅读/查看/打开"意图规则（优先于写规则），"阅读DEVELOPMENT_PLAN.md文档"
+  现在正确映射到 `Read`，而非 `Write`。工具精简也随之正确暴露 Read/Glob。
+
+### 🧪 测试
+- `small-model.test.js` 新增"阅读文档是读取任务"测试，共 18 个。
+- 全量 150 个单元测试通过，无回归。
+
+
 ## v2.8.14 (未发布) — 修复小模型意图引导的两处 bug
 
 ### 🐛 修复
