@@ -53,6 +53,9 @@ export class QueryEngineConfig {
     //   - 工具数量精简 + 意图引导
     // 默认关闭，通过 config.smallModel=true 或 --small-model 开启
     this.smallModel = options.smallModel || false
+    // 小模型模式下的工具循环轮数上限（默认 8）：
+    // 小模型常陷入"写一个又写一个"的无限工具循环，需更小的上限 + 收尾引导
+    this.smallModelMaxTurns = options.smallModelMaxTurns || 8
     // 单次输出上限动态计算：
     //   outputRatio — 输出占窗口比例（默认 1/16），窗口越大输出越大
     //   maxOutputTokens — 输出下限（默认 4096），也可作为硬性覆盖
@@ -228,8 +231,14 @@ export class QueryEngine {
     // 敷衍重试次数（层 A）：模型没调工具只回空话时，追加强引导重试
     let fillerRetries = 0
     const MAX_FILLER_RETRIES = 1
+    // 工具循环轮数上限：
+    //   - 小模型模式：用更小的上限（默认 8），避免模型陷入"写一个又写一个"的无限循环
+    //   - 普通模式：用 config.maxTurns
+    const toolLoopLimit = smallModel
+      ? (this.config.smallModelMaxTurns || 8)
+      : this.config.maxTurns
 
-    for (let turn = 0; turn < this.config.maxTurns; turn++) {
+    for (let turn = 0; turn < toolLoopLimit; turn++) {
       // 发送前硬校验：工具结果可能已使上下文超窗，确保 ≤ 窗口（摘要优先 + 滑动窗口裁剪兜底）
       this._ensureFitWindow()
 
@@ -257,6 +266,22 @@ export class QueryEngine {
           if (this.config.verbose) console.error('[small-model] 已注入引导（并入首条 system）：' + guidance.slice(0, 60) + '...')
         }
         intentGuided = true
+      }
+
+      // 小模型模式：接近工具循环上限时，注入"总结收尾"引导，防止模型无限循环
+      if (smallModel && turn === toolLoopLimit - 1) {
+        const stopGuidance = `[系统提示] 你已经完成了大部分工作。现在请【停止调用新工具】，把已经完成的内容整理成一段总结回复给用户。如果确实还有关键步骤未完成，只再调用一次工具完成它，然后立即总结。不要再继续无休止地调用工具。`
+        const sysIdx = this.state.messages.findIndex(m => m.role === 'system')
+        if (sysIdx !== -1) {
+          const sysMsg = this.state.messages[sysIdx]
+          this.state.messages[sysIdx] = {
+            ...sysMsg,
+            content: (typeof sysMsg.content === 'string' ? sysMsg.content : '') + '\n\n' + stopGuidance,
+          }
+        } else {
+          this.state.messages.push({ role: 'user', content: stopGuidance })
+        }
+        if (this.config.verbose) console.error(`[small-model] 已到工具循环第 ${turn + 1} 轮（上限 ${toolLoopLimit}），注入收尾引导`)
       }
 
       const requestMessages = this._buildRequest(this.state.messages)
@@ -306,8 +331,9 @@ export class QueryEngine {
       }
     }
 
-    if (!finalResponse && this.state.turnCount >= this.config.maxTurns) {
-      finalResponse = `[达到最大回合数限制 (${this.config.maxTurns})，停止响应]`
+    // 工具循环达到上限但仍未收尾（模型一直调用工具）→ 强制收尾
+    if (!finalResponse) {
+      finalResponse = `[已达到工具循环上限 (${toolLoopLimit})，已停止进一步调用工具。请查看上方工具执行结果，确认任务完成情况。]`
     }
 
     return {

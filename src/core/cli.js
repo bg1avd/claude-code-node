@@ -333,6 +333,7 @@ function parseArgs(argv) {
     maxMessages: 0,
     smallModel: false,
     maxOutputTokens: 0,
+    smallModelMaxTurns: 0,
   }
 
   let i = 2
@@ -351,6 +352,7 @@ function parseArgs(argv) {
       case '--max-messages': args.maxMessages = parseInt(argv[++i], 10); break
       case '--small-model': args.smallModel = true; break
       case '--max-output-tokens': args.maxOutputTokens = parseInt(argv[++i], 10); break
+      case '--small-model-max-turns': args.smallModelMaxTurns = parseInt(argv[++i], 10); break
       case '--stdio': args.stdio = true; break
       case '--with-notify': args.withNotify = true; break
       case '--version':
@@ -374,6 +376,7 @@ Options:
   --max-messages N          Fold history when message count exceeds N (default: 0 = off)
   --small-model             Enable small-model adaptation (tool-call enforcement, filler retry, intent guidance)
   --max-output-tokens N     Override max single-response output tokens (default: computed from window size)
+  --small-model-max-turns N Small-model tool-loop cap (default: 8, prevents infinite loops)
   --with-notify             Start built-in channel listener (Telegram)
                             (replaces cc-notify daemon — no external script needed)
   -h, --help                Show this help
@@ -540,6 +543,8 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
     smallModel: cliArgs.smallModel || config.get('smallModel') || false,
     // 单次输出上限覆盖（默认根据窗口动态计算）
     maxOutputTokens: cliArgs.maxOutputTokens || config.get('maxOutputTokens') || 0,
+    // 小模型工具循环轮数上限（默认 8，防无限循环）
+    smallModelMaxTurns: cliArgs.smallModelMaxTurns || config.get('smallModelMaxTurns') || 0,
   })
   const engine = new QueryEngine(engineConfig)
 
