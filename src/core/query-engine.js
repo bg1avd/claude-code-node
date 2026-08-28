@@ -22,6 +22,7 @@ import {
   buildCombinedGuidance,
   selectRelevantTools,
   RETRY_GUIDANCE,
+  extractFrameworkAction,
 } from './small-model.js'
 import { CostTracker } from './cost-tracker.js'
 import { EnhancedPermissionChecker } from '../security/enhanced-permission.js'
@@ -293,16 +294,25 @@ export class QueryEngine {
 
       // 没有工具调用 → 潜在最终回复
       if (!response.toolCalls || response.toolCalls.length === 0) {
-        // 小模型模式：检测敷衍输出（空话/太短/命中占位句），追加强引导重试
-        if (smallModel && fillerRetries < MAX_FILLER_RETRIES && isFillerResponse(response)) {
-          fillerRetries++
-          if (this.config.verbose) {
-            console.error(`[small-model] 检测到敷衍输出（第 ${fillerRetries} 次），追加强引导重试`)
+        // 小模型模式：检测敷衍输出（空话/太短/命中占位句）
+        if (smallModel && isFillerResponse(response)) {
+          // 第一次敷衍 → 追加强引导重试
+          if (fillerRetries < MAX_FILLER_RETRIES) {
+            fillerRetries++
+            if (this.config.verbose) {
+              console.error(`[small-model] 检测到敷衍输出（第 ${fillerRetries} 次），追加强引导重试`)
+            }
+            this.state.messages.push(new AssistantMessage(response.content, [], response.reasoningContent))
+            this.state.messages.push({ role: 'user', content: RETRY_GUIDANCE })
+            continue
           }
-          // 把模型的空话 + 强制工具调用提醒注入上下文，再让模型重新决策
-          this.state.messages.push(new AssistantMessage(response.content, [], response.reasoningContent))
-          this.state.messages.push({ role: 'user', content: RETRY_GUIDANCE })
-          continue // 继续循环，重新请求模型
+          // 重试后仍敷衍 → 框架代执行（不依赖模型调工具）
+          const execResult = await this._frameworkExecute(userMessage.content)
+          if (execResult.done) {
+            if (this.config.verbose) console.error(`[small-model] 框架代执行：${execResult.summary}`)
+            // 框架已执行工具并把结果注入对话，继续循环让模型基于结果总结
+            continue
+          }
         }
 
         finalResponse = response.content
@@ -497,6 +507,47 @@ export class QueryEngine {
 
     const results = await Promise.all(execPromises)
     return results
+  }
+
+  /**
+   * 框架代执行 — 模型敷衍调不起工具时，框架直接替它执行最合理的工具
+   *
+   * 背景：27B Q3 量化模型工具调用极弱，即使强引导也常只回"研究一下"而不调工具。
+   * 此时框架【绕过模型】，根据指令推断该执行什么工具并直接运行，把真实结果
+   * 注入对话，再让模型基于结果总结——"一句话调用小模型工作"才能成立。
+   *
+   * @param {string} userInput — 用户指令
+   * @returns {Promise<{ done: boolean, summary: string }>}
+   *          done=true 表示框架已执行工具（结果已注入 state.messages）
+   */
+  async _frameworkExecute(userInput) {
+    const action = extractFrameworkAction(userInput, { cwd: this.config.cwd })
+    if (!action) return { done: false, summary: '' }
+
+    // 找到对应的工具
+    const tool = this.config.tools.find(t => t.name === action.tool)
+    if (!tool) return { done: false, summary: '' }
+
+    // 执行工具（直接调用 handler）
+    try {
+      const content = await tool.handler(action.input, { cwd: this.config.cwd, engine: this, readline: this.config.readline })
+
+      // 注入框架代执行结果（作为 user 消息，避免 tool 消息无对应 assistant tool_call 报错）
+      // 说明：框架代执行不是模型发起的工具调用，不能作为 tool 角色（会缺 assistant tool_call），
+      // 因此以 user 消息承载真实结果 + 引导模型基于结果总结。
+      const resultText = typeof content === 'string' ? content : JSON.stringify(content)
+      this.state.messages.push({
+        role: 'user',
+        content: `[框架代执行结果] 框架已替你执行工具 ${tool.name}（参数 ${JSON.stringify(action.input)}），结果如下：\n\n${resultText.slice(0, 8000)}\n\n请基于以上【真实执行结果】，用中文直接回答用户的问题或总结内容。不要再调用工具，直接总结即可。`,
+      })
+
+      const summary = `框架已代执行 ${tool.name}(${JSON.stringify(action.input)})`
+      if (this.config.verbose) console.error(`[small-model] 框架代执行 ${tool.name} 完成`)
+      return { done: true, summary }
+    } catch (err) {
+      if (this.config.verbose) console.error(`[small-model] 框架代执行失败: ${err.message}`)
+      return { done: false, summary: '' }
+    }
   }
 
   async _callLLM(messages, contextMessages) {

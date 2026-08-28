@@ -20,6 +20,7 @@ import {
   isSmallModelEnabled,
   buildMultiStepPlan,
   buildCombinedGuidance,
+  extractFrameworkAction,
 } from '../core/small-model.js'
 
 // ---- 敷衍输出检测 ----
@@ -225,6 +226,27 @@ test('max_tokens：绝不超过窗口一半（防超窗）', async () => {
   // 极端 outputRatio=1.0 也不应超过窗口一半
   const qe2 = new QueryEngine({ tokenBudget: new TokenBudget({ maxTokens: 10000 }), outputRatio: 1.0 })
   assert.ok(qe2._computeMaxOutputTokens() <= 5000, `max_tokens=${qe2._computeMaxOutputTokens()} 不应超过窗口一半 5000`)
+})
+
+// ---- 框架代执行（extractFrameworkAction）----
+test('框架代执行：识别"阅读+绝对路径"任务为 Read', () => {
+  const a = extractFrameworkAction('阅读D:\\workspace\\miniQMT-trader\\COMPLETION_REPORT.md', {
+    cwd: 'D:\\workspace\\miniQMT-trader',
+  })
+  assert.ok(a, '应识别到框架动作')
+  assert.equal(a.tool, 'Read')
+  assert.equal(a.input.file_path, 'D:\\workspace\\miniQMT-trader\\COMPLETION_REPORT.md')
+})
+
+test('框架代执行：相对路径拼接 cwd', () => {
+  const a = extractFrameworkAction('查看一下 ./PLAN.md', { cwd: 'D:\\workspace\\miniQMT-trader' })
+  assert.ok(a && a.tool === 'Read')
+  assert.equal(a.input.file_path, 'D:\\workspace\\miniQMT-trader\\PLAN.md')
+})
+
+test('框架代执行：非读取任务或无路径返回 null', () => {
+  assert.equal(extractFrameworkAction('你好', { cwd: 'D:\\x' }), null)
+  assert.equal(extractFrameworkAction('运行测试', { cwd: 'D:\\x' }), null)
 })
 
 // ---- _buildRequest 把 system 统一前置（防 llama.cpp 500）----

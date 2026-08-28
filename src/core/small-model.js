@@ -233,6 +233,48 @@ export function buildIntentGuidance(userInput, opts = {}) {
   return `[任务引导] 根据用户指令，建议按此思路用工具推进：${intent.intent}。\n说明：${intent.note}\n可用工具：${intent.toolHint}`
 }
 
+/**
+ * 框架代执行：从用户指令里推断"框架该替模型执行哪个工具动作"
+ *
+ * 背景：27B Q3 量化模型工具调用能力极弱，即使有最强引导也常只回"研究一下"等
+ * 空话而不调工具。此时框架必须【绕过模型】，根据指令直接替它执行最合理的工具，
+ * 把真实结果注入对话，再让模型基于结果总结。
+ *
+ * 当前支持（按优先级）：
+ *   1. 读取文件：指令里含文件路径 + 阅读/查看/打开等动词 → Read(path)
+ *
+ * 后续可扩展：写文件、跑命令、搜索等。
+ *
+ * @param {string} userInput — 用户指令
+ * @param {object} [opts]
+ * @param {string} [opts.cwd] — 当前工作目录（用于解析相对路径）
+ * @returns {{ tool: string, input: object, toolName: string } | null}
+ *          tool = 'Read'/'Write' 等工具名；input 为工具参数；toolName 为展示名
+ */
+export function extractFrameworkAction(userInput, opts = {}) {
+  if (!userInput) return null
+  const cwd = opts.cwd || ''
+
+  // 1. 读取文件任务：含路径 + 读/查看/打开
+  //    匹配绝对路径（Windows: D:\... 或 /... 或 ./...）或文件名
+  const readIntent = /(读|阅读|查看|打开|展示|显示|看看|浏览|看)/i.test(userInput)
+  // 提取路径：优先 Windows 绝对路径 D:\...、Unix /...、相对 ./ 或 ../，或 .md/.txt/.py/.json 文件
+  const pathMatch = userInput.match(/([A-Za-z]:\\[^\s，。；]+|(?:\/|\/\/)[^\s，。；]+|\.{1,2}\/[^\s，。；]+|[\w@.-]+\.(?:md|txt|py|json|log|yaml|yml|toml|ini|cfg|csv|xml))+/i)
+
+  if (readIntent && pathMatch) {
+    let filePath = pathMatch[1].trim()
+    // 去掉开头的 ./ 或 ../
+    filePath = filePath.replace(/^\.\.?[\\/]/, '')
+    // 若是相对路径且给了 cwd，拼成绝对路径
+    if (!/^[A-Za-z]:\\/.test(filePath) && !filePath.startsWith('/') && cwd) {
+      filePath = cwd.replace(/[\\/]+$/, '') + '\\' + filePath
+    }
+    return { tool: 'Read', toolName: 'Read', input: { file_path: filePath } }
+  }
+
+  return null
+}
+
 // 常见计划文档文件名（供多步拆解时定位计划文件）
 const PLAN_FILE_CANDIDATES = [
   'DEVELOPMENT_PLAN.md',
