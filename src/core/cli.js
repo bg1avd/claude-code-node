@@ -374,9 +374,9 @@ Options:
   -v, --verbose             Verbose mode
   --no-stream               Disable streaming
   --max-messages N          Fold history when message count exceeds N (default: 0 = off)
-  --small-model             Enable small-model adaptation (tool-call enforcement, filler retry, intent guidance)
+  --small-model             Reserved flag (no-op now — tool engine uses plain mode like v2.8.11)
   --max-output-tokens N     Override max single-response output tokens (default: computed from window size)
-  --small-model-max-turns N Small-model tool-loop cap (default: 8, prevents infinite loops)
+  --small-model-max-turns N Reserved (no-op — tool loop uses maxTurns)
   --with-notify             Start built-in channel listener (Telegram)
                             (replaces cc-notify daemon — no external script needed)
   -h, --help                Show this help

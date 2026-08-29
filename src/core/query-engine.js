@@ -15,15 +15,6 @@ import crypto from 'crypto'
 import { UserMessage, AssistantMessage, ToolCall, ToolResult, SessionState } from '../types/index.js'
 import { parseStream, parseNonStreamResponse } from './streaming.js'
 import { compactMessages, trimToWindow, foldHistoryByCount, trimToolResults } from './compact.js'
-import {
-  isSmallModelEnabled,
-  buildSmallModelSystemPrompt,
-  isFillerResponse,
-  buildCombinedGuidance,
-  selectRelevantTools,
-  RETRY_GUIDANCE,
-  extractFrameworkAction,
-} from './small-model.js'
 import { CostTracker } from './cost-tracker.js'
 import { EnhancedPermissionChecker } from '../security/enhanced-permission.js'
 import { isLocalLlmServer, buildAuthHeaders } from '../utils/index.js'
@@ -97,8 +88,6 @@ export class QueryEngine {
     this.tokenBudget = this.config.tokenBudget || null
     // 最近一次 processMessage 是否已通过流式回调/直写把正文输出（供调用方避免重复打印 response）
     this.lastStreamed = false
-    // 当前正在处理的用户输入（小模型模式用于按意图精简工具集）
-    this.currentUserInput = ''
   }
 
   /**
@@ -114,7 +103,6 @@ export class QueryEngine {
     this.state.turnCount++
     this.lastStreamed = false  // 本轮是否已流式输出正文
     this.abortController = new AbortController()
-    this.currentUserInput = userInput  // 记录当前用户指令（小模型模式按意图精简工具）
     const userMsg = new UserMessage(userInput, images)
     this.state.messages.push(userMsg)
 
@@ -226,64 +214,16 @@ export class QueryEngine {
    */
   async _runToolLoop(userMessage) {
     let finalResponse = ''
-    const smallModel = isSmallModelEnabled(this.config)
-    // 小模型模式：首轮注入意图引导（层 B），帮助模型锁定该用哪些工具
-    let intentGuided = false
-    // 敷衍重试次数（层 A）：模型没调工具只回空话时，追加强引导重试
-    let fillerRetries = 0
-    const MAX_FILLER_RETRIES = 1
-    // 工具循环轮数上限：
-    //   - 小模型模式：用更小的上限（默认 8），避免模型陷入"写一个又写一个"的无限循环
-    //   - 普通模式：用 config.maxTurns
-    const toolLoopLimit = smallModel
-      ? (this.config.smallModelMaxTurns || 8)
-      : this.config.maxTurns
 
-    for (let turn = 0; turn < toolLoopLimit; turn++) {
+    // 朴素工具循环（v2.8.11 风格）：
+    // 实测结论——小模型在"朴素模式"（16 个工具全上、无引导注入、无代执行、
+    // 无工具精简）下才能正常工作。v2.8.13 后我加的意图引导注入、工具精简、
+    // 多步计划、框架代执行等"辅助机制"反而让模型乱套（不调用工具、瞎编内容）。
+    // 因此这里【不做任何干预】，回归最原始行为：构建请求 → 调 LLM →
+    // 有工具调用就执行 → 循环。
+    for (let turn = 0; turn < this.config.maxTurns; turn++) {
       // 发送前硬校验：工具结果可能已使上下文超窗，确保 ≤ 窗口（摘要优先 + 滑动窗口裁剪兜底）
       this._ensureFitWindow()
-
-      // 小模型模式：首轮若识别到意图/多步计划，把引导【追加到首条 system 消息】。
-      // 注意：不能 push 一条新的 system 消息到中间——llama.cpp/Jinja 严格要求
-      // system 消息必须在对话开头，中间插 system 会报 "System message must be at the beginning" (500)。
-      if (smallModel && !intentGuided && this.state.messages.length > 0) {
-        const guidance = buildCombinedGuidance(userMessage.content, {
-          enable: true,
-          cwd: this.config.cwd,
-        })
-        if (guidance) {
-          // 找到第一条 system 消息，把引导拼接进去（保持 system 全在开头）
-          const sysIdx = this.state.messages.findIndex(m => m.role === 'system')
-          if (sysIdx !== -1) {
-            const sysMsg = this.state.messages[sysIdx]
-            this.state.messages[sysIdx] = {
-              ...sysMsg,
-              content: (typeof sysMsg.content === 'string' ? sysMsg.content : '') + '\n\n' + guidance,
-            }
-          } else {
-            // 没有 system 消息 → 作为 user 引导插入（跟随在最新 user 之后作为新 user）
-            this.state.messages.push({ role: 'user', content: guidance })
-          }
-          if (this.config.verbose) console.error('[small-model] 已注入引导（并入首条 system）：' + guidance.slice(0, 60) + '...')
-        }
-        intentGuided = true
-      }
-
-      // 小模型模式：接近工具循环上限时，注入"总结收尾"引导，防止模型无限循环
-      if (smallModel && turn === toolLoopLimit - 1) {
-        const stopGuidance = `[系统提示] 你已经完成了大部分工作。现在请【停止调用新工具】，把已经完成的内容整理成一段总结回复给用户。如果确实还有关键步骤未完成，只再调用一次工具完成它，然后立即总结。不要再继续无休止地调用工具。`
-        const sysIdx = this.state.messages.findIndex(m => m.role === 'system')
-        if (sysIdx !== -1) {
-          const sysMsg = this.state.messages[sysIdx]
-          this.state.messages[sysIdx] = {
-            ...sysMsg,
-            content: (typeof sysMsg.content === 'string' ? sysMsg.content : '') + '\n\n' + stopGuidance,
-          }
-        } else {
-          this.state.messages.push({ role: 'user', content: stopGuidance })
-        }
-        if (this.config.verbose) console.error(`[small-model] 已到工具循环第 ${turn + 1} 轮（上限 ${toolLoopLimit}），注入收尾引导`)
-      }
 
       const requestMessages = this._buildRequest(this.state.messages)
       const response = await this._callLLM(requestMessages, this.state.messages)
@@ -292,32 +232,8 @@ export class QueryEngine {
         throw new Error('操作已取消')
       }
 
-      // 没有工具调用 → 潜在最终回复
+      // 没有工具调用 → 最终回复
       if (!response.toolCalls || response.toolCalls.length === 0) {
-        // 小模型模式：检测敷衍输出（空话/太短/命中占位句）
-        if (smallModel && isFillerResponse(response)) {
-          // 第一次敷衍 → 追加强引导重试
-          if (fillerRetries < MAX_FILLER_RETRIES) {
-            fillerRetries++
-            if (this.config.verbose) {
-              console.error(`[small-model] 检测到敷衍输出（第 ${fillerRetries} 次），追加强引导重试`)
-            }
-            this.state.messages.push(new AssistantMessage(response.content, [], response.reasoningContent))
-            this.state.messages.push({ role: 'user', content: RETRY_GUIDANCE })
-            continue
-          }
-          // 重试后仍敷衍 → 框架代执行，且【直接把结果作为最终答案】返回，
-          // 不再 continue 让模型总结——模型已证明它只会敷衍，继续循环只会无限重复。
-          // 这样既完成任务，又不会陷入"代执行→敷衍→再代执行"的死循环。
-          const execResult = await this._frameworkExecute(userMessage.content)
-          if (execResult.done) {
-            if (this.config.verbose) console.error(`[small-model] 框架代执行完成，直接返回结果`)
-            // 框架已执行并把结果注入对话；直接把真实结果作为最终回复
-            finalResponse = execResult.resultText
-            break
-          }
-        }
-
         finalResponse = response.content
         this.state.messages.push(new AssistantMessage(response.content, [], response.reasoningContent))
         break
@@ -344,9 +260,8 @@ export class QueryEngine {
       }
     }
 
-    // 工具循环达到上限但仍未收尾（模型一直调用工具）→ 强制收尾
-    if (!finalResponse) {
-      finalResponse = `[已达到工具循环上限 (${toolLoopLimit})，已停止进一步调用工具。请查看上方工具执行结果，确认任务完成情况。]`
+    if (!finalResponse && this.state.turnCount >= this.config.maxTurns) {
+      finalResponse = `[达到最大回合数限制 (${this.config.maxTurns})，停止响应]`
     }
 
     return {
@@ -388,12 +303,10 @@ export class QueryEngine {
   _buildRequest(messages) {
     const request = []
 
-    // 系统提示（小模型模式：追加强制工具调用引导 + 当前工作目录）
+    // 系统提示（朴素模式：直接用基础 system prompt，不做 cwd/工具铁律等注入——
+    // 实测 v2.8.11 朴素模式能正常工作，注入反而干扰模型）
     if (this.config.systemPrompt) {
-      const sysContent = isSmallModelEnabled(this.config)
-        ? buildSmallModelSystemPrompt(this.config.systemPrompt, { cwd: this.config.cwd })
-        : this.config.systemPrompt
-      request.push({ role: 'system', content: sysContent })
+      request.push({ role: 'system', content: this.config.systemPrompt })
     }
 
     // 历史消息 — 转换为 OpenAI 兼容格式
@@ -512,47 +425,6 @@ export class QueryEngine {
     return results
   }
 
-  /**
-   * 框架代执行 — 模型敷衍调不起工具时，框架直接替它执行最合理的工具
-   *
-   * 背景：27B Q3 量化模型工具调用极弱，即使强引导也常只回"研究一下"而不调工具。
-   * 此时框架【绕过模型】，根据指令推断该执行什么工具并直接运行，把真实结果
-   * 注入对话，再让模型基于结果总结——"一句话调用小模型工作"才能成立。
-   *
-   * @param {string} userInput — 用户指令
-   * @returns {Promise<{ done: boolean, summary: string }>}
-   *          done=true 表示框架已执行工具（结果已注入 state.messages）
-   */
-  async _frameworkExecute(userInput) {
-    const action = extractFrameworkAction(userInput, { cwd: this.config.cwd })
-    if (!action) return { done: false, summary: '', resultText: '' }
-
-    // 找到对应的工具
-    const tool = this.config.tools.find(t => t.name === action.tool)
-    if (!tool) return { done: false, summary: '', resultText: '' }
-
-    // 执行工具（直接调用 handler）
-    try {
-      const content = await tool.handler(action.input, { cwd: this.config.cwd, engine: this, readline: this.config.readline })
-
-      const resultText = typeof content === 'string' ? content : JSON.stringify(content)
-
-      // 注入框架代执行结果（作为 user 消息，避免 tool 消息无对应 assistant tool_call 报错）
-      // 说明：框架代执行不是模型发起的工具调用，不能作为 tool 角色（会缺 assistant tool_call）。
-      this.state.messages.push({
-        role: 'user',
-        content: `[框架代执行结果] 框架已替你执行工具 ${tool.name}（参数 ${JSON.stringify(action.input)}），结果如下：\n\n${resultText.slice(0, 8000)}`,
-      })
-
-      const summary = `框架已代执行 ${tool.name}(${JSON.stringify(action.input)})`
-      if (this.config.verbose) console.error(`[small-model] 框架代执行 ${tool.name} 完成`)
-      return { done: true, summary, resultText }
-    } catch (err) {
-      if (this.config.verbose) console.error(`[small-model] 框架代执行失败: ${err.message}`)
-      return { done: false, summary: '', resultText: '' }
-    }
-  }
-
   async _callLLM(messages, contextMessages) {
     const apiKey = this.config.apiKey
     const apiBase = this.config.apiBase
@@ -580,16 +452,9 @@ export class QueryEngine {
     }
 
     // 构建工具定义
-    // 小模型模式：按用户指令意图精简工具集，减少模型的选择负担（层 A）
-    let effectiveTools = this.config.tools
-    if (isSmallModelEnabled(this.config)) {
-      const reduced = selectRelevantTools(this.config.tools, this.currentUserInput, { enable: true })
-      effectiveTools = reduced
-      if (this.config.verbose && reduced.length !== this.config.tools.length) {
-        console.error(`[small-model] 按意图精简工具：${this.config.tools.length} → ${reduced.length}（${reduced.map(t => t.name).join(', ')}）`)
-      }
-    }
-    const tools = effectiveTools.map(t => ({
+    // 朴素模式（v2.8.11 风格）：16 个工具全上，不做精简。
+    // 实测结论——小模型在工具全给时才能正常调用；按意图精简反而让它不会调用、瞎编。
+    const tools = this.config.tools.map(t => ({
       type: 'function',
       function: { name: t.name, description: t.description, parameters: t.parameters },
     }))
