@@ -256,17 +256,28 @@ export function extractFrameworkAction(userInput, opts = {}) {
   const cwd = opts.cwd || ''
 
   // 1. 读取文件任务：含路径 + 读/查看/打开
-  //    匹配绝对路径（Windows: D:\... 或 /... 或 ./...）或文件名
   const readIntent = /(读|阅读|查看|打开|展示|显示|看看|浏览|看)/i.test(userInput)
-  // 提取路径：优先 Windows 绝对路径 D:\...、Unix /...、相对 ./ 或 ../，或 .md/.txt/.py/.json 文件
-  const pathMatch = userInput.match(/([A-Za-z]:\\[^\s，。；]+|(?:\/|\/\/)[^\s，。；]+|\.{1,2}\/[^\s，。；]+|[\w@.-]+\.(?:md|txt|py|json|log|yaml|yml|toml|ini|cfg|csv|xml))+/i)
 
-  if (readIntent && pathMatch) {
-    let filePath = pathMatch[1].trim()
+  // 提取路径。关键：路径字符集【只允许文件路径合法字符】，遇到逗号/分号/空格/中文
+  // 立即停止，避免把指令里的说明文字（如 ",对项目有个全盘了解"）拼进路径。
+  // 合法路径字符：字母数字、\ / . : - _、空格(在引号内罕见，排除以免误吞)、
+  // Windows 盘符。
+  // 优先匹配带扩展名的完整路径，扩展名后即停止。
+  const pathRegex =
+    /([A-Za-z]:[\\/][\w@.\-\\/ ]*\.(?:md|txt|py|json|log|yaml|yml|toml|ini|cfg|csv|xml)|[\\/][\w@.\-\\/ ]*\.(?:md|txt|py|json|log|yaml|yml|toml|ini|cfg|csv|xml)|\.{1,2}[\\/][\w@.\-\\/]*\.(?:md|txt|py|json|log|yaml|yml|toml|ini|cfg|csv|xml)|[\w@.-]+\.(?:md|txt|py|json|log|yaml|yml|toml|ini|cfg|csv|xml))/i
+
+  // 用 [^,，;；。\s] 确保遇到分隔符就停，然后取最长的、以扩展名结尾的匹配
+  const match = userInput.match(pathRegex)
+  let filePath = null
+  if (match) {
+    filePath = match[1].trim()
+  }
+
+  if (readIntent && filePath) {
     // 去掉开头的 ./ 或 ../
     filePath = filePath.replace(/^\.\.?[\\/]/, '')
     // 若是相对路径且给了 cwd，拼成绝对路径
-    if (!/^[A-Za-z]:\\/.test(filePath) && !filePath.startsWith('/') && cwd) {
+    if (!/^[A-Za-z]:[\\/]/.test(filePath) && !filePath.startsWith('/') && cwd) {
       filePath = cwd.replace(/[\\/]+$/, '') + '\\' + filePath
     }
     return { tool: 'Read', toolName: 'Read', input: { file_path: filePath } }

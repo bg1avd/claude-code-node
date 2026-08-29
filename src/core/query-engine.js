@@ -306,12 +306,15 @@ export class QueryEngine {
             this.state.messages.push({ role: 'user', content: RETRY_GUIDANCE })
             continue
           }
-          // 重试后仍敷衍 → 框架代执行（不依赖模型调工具）
+          // 重试后仍敷衍 → 框架代执行，且【直接把结果作为最终答案】返回，
+          // 不再 continue 让模型总结——模型已证明它只会敷衍，继续循环只会无限重复。
+          // 这样既完成任务，又不会陷入"代执行→敷衍→再代执行"的死循环。
           const execResult = await this._frameworkExecute(userMessage.content)
           if (execResult.done) {
-            if (this.config.verbose) console.error(`[small-model] 框架代执行：${execResult.summary}`)
-            // 框架已执行工具并把结果注入对话，继续循环让模型基于结果总结
-            continue
+            if (this.config.verbose) console.error(`[small-model] 框架代执行完成，直接返回结果`)
+            // 框架已执行并把结果注入对话；直接把真实结果作为最终回复
+            finalResponse = execResult.resultText
+            break
           }
         }
 
@@ -522,31 +525,31 @@ export class QueryEngine {
    */
   async _frameworkExecute(userInput) {
     const action = extractFrameworkAction(userInput, { cwd: this.config.cwd })
-    if (!action) return { done: false, summary: '' }
+    if (!action) return { done: false, summary: '', resultText: '' }
 
     // 找到对应的工具
     const tool = this.config.tools.find(t => t.name === action.tool)
-    if (!tool) return { done: false, summary: '' }
+    if (!tool) return { done: false, summary: '', resultText: '' }
 
     // 执行工具（直接调用 handler）
     try {
       const content = await tool.handler(action.input, { cwd: this.config.cwd, engine: this, readline: this.config.readline })
 
-      // 注入框架代执行结果（作为 user 消息，避免 tool 消息无对应 assistant tool_call 报错）
-      // 说明：框架代执行不是模型发起的工具调用，不能作为 tool 角色（会缺 assistant tool_call），
-      // 因此以 user 消息承载真实结果 + 引导模型基于结果总结。
       const resultText = typeof content === 'string' ? content : JSON.stringify(content)
+
+      // 注入框架代执行结果（作为 user 消息，避免 tool 消息无对应 assistant tool_call 报错）
+      // 说明：框架代执行不是模型发起的工具调用，不能作为 tool 角色（会缺 assistant tool_call）。
       this.state.messages.push({
         role: 'user',
-        content: `[框架代执行结果] 框架已替你执行工具 ${tool.name}（参数 ${JSON.stringify(action.input)}），结果如下：\n\n${resultText.slice(0, 8000)}\n\n请基于以上【真实执行结果】，用中文直接回答用户的问题或总结内容。不要再调用工具，直接总结即可。`,
+        content: `[框架代执行结果] 框架已替你执行工具 ${tool.name}（参数 ${JSON.stringify(action.input)}），结果如下：\n\n${resultText.slice(0, 8000)}`,
       })
 
       const summary = `框架已代执行 ${tool.name}(${JSON.stringify(action.input)})`
       if (this.config.verbose) console.error(`[small-model] 框架代执行 ${tool.name} 完成`)
-      return { done: true, summary }
+      return { done: true, summary, resultText }
     } catch (err) {
       if (this.config.verbose) console.error(`[small-model] 框架代执行失败: ${err.message}`)
-      return { done: false, summary: '' }
+      return { done: false, summary: '', resultText: '' }
     }
   }
 

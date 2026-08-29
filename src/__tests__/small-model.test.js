@@ -249,6 +249,17 @@ test('框架代执行：非读取任务或无路径返回 null', () => {
   assert.equal(extractFrameworkAction('运行测试', { cwd: 'D:\\x' }), null)
 })
 
+test('框架代执行：路径后带中文说明时正确截断（不吞入多余内容）', () => {
+  // 复现 error.log 的 bug：路径后跟中文说明，之前会被贪婪匹配进路径
+  const a = extractFrameworkAction(
+    '阅读D:\\workspace\\QMT_CrossPlatform\\miniQMT-trader\\COMPLETION_REPORT.md,对项目有个全盘了解',
+    { cwd: 'D:\\workspace\\QMT_CrossPlatform\\miniQMT-trader' }
+  )
+  assert.ok(a, '应识别到框架动作')
+  assert.equal(a.input.file_path, 'D:\\workspace\\QMT_CrossPlatform\\miniQMT-trader\\COMPLETION_REPORT.md',
+    `路径不应吞入中文说明（实际 ${a.input.file_path}）`)
+})
+
 // ---- _buildRequest 把 system 统一前置（防 llama.cpp 500）----
 test('_buildRequest：把中间 system 统一前置到开头', async () => {
   const { QueryEngine } = await import('../core/query-engine.js')
