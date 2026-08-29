@@ -127,10 +127,19 @@ test('工具精简：未启用返回全部', () => {
   assert.equal(selectRelevantTools(fakeTools, 'xx', { enable: false }), fakeTools)
 })
 
-test('工具精简：无明确意图时返回核心文件工具', () => {
+test('工具精简：无明确意图时返回全部工具（让模型自己挑）', () => {
   const reduced = selectRelevantTools(fakeTools, '你好', { enable: true })
-  assert.ok(reduced.length <= 6, '应只保留核心工具')
-  assert.ok(reduced.some(t => t.name === 'Bash'))
+  // 实测经验：小模型不能过度精简工具，无明确适配时干脆全部给
+  assert.equal(reduced.length, fakeTools.length, '无明确意图应返回全部工具')
+})
+
+test('工具精简：有明确意图时至少保留 6 个核心工具', () => {
+  const reduced = selectRelevantTools(fakeTools, '阅读D:\\x\\COMPLETION_REPORT.md', { enable: true })
+  // 至少 6 个核心工具，绝不精简到 2 个
+  assert.ok(reduced.length >= 6, `应至少保留 6 个工具（实际 ${reduced.length}）`)
+  assert.ok(reduced.some(t => t.name === 'Read'))
+  assert.ok(reduced.some(t => t.name === 'Bash'), '应保留 Bash')
+  assert.ok(reduced.some(t => t.name === 'Write'), '应保留 Write')
 })
 
 // ---- system prompt 强化 ----

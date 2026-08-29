@@ -377,32 +377,53 @@ export function buildCombinedGuidance(userInput, opts = {}) {
 }
 
 /**
- * 精简工具列表（层 A）— 小模型一次看太多工具会混乱
+ * 工具选择（层 A）— 小模型适配的关键经验
  *
- * 从完整工具列表里，按用户指令筛选出最相关的核心工具子集。
- * 这样模型的工具选择负担小，更不容易乱调/漏调。
+ * 重要结论（来自实测）：**小模型工具调用不能过度精简**。
+ * v2.8.12 之前（16 个工具全上）模型能正常调用工具；v2.8.13 之后我做了"按意图
+ * 精简成 2-6 个"，结果模型反而不调用工具、只会瞎编。因此策略改为：
+ *
+ *   1. **保底至少 6 个核心工具**：Bash, Read, Edit, Write, Glob, Grep（每次必给）；
+ *   2. **按任务适配追加**：若意图明确需要额外工具（联网→WebSearch/WebFetch 等），
+ *      在核心 6 个之上追加，绝不减少核心集；
+ *   3. **找不到合适的适配，就全部给**：宁可全给 16 个，也不要精简到很少。
+ *
+ * 原则：**工具给全，让模型自己挑；而不是替它精简，导致它无工具可用而瞎编。**
  *
  * @param {Array} allTools — 完整 ToolDef 列表
  * @param {string} userInput — 用户指令
  * @param {object} [opts]
- * @param {boolean} [opts.enable=true] — 是否启用精简
- * @returns {Array} 精简后的工具列表
+ * @param {boolean} [opts.enable=true] — 是否启用适配
+ * @returns {Array} 选择后的工具列表（至少 6 个核心；找不到适配则全部）
  */
 export function selectRelevantTools(allTools, userInput, opts = {}) {
   if (opts.enable === false) return allTools
   if (!allTools || allTools.length === 0) return allTools
 
+  // 核心工具保底集（每次必给）：小模型不能过度精简工具，否则不会调用只会瞎编
+  const CORE = ['Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep']
   const intent = detectIntent(userInput)
-  // 未识别到明确意图 → 返回核心工具（不塞满 16 个）
-  const coreNames = intent
-    ? intent.toolHint.split(',').map(s => s.trim())
-    : ['Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep']
 
-  // 核心工具优先，保留指定工具；若一个都没命中则退回首屏核心集
-  const selected = allTools.filter(t => coreNames.includes(t.name))
-  if (selected.length === 0) {
-    return allTools.filter(t => ['Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep'].includes(t.name))
+  // 找不到合适的适配（无明确意图）→ 干脆全部调用，让模型自己挑。
+  // 这是实测经验：v2.8.12 之前全 16 个工具模型能正常调用；精简后反而变傻。
+  if (!intent) {
+    return allTools
   }
+
+  // 有明确意图 → 核心 6 个（保底）+ 意图命中的额外工具（追加，不减少核心）
+  const toolNames = new Set(CORE)
+  if (intent.toolHint) {
+    for (const name of intent.toolHint.split(',').map(s => s.trim())) {
+      toolNames.add(name)
+    }
+  }
+  const selected = allTools.filter(t => toolNames.has(t.name))
+
+  // 兜底：筛选不足 6 个（核心工具不全）→ 全给
+  if (selected.length < 6) {
+    return allTools
+  }
+
   return selected
 }
 
