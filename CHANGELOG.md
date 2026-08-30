@@ -1,5 +1,32 @@
 # CHANGELOG
 
+## v2.8.25
+
+### ✨ 新功能
+- 新增运行时 API 来源切换命令（仅本次会话生效，重启回启动值）：
+  - `/api-base <url>` — 运行时切换 API 地址并自动重探 context 窗口
+  - `/api-key <key>` — 运行时切换 API Key（掩码显示）
+  - `/api` — 查看当前 API Base / Key / Model
+- 用途：无需重启即可在本地 llama.cpp / Ollama 与云端 DeepSeek 等来源间切换。
+- 实现：复用 `/model` 模式，改 `engine.config.apiBase/apiKey`（`_callLLM` 实时读取），
+  局部变量 `apiBase/apiKey` 改 `let` 以保证窗口重探测拿到新值。
+
+
+## v2.8.25 — 新增运行时 API 来源切换命令 `/api-base`/`/api-key`
+
+### ✨ 新功能
+- **运行时切换 LLM 来源**（仅本次会话生效，不持久化，重启回启动值）：
+  - `/api-base <url>` — 切换 API 地址，立即生效；切换后自动重新探测 context 窗口，
+    并提示选择新来源的模型
+  - `/api-key <key>` — 切换 API Key（masked 显示），立即生效
+  - `/api` — 查看当前 API Base / Key / Model
+- 用途：无需重启即可在本地 llama.cpp / Ollama 与 DeepSeek 等云端来源间切换。
+- 复用现有机制实现：`engine.config.apiBase/apiKey` 为可变属性，`_callLLM` 每次请求
+  实时读取，故改字段即时生效；复制 `/model` 命令模式。
+
+### 🧪 测试
+- 全量单测通过（git-tool.integration 4 项为既有失败，需 GitHub 环境，与本改动无关）。
+
 ## v2.8.24
 
 ## v2.8.24 — 回归朴素模式：移除小模型干预机制，恢复 v2.8.11 可用状态

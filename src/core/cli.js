@@ -254,6 +254,9 @@ Commands:
   /help          — Show this help
   /model NAME    — Switch model
   /models        — List available models from current API
+  /api-base URL  — Switch API base URL at runtime (local session only)
+  /api-key KEY   — Switch API key at runtime (local session only)
+  /api           — Show current API base/key/model
   /tools         — List available tools
   /session       — Show session info
   /sessions      — List all sessions
@@ -283,6 +286,11 @@ const DETAILED_HELP = {
   model:   "/model <model_name>\n  Switch the LLM model in real-time.\n  The change takes effect immediately for the next message.\n  You can use any model name supported by your current API provider.\n\n  Example: /model deepseek-chat\n  Example: /model gpt-4o",
 
   models:  "/models\n  Fetch and display all available models from the current API provider.\n  Shows a numbered list, then prompts you to select by number or name.\n  Requires a configured API key (the one you used to start cc-node).\n  Uses the endpoint: <apiBase>/models",
+
+  apiBase:"/api-base <url>\n  Switch the LLM API base URL at runtime (session-only, not persisted).\n  Takes effect immediately for the next message.\n  After switching, cc-node re-probes the context window.\n  Then use /model <name> or /models to pick the new provider's model.\n  For local llama.cpp/Ollama (no auth) you can skip /api-key.\n\n  Example: /api-base http://127.0.0.1:11434/v1",
+  apiKey: "/api-key <key>\n  Switch the LLM API key at runtime (session-only, not persisted).\n  Takes effect immediately for the next message.\n  For local llama.cpp/Ollama (no auth) you can leave it unset.\n\n  Example: /api-key sk-xxxxxxxx",
+
+  api:    "/api\n  Show the current API configuration: base URL, key (masked), and model.",
 
   tools:   "/tools\n  List all available tools that cc-node can use.\n  Shows tool names with their short descriptions.\n\n  Tools include: Bash, Read, Edit, Write, Glob, Grep,\n  WebFetch, WebSearch, AskUserQuestion, GitTool",
 
@@ -425,7 +433,7 @@ export async function main() {
   const config = new Config()
   await config.load(process.cwd())
 
-  const apiBase = cliArgs.apiBase || config.get('apiBase') || process.env.LLM_API_BASE || ''
+  let apiBase = cliArgs.apiBase || config.get('apiBase') || process.env.LLM_API_BASE || ''
   // apiBase 指向自建本地服务（Ollama / llama.cpp / vLLM 等）时允许缺省 apiKey
   const localApiBase = isLocalLlmServer(apiBase)
   let model = cliArgs.model || config.get('model') || ''
@@ -488,7 +496,7 @@ export async function main() {
 const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
   const permissionMode = cliArgs.permissionMode || config.get('permissionMode')
   const maxTurns = cliArgs.maxTurns || config.get('maxTurns')
-  const apiKey = cliArgs.apiKey || config.get('apiKey') || ''
+  let apiKey = cliArgs.apiKey || config.get('apiKey') || ''
   const verbose = cliArgs.verbose || config.get('verbose')
 
   const registry = createDefaultRegistry()
@@ -748,6 +756,47 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
             }
           }
           else console.log(`Model: ${engine.config.model}`)
+          break
+        case 'api-base':
+          // /api-base <url> — 运行时切换 LLM 来源地址（仅本次会话生效）
+          if (rest[0]) {
+            const newBase = rest.join(' ').trim().replace(/\/+$/, '')
+            apiBase = newBase
+            engine.config.apiBase = newBase
+            console.log(`API Base → ${newBase}`)
+            // 切换来源后重新探测上下文窗口（旧来源窗口可能不同）
+            const manual = config.get('maxBudgetTokens') || 0
+            try {
+              const { window: win, source } = await detectContextWindow({ model, apiBase: newBase, apiKey, manualWindow: manual })
+              tokenBudget.setWindow(win, source)
+              windowSource = source
+              console.log(`  ↳ Context window → ${formatTokens(win)} (${windowSourceLabel(source)})`)
+            } catch (e) {
+              console.log(`  ⚠️ 窗口探测失败: ${e.message}`)
+            }
+            // 提示切模型：不同来源的模型名不同
+            const localNow = isLocalLlmServer(newBase)
+            if (!localNow && !apiKey) {
+              console.log('  ⚠️ 新来源需 API Key → 请用 /api-key <key> 设置')
+            }
+            console.log('  ℹ️ 不同模型的名称不同，请用 /model <名称> 选择新来源的模型，或用 /models 查看')
+          }
+          else console.log(`API Base: ${engine.config.apiBase}`)
+          break
+        case 'api-key':
+          // /api-key <key> — 运行时切换 LLM API Key（仅本次会话生效）
+          if (rest[0]) {
+            const newKey = rest.join(' ').trim()
+            apiKey = newKey
+            engine.config.apiKey = newKey
+            console.log(`API Key → ${newKey.slice(0, 4)}...${newKey.slice(-4)}`)
+          }
+          else console.log(`API Key: ${engine.config.apiKey ? `已设置 (${engine.config.apiKey.slice(0, 4)}...${engine.config.apiKey.slice(-4)})` : '未设置'}`)
+          break
+        case 'api':
+          console.log(`API Base: ${engine.config.apiBase}`)
+          console.log(`API Key: ${engine.config.apiKey ? `已设置 (${engine.config.apiKey.slice(0, 4)}...${engine.config.apiKey.slice(-4)})` : '未设置'}`)
+          console.log(`Model: ${engine.config.model}`)
           break
         case 'window': {
           const arg = rest[0] ? rest.join(' ').trim() : ''
