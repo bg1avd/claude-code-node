@@ -294,3 +294,97 @@ test('_buildRequest：把中间 system 统一前置到开头', async () => {
   const nonSys = req.filter(m => m.role !== 'system').map(m => m.role)
   assert.deepEqual(nonSys, ['user', 'assistant', 'user'])
 })
+
+// ---- 小模型模式：合并所有 system 为单条（根治 system=2 触发 Jinja 500）----
+test('small-model：_buildRequest 把所有 system 合并为单条放在开头（system=1）', async () => {
+  const { QueryEngine } = await import('../core/query-engine.js')
+  const qe = new QueryEngine({ systemPrompt: 'SYS-ROOT', tools: [], smallModel: true })
+  // 模拟折叠后 state 里出现"摘要 system"，与基础 system 叠加成 system=2 的场景
+  const messages = [
+    { role: 'system', content: '[Context Summary] 早期摘要A' },
+    { role: 'user', content: 'u1' },
+    { role: 'assistant', content: 'a1' },
+    { role: 'system', content: '[Context Summary] 早期摘要B' },
+    { role: 'user', content: 'u2' },
+  ]
+  const req = qe._buildRequest(messages)
+  const sys = req.filter(m => m.role === 'system')
+  // 只允许一条 system，且在最前面
+  assert.equal(sys.length, 1, 'small-model 模式应把多条 system 合并为一条')
+  assert.equal(req[0].role, 'system')
+  // 合并后的内容包含基础 prompt + 摘要
+  assert.ok(sys[0].content.includes('SYS-ROOT'))
+  assert.ok(sys[0].content.includes('早期摘要A'))
+  assert.ok(sys[0].content.includes('早期摘要B'))
+  // 非 system 部分顺序保持
+  assert.deepEqual(req.filter(m => m.role !== 'system').map(m => m.role), ['user', 'assistant', 'user'])
+})
+
+test('非 small-model：多条 system 仍各自前置（保持原行为）', async () => {
+  const { QueryEngine } = await import('../core/query-engine.js')
+  const qe = new QueryEngine({ systemPrompt: 'SYS-ROOT', tools: [] })
+  const messages = [
+    { role: 'system', content: '摘要A' },
+    { role: 'user', content: 'u1' },
+    { role: 'system', content: '摘要B' },
+  ]
+  const req = qe._buildRequest(messages)
+  const sys = req.filter(m => m.role === 'system')
+  assert.equal(sys.length, 3, '非 small-model 保持多条 system 原行为（基础+摘要，各自前置）')
+  assert.equal(req[0].role, 'system')
+})
+
+// ---- 小模型模式：请求体禁用 LLM 缓存（cache_prompt:false）----
+test('small-model：对本地服务请求体带 cache_prompt:false（每轮清空 LLM 缓存）', async () => {
+  const { QueryEngine } = await import('../core/query-engine.js')
+  const qe = new QueryEngine({
+    smallModel: true,
+    apiBase: 'http://127.0.0.1:18080/v1',
+    model: 'test-model',
+    tools: [],
+    noStream: true,
+  })
+  let sentBody = null
+  const origFetch = global.fetch
+  global.fetch = async (url, opts) => {
+    sentBody = JSON.parse(opts.body)
+    // 模拟一个本地服务：仅接受 /chat/completions，其余端点返回 404（清缓存端点失败不影响）
+    if (url.includes('/chat/completions')) {
+      return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: 'ok', tool_calls: null } }] }) }
+    }
+    return { ok: false, status: 404 }
+  }
+  try {
+    await qe.processMessage('hello')
+  } catch (e) { /* 允许网络细节差异 */ }
+  global.fetch = origFetch
+  // 主请求体应带 cache_prompt:false
+  assert.ok(sentBody, '应发送过请求')
+  assert.equal(sentBody.cache_prompt, false, 'small-model 本地服务请求应禁用 prompt cache')
+})
+
+test('非 small-model：请求体不带 cache_prompt', async () => {
+  const { QueryEngine } = await import('../core/query-engine.js')
+  const qe = new QueryEngine({
+    smallModel: false,
+    apiBase: 'http://127.0.0.1:18080/v1',
+    model: 'test-model',
+    tools: [],
+    noStream: true,
+  })
+  let sentBody = null
+  const origFetch = global.fetch
+  global.fetch = async (url, opts) => {
+    if (url.includes('/chat/completions')) {
+      sentBody = JSON.parse(opts.body)
+      return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: 'ok', tool_calls: null } }] }) }
+    }
+    return { ok: false, status: 404 }
+  }
+  try {
+    await qe.processMessage('hello')
+  } catch (e) {}
+  global.fetch = origFetch
+  assert.ok(sentBody, '应发送过请求')
+  assert.equal(sentBody.cache_prompt, undefined, '非 small-model 不应设置 cache_prompt')
+})

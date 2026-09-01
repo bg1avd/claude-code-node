@@ -219,6 +219,15 @@ cc-node --api-base http://127.0.0.1:18080/v1 --model ./local-model.gguf \
 > **配合 `--max-messages N`**：两者互补——`--max-messages` 解决"条数过多"，
 > `--small-model` 解决"模型不会自主调工具"。小模型场景建议一起开启。
 
+> **自动清空 LLM 缓存（针对本地服务 500）**：工作几轮后报 `500`（llama.cpp
+> `System message must be at the beginning`）的真正根因，是 **LLM 端 KV/prompt 缓存
+> 无限叠加被塞满**——即便 cc-node 端 compact 后 context 变小，LLM 端旧的大 context
+> 仍占着缓存导致新请求被拒。开启 `--small-model` 后：
+> 1. 每个用户任务开始时自动向本地服务发一次轻量"清缓存"请求；
+> 2. 每个 LLM 请求体带 `cache_prompt:false`，让本地服务（llama.cpp/Ollama/vLLM）
+>    本轮不复用、不累积上一次的 prompt 缓存，每次都全新计算——等价于"每轮清空缓存"。
+> 同时把所有 system 消息**合并为单条**放在开头，彻底消除 `system=2` 触发 Jinja 报错。
+
 ---
 
 ## 🛠️ 内置工具（10 个）
@@ -407,7 +416,9 @@ cc-node --api-base http://localhost:11434/v1
 >
 > **`smallModel`**：小模型适配模式（可选，默认关闭/`false`）。开启后启用强制工具调用
 > 引导、敷衍输出检测重试、意图识别 + 工具精简，让弱模型（如 27B Q3 量化）也能可靠
-> 完成编程任务。等价于 `--small-model`。
+> 完成编程任务；并针对自建本地服务（llama.cpp/Ollama/vLLM）**每轮自动清空 LLM 缓存**
+> （`cache_prompt:false` + 合并 system 为单条），根治"工作几轮后 500"。
+> 等价于 `--small-model`。
 
 [![npm version](https://img.shields.io/npm/v/@raolin2025/claude-code-node.svg)](https://www.npmjs.com/package/@raolin2025/claude-code-node) [![GitHub](https://img.shields.io/badge/GitHub-bg1avd%2Fclaude--code--node-blue)](https://github.com/bg1avd/claude-code-node) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ---

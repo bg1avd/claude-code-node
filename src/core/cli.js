@@ -382,7 +382,7 @@ Options:
   -v, --verbose             Verbose mode
   --no-stream               Disable streaming
   --max-messages N          Fold history when message count exceeds N (default: 0 = off)
-  --small-model             Reserved flag (no-op now — tool engine uses plain mode like v2.8.11)
+  --small-model             Small-model mode: 每轮自动清空 LLM 缓存 (cache_prompt:false) + 合并 system 为单条，根治本地服务 500
   --max-output-tokens N     Override max single-response output tokens (default: computed from window size)
   --small-model-max-turns N Reserved (no-op — tool loop uses maxTurns)
   --with-notify             Start built-in channel listener (Telegram)

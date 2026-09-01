@@ -215,6 +215,12 @@ export class QueryEngine {
   async _runToolLoop(userMessage) {
     let finalResponse = ''
 
+    // 小模型模式：每个用户任务开始前，主动清空 LLM 端缓存一次。
+    // 根因：LLM 端（llama.cpp 等自建服务）KV cache 无限叠加被塞满，是工作几轮后
+    // 报 500 的真正原因（cc-node 端 context 并未到极限）。先发一个轻量清缓存请求，
+    // 让本轮整个工具链从"干净缓存"起步（配合请求体里的 cache_prompt:false 双重保障）。
+    await this._clearLlmCache()
+
     // 朴素工具循环（v2.8.11 风格）：
     // 实测结论——小模型在"朴素模式"（16 个工具全上、无引导注入、无代执行、
     // 无工具精简）下才能正常工作。v2.8.13 后我加的意图引导注入、工具精简、
@@ -305,7 +311,9 @@ export class QueryEngine {
 
     // 系统提示（朴素模式：直接用基础 system prompt，不做 cwd/工具铁律等注入——
     // 实测 v2.8.11 朴素模式能正常工作，注入反而干扰模型）
-    if (this.config.systemPrompt) {
+    // 小模型模式下不在此单独 push —— 基础 systemPrompt 会与 state 里的摘要 system
+    // 在下方【合并成单条 system】一起 push，避免 system=2 触发 llama.cpp Jinja 报错。
+    if (!this.config.smallModel && this.config.systemPrompt) {
       request.push({ role: 'system', content: this.config.systemPrompt })
     }
 
@@ -324,9 +332,29 @@ export class QueryEngine {
         bodyMsgs.push(msg)
       }
     }
-    for (const msg of systemMsgs) {
-      request.push({ role: 'system', content: msg.content })
+
+    // 小模型模式：把所有 system 消息【合并成一条】放在最前面。
+    // 原因：llama.cpp/Qwen 的 Jinja 模板严格要求"system 必须在开头"，但即便多条
+    // system 都在开头，某些模板仍会因"多余 system 消息"报 500
+    // （"System message must be at the beginning"）。
+    // 折叠/压缩会在 state.messages 里留下"摘要 system"，与基础 system 叠加成
+    // system=2。这里把 base systemPrompt + 全部摘要 system 拼接为单条 system，
+    // 彻底消除多 system 触发 Jinja 报错的场景。
+    if (this.config.smallModel) {
+      const mergedSystem = []
+      if (this.config.systemPrompt) mergedSystem.push(this.config.systemPrompt)
+      for (const msg of systemMsgs) {
+        if (msg.content) mergedSystem.push(String(msg.content))
+      }
+      if (mergedSystem.length) {
+        request.push({ role: 'system', content: mergedSystem.join('\n\n') })
+      }
+    } else {
+      for (const msg of systemMsgs) {
+        request.push({ role: 'system', content: msg.content })
+      }
     }
+
     for (const msg of bodyMsgs) {
       if (msg.role === 'user') {
         request.push({ role: 'user', content: this._buildUserContent(msg) })
@@ -425,6 +453,58 @@ export class QueryEngine {
     return results
   }
 
+  /**
+   * 清空 LLM 端缓存（小模型模式专用，best-effort）
+   *
+   * 背景（详见 error.log）：对话工作若干轮后报 500 的真根因是——LLM 端
+   * （llama.cpp 等自建本地服务）的 KV cache / prompt cache 无限叠加被塞满。
+   * cc-node 端即使 compact 后 context 变小，LLM 端旧的大 context 仍占着缓存，
+   * 导致后续请求被拒（Jinja "System message must be at the beginning" 只是表象）。
+   * 用户 /clear 能恢复，正是因为重置后首个请求用了全新 context，等价于清了缓存。
+   *
+   * 本方法在【每个用户任务开始时】主动向本地服务发一个轻量"清缓存"请求：
+   *   - 对 llama.cpp：发送一个带 cache_prompt:false 的最小请求，令其丢弃旧 prompt 缓存；
+   *   - 部分服务提供专用清缓存端点，通过 URL 段可拼接（best-effort，失败静默忽略）。
+   * 配合主请求里的 cache_prompt:false，实现"每轮清空 LLM 缓存"，保证 context 始终正确。
+   *
+   * 仅当 config.smallModel 且目标是自建本地服务时生效；云端厂商跳过。
+   * 任何失败都被静默吞掉（清缓存失败不应阻断主流程）。
+   */
+  async _clearLlmCache() {
+    const apiBase = this.config.apiBase
+    if (!this.config.smallModel || !isLocalLlmServer(apiBase)) return
+    // 无并发保护：同一时刻仅一个 _runToolLoop 在跑（processMessage 有 isRunning 锁）
+    try {
+      const base = apiBase.replace(/\/+$/, '')
+      // 尝试常见的本地服务清缓存端点（llama.cpp / vLLM 等，best-effort）
+      const clearUrls = [
+        `${base}/cache/clear`,       // 部分 llama.cpp 封装
+        `${base}/reset`,             // 部分服务
+      ]
+      let cleared = false
+      for (const url of clearUrls) {
+        try {
+          const ctrl = new AbortController()
+          const t = setTimeout(() => ctrl.abort(), 1200)
+          const res = await fetch(url, {
+            method: 'POST',
+            headers: { ...buildAuthHeaders(apiBase, this.config.apiKey), 'Content-Type': 'application/json' },
+            body: '{}',
+            signal: ctrl.signal,
+          })
+          clearTimeout(t)
+          if (res.ok) { cleared = true; break }
+        } catch { /* 端点不存在 → 继续尝试下一个 */ }
+      }
+      if (cleared) {
+        if (this.config.verbose) console.error('[cache] 已发送清缓存请求（small-model）')
+      }
+      // 兜底：即便没有专用清缓存端点，主请求的 cache_prompt:false 也能保证本轮不复用缓存。
+    } catch {
+      // 静默失败 —— 清缓存失败不阻断主流程
+    }
+  }
+
   async _callLLM(messages, contextMessages) {
     const apiKey = this.config.apiKey
     const apiBase = this.config.apiBase
@@ -470,6 +550,21 @@ export class QueryEngine {
       max_tokens: this._computeMaxOutputTokens(),
       ...(tools.length && { tools }),
       ...(useStream && { stream: true }),
+    }
+
+    // 小模型模式：每轮调用前【清空 LLM 端缓存】。
+    // 背景（详见 error.log）：对话工作若干轮后报 500，根因不是 cc-node 的 context
+    // 到极限，而是 LLM 端（llama.cpp 等自建本地服务）的 KV cache / prompt cache
+    // 无限叠加被塞满。即便 cc-node 端 compact 后 context 变小（如 system=2 只剩十几条），
+    // LLM 端旧的大 context 仍占着缓存，导致新请求被拒。
+    // 这里显式加 cache_prompt:false，告诉本地服务【本轮不复用、不累积上一次的 prompt 缓存】，
+    // 每次都全新计算 —— 等价于"每轮清空 LLM 缓存"，保证 context 始终以正确、全新的形态送入。
+    // 仅对自建本地服务（llama.cpp/Ollama/vLLM 等）生效，云端厂商会忽略此字段。
+    if (this.config.smallModel && isLocalLlmServer(apiBase)) {
+      body.cache_prompt = false
+      if (this.config.verbose) {
+        console.error('[cache] small-model 模式：本轮已禁用 LLM prompt cache（cache_prompt=false，每轮清空缓存）')
+      }
     }
 
     // [debug] 打印实际发送请求的关键信息，用于排查"模型为何不调用工具"

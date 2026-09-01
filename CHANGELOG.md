@@ -1,5 +1,24 @@
 # CHANGELOG
 
+## v2.8.26 — small-model 模式根治本地服务 500（清空 LLM 缓存 + 合并 system）
+
+### 🐛 修复
+- **根治"工作几轮后报 500"**（error.log 中 llama.cpp `System message must be at the beginning`）：
+  真正根因不是 cc-node 端 context 到极限，而是 **LLM 端（llama.cpp 等自建服务）KV/prompt
+  缓存无限叠加被塞满**——即便 compact 后 cc-node 发送的 context 变小，LLM 端旧的大 context
+  仍占着缓存导致新请求被拒。`--small-model` 模式现在每轮自动清空 LLM 缓存：
+  - **每个用户任务开始时**主动向本地服务发一次轻量"清缓存"请求（best-effort，失败静默忽略）；
+  - **每个 LLM 请求体带 `cache_prompt:false`**，让本地服务本轮不复用、不累积上一次的
+    prompt 缓存，每次都全新计算——等价于"每轮清空缓存"，保证 context 始终正确送入。
+  - 仅对自建本地服务（llama.cpp/Ollama/vLLM 等）生效，云端厂商忽略该字段。
+- **`_buildRequest` 在 small-model 模式下把所有 system 消息合并为单条**放在开头，
+  彻底消除折叠后 `system=2` 触发 Qwen Jinja `System message must be at the beginning` 的报错。
+
+### 🧪 测试
+- `small-model.test.js` 新增 4 个测试：small-model 合并 system 为单条、非 small-model 保持原行为、
+  small-model 本地服务请求带 `cache_prompt:false`、非 small-model 不带 `cache_prompt`。
+- 全量单测通过（git-tool.integration 4 项为既有失败，需 GitHub 环境，与本改动无关）。
+
 ## v2.8.25
 
 ### ✨ 新功能
