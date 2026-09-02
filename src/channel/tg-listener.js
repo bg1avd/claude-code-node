@@ -191,7 +191,10 @@ export class TelegramBotClient {
     } catch {}
   }
 
-  /** 获取文件下载链接 */
+  /** 获取文件下载信息（代理安全）
+   *  返回对象包含 download() 方法，内部走 this._fetch（支持代理），
+   *  避免直连 URL 在 SOCKS5 代理环境下无法访问的问题。
+   */
   async getFile(fileId) {
     const res = await this._fetch(`${this.apiBase}/getFile`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -199,7 +202,16 @@ export class TelegramBotClient {
     })
     const data = await res.json()
     if (!data.ok) throw new Error(`TG getFile error: ${data.description}`)
-    return `https://api.telegram.org/file/bot${this.token}/${data.result.file_path}`
+    const fileUrl = `https://api.telegram.org/file/bot${this.token}/${data.result.file_path}`
+    return {
+      file_id: fileId,
+      file_path: data.result.file_path,
+      file_size: data.result.file_size,
+      // 通过代理下载文件（返回原始 Response，调用方自行处理 body）
+      download: async () => this._fetch(fileUrl, { method: 'GET' }),
+      // 兼容旧版：直连 URL（不推荐在代理环境下使用）
+      url: fileUrl,
+    }
   }
 
   /** 设置机器人命令菜单 */
@@ -468,16 +480,32 @@ export class TelegramListener {
     if (msg.photo?.length) {
       const best = msg.photo.reduce((a, b) => (a.width > b.width ? a : b))
       try {
-        const fileUrl = await this.bot.getFile(best.file_id)
-        files.push({ type: 'photo', url: fileUrl })
+        const fileInfo = await this.bot.getFile(best.file_id)
+        files.push({
+          type: 'photo',
+          file_id: best.file_id,
+          file_path: fileInfo.file_path,
+          file_size: fileInfo.file_size,
+          download: fileInfo.download,
+          url: fileInfo.url, // 兼容保留
+        })
       } catch {}
     }
 
     // 文档
     if (msg.document) {
       try {
-        const fileUrl = await this.bot.getFile(msg.document.file_id)
-        files.push({ type: 'document', url: fileUrl, name: msg.document.file_name })
+        const fileInfo = await this.bot.getFile(msg.document.file_id)
+        files.push({
+          type: 'document',
+          file_id: msg.document.file_id,
+          file_path: fileInfo.file_path,
+          file_size: fileInfo.file_size,
+          name: msg.document.file_name,
+          mime_type: msg.document.mime_type,
+          download: fileInfo.download,
+          url: fileInfo.url, // 兼容保留
+        })
       } catch {}
     }
 

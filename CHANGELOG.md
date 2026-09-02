@@ -1,5 +1,17 @@
 # CHANGELOG
 
+## v2.8.28
+
+## [2.8.28] - 2026-09-02
+
+### 🐛 修复
+- **Telegram 代理环境下图片/文件下载失败**：`tg-listener.getFile()` 返回直连 URL，在 SOCKS5 代理环境下无法访问，导致多模态图片接收失败。
+  - `getFile()` 改为返回对象，新增 `download()` 方法（内部走 `_fetch`，支持代理）
+  - 图片/文档提取处适配新返回值，传递 `file_id`、`file_path`、`download` 等
+  - `cli.js` 的 `extractImagesFromFiles` 优先走 `f.download()` 代理下载，直连 URL 作为兜底
+  - 保留 `url` 字段兼容旧调用，直连环境不受影响
+
+
 ## v2.8.27
 
 ## [2.8.27] - 2026-09-02

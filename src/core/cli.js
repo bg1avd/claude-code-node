@@ -674,19 +674,28 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
   async function extractImagesFromFiles(files) {
     if (!files || !files.length) return []
     const imageTypes = ['photo']
-    const imgFiles = files.filter(f => imageTypes.includes(f.type) || /\.(png|jpe?g|gif|webp|bmp)$/i.test(f.name || ''))
+    const imgFiles = files.filter(f => imageTypes.includes(f.type) || /\.(png|jpe?g|gif|webp|bmp)$/i.test(f.name || f.file_path || ''))
     const results = []
     for (const f of imgFiles) {
       try {
-        const ctrl = new AbortController()
-        const t = setTimeout(() => ctrl.abort(), 15000)
-        const res = await fetch(f.url, { signal: ctrl.signal })
-        clearTimeout(t)
-        if (!res.ok) continue
+        let res
+        // 优先走代理安全的 download()（tg-listener 提供，内部走 _fetch 支持 SOCKS5）
+        if (typeof f.download === 'function') {
+          res = await f.download()
+        } else if (f.url) {
+          // 兜底：直连 URL（非代理环境可用）
+          const ctrl = new AbortController()
+          const t = setTimeout(() => ctrl.abort(), 15000)
+          res = await fetch(f.url, { signal: ctrl.signal })
+          clearTimeout(t)
+        } else {
+          continue
+        }
+        if (!res || !res.ok) continue
         const buf = Buffer.from(await res.arrayBuffer())
         const base64 = buf.toString('base64')
         // 用文件扩展名推断 MIME，兜底用 image/jpeg
-        const ext = (f.name || f.url || '').match(/\.(png|jpe?g|gif|webp|bmp)/i)
+        const ext = (f.name || f.file_path || f.url || '').match(/\.(png|jpe?g|gif|webp|bmp)/i)
         const mime = ext ? `image/${ext[1].toLowerCase().replace('jpg', 'jpeg')}` : 'image/jpeg'
         results.push(`data:${mime};base64,${base64}`)
       } catch { /* 下载失败的图片跳过，不阻断主流程 */ }
