@@ -660,7 +660,41 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
 
   // 处理输入行
   // source: 'cli' 来自终端输入, 'telegram' 来自 Telegram
-  async function processInputLine(input, source = 'cli', tgChatId = null) {
+  /**
+   * 从消息的 files 中提取图片，下载并转成 base64 data URL（供模型多模态输入使用）。
+   *
+   * 为什么不直接传 Telegram 文件 URL？
+   *   - Telegram 文件 URL 里包含 bot token，直接发给第三方模型 API 会泄露 token；
+   *   - 模型侧也不一定能访问 tg 文件服务器。
+   * 所以统一下载到内存转 base64，安全且通用。
+   *
+   * @param {Array} files — tg-listener 传来的 files 数组
+   * @returns {Promise<string[]>} base64 data URL 数组（仅图片类文件）
+   */
+  async function extractImagesFromFiles(files) {
+    if (!files || !files.length) return []
+    const imageTypes = ['photo']
+    const imgFiles = files.filter(f => imageTypes.includes(f.type) || /\.(png|jpe?g|gif|webp|bmp)$/i.test(f.name || ''))
+    const results = []
+    for (const f of imgFiles) {
+      try {
+        const ctrl = new AbortController()
+        const t = setTimeout(() => ctrl.abort(), 15000)
+        const res = await fetch(f.url, { signal: ctrl.signal })
+        clearTimeout(t)
+        if (!res.ok) continue
+        const buf = Buffer.from(await res.arrayBuffer())
+        const base64 = buf.toString('base64')
+        // 用文件扩展名推断 MIME，兜底用 image/jpeg
+        const ext = (f.name || f.url || '').match(/\.(png|jpe?g|gif|webp|bmp)/i)
+        const mime = ext ? `image/${ext[1].toLowerCase().replace('jpg', 'jpeg')}` : 'image/jpeg'
+        results.push(`data:${mime};base64,${base64}`)
+      } catch { /* 下载失败的图片跳过，不阻断主流程 */ }
+    }
+    return results
+  }
+
+  async function processInputLine(input, source = 'cli', tgChatId = null, images = []) {
     const trimmed = input.trim()
     if (!trimmed) { showPrompt(); return }
 
@@ -1098,7 +1132,7 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
       // 有 Telegram 通道时，流式推送思维链到当前回复目标，避免远程"以为没回应"
       const streamTarget = (source === 'telegram') ? (tgChatId || null) : (tgListener?.bot ? tgChatId || null : null)
       if (streamTarget) tgThinkingStart(streamTarget)
-      const result = await processInput(input)
+      const result = await processInput(input, images)
       // 处理结束，清掉思维链流（最终回复随后发送）
       tgThinkingEnd()
       console.log()
@@ -1350,11 +1384,15 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
         tgChatId = msg.chatId || tgChatId
         tgReplyTarget = msg.replyTo || null
         const text = msg.text || msg.callbackData || ''
-        if (!text) return
+        // 提取图片 → 转 base64 → 作为 images 传给引擎（多模态输入）
+        const images = await extractImagesFromFiles(msg.files || [])
+        if (!text && images.length === 0) return
+        // 只有图片没有文字时，给一个默认提示，避免空输入
+        const inputText = text || '（用户发送了一张图片）请描述这张图片的内容。'
         // 普通消息和 / 命令都转给引擎（/命令由 processInputLine 处理）
         // 注意：tg-listener 已内部处理 /ping /status /run 等自己的命令，
         // 只有未识别的 / 命令（如 /models /stop /resume）才会到达这里。
-        await processInputLine(text, 'telegram', msg.chatId)
+        await processInputLine(inputText, 'telegram', msg.chatId, images)
       }).catch(e => console.error(`[TG] listener error: ${e.message}`))
       console.log(`✅ Telegram channel ready (bot ${tgToken.slice(0, 12)}...)`)
     } catch (e) {
@@ -1379,8 +1417,12 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
         if (msg.replyTo) tgReplyTarget = msg.replyTo
         // 来自外部的消息 → 转发到 REPL 引擎（含 / 命令，由 processInputLine 处理）
         const text = msg.text || ''
-        if (text) {
-          await processInputLine(text, msg.channel || 'external', msg.chatId)
+        // 提取图片 → 转 base64 → 作为 images 传给引擎（多模态输入）
+        const images = await extractImagesFromFiles(msg.files || [])
+        // 只有图片没有文字时，给一个默认提示
+        const inputText = text || (images.length ? '（用户发送了一张图片）请描述这张图片的内容。' : '')
+        if (inputText) {
+          await processInputLine(inputText, msg.channel || 'external', msg.chatId, images)
         }
       },
     })
@@ -1419,8 +1461,8 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
   showPrompt()
 
   // REPL 消息处理包装（留作扩展点）
-  async function processInput(input) {
-    return engine.processMessage(input)
+  async function processInput(input, images = []) {
+    return engine.processMessage(input, images)
   }
 }
 
