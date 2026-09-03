@@ -270,7 +270,8 @@ export async function fetchViaSocks5(url, options = {}, proxyAddr) {
   const reqBuf = Buffer.concat([Buffer.from(head, 'utf8'), Buffer.isBuffer(body) ? body : Buffer.from(body, 'utf8')])
 
   return new Promise((resolve, reject) => {
-    let responseData = ''
+    // 用 Buffer 数组收集响应，避免二进制数据（图片/文件）被 UTF-8 字符串解码损坏
+    const chunks = []
     // 超时可配置（options.timeout，毫秒），默认 30s。
     // Telegram getUpdates 是长轮询（最多等 30s），必须传更大的超时避免误判超时。
     const timeoutMs = options.timeout || 30000
@@ -296,28 +297,31 @@ export async function fetchViaSocks5(url, options = {}, proxyAddr) {
 
     socket.write(reqBuf)
     socket.on('data', (chunk) => {
-      responseData += chunk.toString()
+      chunks.push(chunk)
     })
     socket.on('end', () => {
       clearTimeout(timeout)
       if (signal) signal.removeEventListener('abort', onAbort)
       // 解析 HTTP 响应
-      const headerEnd = responseData.indexOf('\r\n\r\n')
+      const rawBuf = Buffer.concat(chunks)
+      const headerEnd = rawBuf.indexOf('\r\n\r\n')
       if (headerEnd < 0) {
         reject(new Error('Invalid HTTP response'))
         return
       }
-      const statusLine = responseData.split('\r\n')[0]
+      const headerStr = rawBuf.slice(0, headerEnd).toString('utf8')
+      const statusLine = headerStr.split('\r\n')[0]
       const statusCode = parseInt(statusLine.split(' ')[1], 10)
-      const bodyData = responseData.slice(headerEnd + 4)
+      const bodyBuf = rawBuf.slice(headerEnd + 4)
 
       resolve({
         ok: statusCode >= 200 && statusCode < 300,
         status: statusCode,
         statusText: statusLine,
         headers: {},
-        text: async () => bodyData,
-        json: async () => JSON.parse(bodyData),
+        arrayBuffer: async () => bodyBuf.buffer.slice(bodyBuf.byteOffset, bodyBuf.byteOffset + bodyBuf.byteLength),
+        text: async () => bodyBuf.toString('utf8'),
+        json: async () => JSON.parse(bodyBuf.toString('utf8')),
       })
     })
     socket.on('error', (err) => {

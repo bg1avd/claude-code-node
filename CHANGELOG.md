@@ -1,5 +1,16 @@
 # CHANGELOG
 
+## v2.8.29
+
+## [2.8.29] - 2026-09-02
+
+### 🐛 修复
+- **代理环境下图片下载数据损坏 & 缺少 arrayBuffer()**：`fetchViaSocks5` 响应体用字符串累加收集，二进制图片被 UTF-8 解码损坏；且返回对象缺少 `arrayBuffer()` 方法，导致 `extractImagesFromFiles` 调用失败。
+  - 响应收集改为 Buffer 数组拼接，完整保留二进制数据
+  - 返回对象新增 `arrayBuffer()` 方法
+  - `text()` / `json()` 改为从 Buffer 解码，不影响文本 API 调用
+
+
 ## v2.8.28
 
 ## [2.8.28] - 2026-09-02
