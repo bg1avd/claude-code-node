@@ -18,6 +18,19 @@ import { ToolDef } from '../types/index.js'
 /** 连接单个 server 的超时（毫秒），防止网络卡住拖慢启动 */
 const DEFAULT_CONNECT_TIMEOUT = 8000
 
+/**
+ * 把工具名规整为 OpenAI 兼容形式（仅允许 [a-zA-Z0-9_-]，且不超 64 字符）。
+ * MCP 工具原名是 "<server>:<tool>"，其中的冒号/点等非法字符会触发 API 400
+ * `Invalid 'tools[n].function.name'`（DeepSeek/OpenAI 系都有此校验）。
+ * 全部被替换成空时兜底为 "mcp_tool"，避免产生空名字。
+ */
+export function sanitizeToolName(raw) {
+  let s = String(raw == null ? '' : raw).replace(/[^a-zA-Z0-9_-]+/g, '_')
+  s = s.replace(/^_+|_+$/g, '')
+  if (!s) s = 'mcp_tool'
+  return s.slice(0, 64)
+}
+
 function withTimeout(promise, ms, label) {
   let timer
   const timeout = new Promise((_, reject) => {
@@ -35,7 +48,7 @@ function withTimeout(promise, ms, label) {
  * @returns {ToolDef}
  */
 export function remoteToolToToolDef(client, serverName, remoteTool) {
-  const localName = `${serverName}:${remoteTool.name}`
+  const localName = sanitizeToolName(`${serverName}:${remoteTool.name}`)
   const def = new ToolDef(
     localName,
     (remoteTool.description || '') + `\n[通过 MCP 服务器「${serverName}」提供]`,

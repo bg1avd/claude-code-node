@@ -9,7 +9,7 @@
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
-import { loadMcpToolsFromConfig, remoteToolToToolDef } from '../mcp/loadTools.js'
+import { loadMcpToolsFromConfig, remoteToolToToolDef, sanitizeToolName } from '../mcp/loadTools.js'
 import { ToolDef } from '../types/index.js'
 
 // ---- fixture MCP HTTP server（实现最小 tools/list + tools/call）----
@@ -65,7 +65,7 @@ test('config 含 mcp.servers 时：装载出 <server>:<tool> ToolDef 并可真�
   const { tools, registry } = await loadMcpToolsFromConfig(cfgWithServer)
   assert.ok(tools.length === 1)
   const def = tools[0]
-  assert.equal(def.name, 'fx:search')
+  assert.equal(def.name, 'fx_search')
   assert.ok(def instanceof ToolDef)
   assert.match(def.description, /fx/)
   assert.deepEqual(Object.keys(def.parameters.properties), ['query'])
@@ -96,8 +96,15 @@ test('配置了但目标连不上 → best-effort：空 tools + warnings，不�
 test('remoteToolToToolDef 的 ask 权限 & 元标记', () => {
   const fakeClient = { callTool: async () => ({ content: [{ type: 'text', text: 'ok' }] }) }
   const def = remoteToolToToolDef(fakeClient, 'banana', { name: 'peel', description: 'a', inputSchema: { type: 'object' } })
-  assert.equal(def.name, 'banana:peel')
+  assert.equal(def.name, 'banana_peel')
   assert.equal(def.permissionLevel, 'ask')
   assert.equal(def._mcpserver, 'banana')
   assert.equal(def._mcptool, 'peel')
+})
+
+test('sanitizeToolName 去除冒号等非法字符（OpenAI 工具名仅允许 [a-zA-Z0-9_-]）', () => {
+  assert.equal(sanitizeToolName('banana:peel'), 'banana_peel')
+  assert.equal(sanitizeToolName('mcp.dev/foo bar'), 'mcp_dev_foo_bar')
+  assert.equal(sanitizeToolName('中文服务器:读文件'), 'mcp_tool') // 全非法 → 兜底
+  assert.ok(/^[a-zA-Z0-9_-]+$/.test(sanitizeToolName('a:b:c:d:e:f:g:h:i:j:k:l:m:n:o:p:q:r:s:t:u:v:w:x:y:z:1:2:3:4:5:6:7:8:9:0:!@#$%^&*()'))) // 超长+非法 → 截断且合法
 })

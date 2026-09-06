@@ -1,5 +1,15 @@
 # CHANGELOG
 
+## v2.9.1
+
+## [2.9.1] - 2026-09-06
+
+### 🐛 修复
+- **MCP 工具名含冒号导致 API 400（`Invalid 'tools[n].function.name'`）**：MCP 工具以 `<服务器名>:<工具名>` 注册，冒号不符合 OpenAI/DeepSeek 系 API 的工具名规则 `^[a-zA-Z0-9_-]+$`，启用 `mcp.servers` 后所有会话首次请求即报 400（实测 `tools[16]` = `search:search`）。
+  - 新增 `sanitizeToolName()`：非法字符统一替换为下划线、去首尾下划线、空名兜底 `mcp_tool`、超 64 字符截断
+  - `remoteToolToToolDef` 注册名改为净化后名称（如 `search:search` → `search_search`），不影响 `_mcpserver`/`_mcptool` 元标记
+  - 测试同步更新 + 新增净化函数用例
+
 ## v2.9.0
 
 ## [2.9.0] - 2026-09-06
