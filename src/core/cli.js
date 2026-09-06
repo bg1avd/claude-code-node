@@ -11,6 +11,7 @@ import { writeFileSync, unlinkSync, existsSync, mkdirSync, readFileSync, chmodSy
 import { join } from 'path'
 import { QueryEngine, QueryEngineConfig } from './query-engine.js'
 import { createDefaultRegistry } from '../tools/index.js'
+import { loadMcpToolsFromConfig, closeMcpTools } from '../mcp/loadTools.js'
 import { SessionManager } from './session.js'
 import { Config } from './config.js'
 import { TokenBudget } from './token-budget.js'
@@ -501,6 +502,26 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
 
   const registry = createDefaultRegistry()
   const sessionManager = new SessionManager({ sessionsDir: config.get('sessionsDir') })
+
+  // B 通用接线：把 config.json 里 mcp.servers 配置的 MCP 服务器的工具接入运行时工具表。
+  // 未配置 mcp.servers 时零影响；某个 MCP 连不上会告警并跳过，绝不阻塞/崩溃。
+  // 需要在 engineConfig 使用 registry.getAll() 之前完成（异步网络连接）。
+  let mcpRegistryHandle = null
+  const mcpConfig = config.get && (config.get('mcp') || {})
+  if (mcpConfig && mcpConfig.servers && Object.keys(mcpConfig.servers).length > 0) {
+    const _mcp = await loadMcpToolsFromConfig(config, {
+      log: (m) => { if (verbose) console.error(m) },
+    })
+    mcpRegistryHandle = _mcp.registry
+    if (Array.isArray(_mcp.tools)) {
+      for (const t of _mcp.tools) registry.register(t)
+    }
+    // 退出时尽量断开已连的 MCP（HTTP 连接幂等无害；stdio 会结束子进程）。
+    // process exit 是同步的，close 为 fire-and-forget，不阻塞退出。
+    process.once('exit', () => {
+      if (mcpRegistryHandle) closeMcpTools(mcpRegistryHandle).catch(() => {})
+    })
+  }
 
   let session
   if (cliArgs.resume) {

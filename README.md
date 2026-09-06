@@ -241,7 +241,7 @@ cc-node --api-base http://127.0.0.1:18080/v1 --model ./local-model.gguf \
 | **Glob** | 文件模式搜索 | `always-allow` | — |
 | **Grep** | 内容搜索（rg/grep） | `always-allow` | — |
 | **WebFetch** | 抓取网页内容（安全管道 + Jina 兜底） | `ask` | ✅ SSRF + 重定向 + 脱敏 |
-| **WebSearch** | 网页搜索 | `ask` | 需要 API Key |
+| **WebSearch** | 网页搜索 | `ask` | 需 API Key；可改接配套的免 Key 搜索 MCP「[mcp-search-server](https://github.com/bg1avd/mcp-search-server)」 |
 | **GitTool** | GitHub PR 自动化（审查/合并/评论） | `high` | ✅ 预检查 |
 | **NpmPublish** | npm 发布一键工具（版本/打包/发布） | `ask` | ✅ token 校验 |
 | **AskUserQuestion** | 向用户提问 | `always-allow` | — |
@@ -423,23 +423,66 @@ cc-node --api-base http://localhost:11434/v1
 [![npm version](https://img.shields.io/npm/v/@raolin2025/claude-code-node.svg)](https://www.npmjs.com/package/@raolin2025/claude-code-node) [![GitHub](https://img.shields.io/badge/GitHub-bg1avd%2Fclaude--code--node-blue)](https://github.com/bg1avd/claude-code-node) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ---
 
-## 🔌 MCP 服务器
+## 🔌 MCP 客户端
 
-支持通过 Model Context Protocol 连接外部工具服务器：
+通过 Model Context Protocol 连接外部工具服务器（支持 **stdio** 与 **远程 HTTP** 两种传输）。
+
+### 本地 stdio（spawn 子进程）
 
 ```javascript
 import { MCPRegistry } from './src/mcp/index.js'
 
 const registry = new MCPRegistry()
 registry.register('my-server', {
-  command: 'npx',
+  command: 'npx',          // 受信任的启动命令（npx / uvx / mcp- 前缀）
   args: ['my-mcp-server'],
   env: { API_KEY: 'xxx' }
 })
 
 await registry.connectAll()
-const tools = registry.getAllTools()
+const tools = registry.getAllTools()   // [{name, description, inputSchema, _mcpServer}]
 ```
+
+### 远程 HTTP（连接独立部署的服务器）
+
+> 适用于"内网 cc-node + 外网搜索/工具节点"的跳板：外网起服务器，
+> 经 Cloudflare 域名 / Nginx 反代对内提供，客户端**仅需一行配置即可连接**。
+> 无需本地进程、不依赖命令白名单，天然契合跨网通信。
+
+```javascript
+registry.register('search', {
+  type: 'http',                                   // 或直接给 url 且不配 command
+  url: 'https://your-domain.example.com/mcp',     // streamable-HTTP 端点
+  token: 'your-secret',                            // Bearer 鉴权（推荐 + 服务器端开启）
+  timeoutMs: 30000,
+})
+await registry.connectAll()
+const res = await registry.callTool('search', 'search', { query: '天气预报', count: 5 })
+// res.content[0].text → 结果纯文本
+```
+
+`MCPClient` 会自动识别：配置带 `command` → stdio；带 `type:'http'`/`url` 且无 `command` → 走 HTTP。
+
+### 配套的开源搜索服务器（独立仓库）
+
+cc-node 只负责"作为 MCP 客户端去连接"，**不内置服务器实现**。
+配套的免搜索引擎 API Key 的搜索服务器是一个独立项目：
+
+> **[mcp-search-server](https://github.com/bg1avd/mcp-search-server)** ——
+> 零依赖、独立部署，DuckDuckGo 抓取解析，带 **API key 鉴权**，走 **streamable HTTP**。
+
+它建议架在外网节点（VPS / Cloudflare 域名 / Nginx 反代），cc-node 侧仅需配一项即可连：
+
+```jsonc
+// .claude-code/config.json
+{
+  "mcp": { "servers": { "search": { "type": "http", "url": "https://…/mcp", "token": "<API key>" } } }
+}
+```
+
+在 cc-node **程序同机**临时冒烟时，也可直接用该仓库的 `serve` 命令在本地起，再用上面的
+HTTP 配置连（无需改任何 cc-node 代码）。详见该仓库 README。
+
 
 [![npm version](https://img.shields.io/npm/v/@raolin2025/claude-code-node.svg)](https://www.npmjs.com/package/@raolin2025/claude-code-node) [![GitHub](https://img.shields.io/badge/GitHub-bg1avd%2Fclaude--code--node-blue)](https://github.com/bg1avd/claude-code-node) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ---
