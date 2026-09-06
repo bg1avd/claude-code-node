@@ -1,5 +1,25 @@
 # CHANGELOG
 
+## v2.9.0
+
+## [2.9.0] - 2026-09-06
+
+### ✨ 新增
+- **MCP 客户端支持远程 HTTP(streamable) 传输**：连接到独立部署的 MCP 服务器（如免 API key 的搜索服务器），无需本地 spawn。
+  - 配置带 `type:'http'` + `url`（或只有 `url` 无 `command`）即自动走 HTTP；`token` 原样作为 `Authorization: Bearer` 透传（鉴权由远端服务器负责）。
+  - 兼容 streamable-http：POST JSON，也能读取 `text/event-stream` 响应。
+- **config 驱动式 MCP 工具接线（B）**：在 `config.json` 的 `mcp.servers` 里声明 MCP 服务器即可，启动时自动连接并把其工具注入运行时工具表，模型可直接调用。
+  - 不配置 `mcp.servers` 完全不生效、不影响既有能力。
+  - 某台 MCP 连不上会告警并跳过，绝不阻塞启动或崩溃；单台连接带超时保护。
+  - 注入的工具以 `<服务器名>:<工具名>` 命名，走常规 `ask` 权限确认流，不绕过安全模型。
+  - 新模块：`src/mcp/loadTools.js`（加载/桥接）、cli 装载逻辑。
+- **文档**：新增「MCP 客户端 / 接入 MCP 服务器」章节（含到哪找 MCP 服务器软件、架设 mcp-search-server、config 接线示例）。
+
+### 🧪 测试
+- 新增 `src/__tests__/mcp-http-transport.integration.test.js`（客户端远程 HTTP：鉴权头透传 / 工具调用 / 401 拒绝）
+- 新增 `src/__tests__/mcp-loadtools.test.js`（config→工具装载、未配置零影响、服务器不可达 best-effort）
+- 原有 git-tool 4 个集成测试用例受其自身 mock 与本地环境未配置 GitHub 依赖影响，与本改动无关，保持现状
+
 ## v2.8.29
 
 ## [2.8.29] - 2026-09-02
