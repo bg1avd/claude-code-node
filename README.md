@@ -423,65 +423,86 @@ cc-node --api-base http://localhost:11434/v1
 [![npm version](https://img.shields.io/npm/v/@raolin2025/claude-code-node.svg)](https://www.npmjs.com/package/@raolin2025/claude-code-node) [![GitHub](https://img.shields.io/badge/GitHub-bg1avd%2Fclaude--code--node-blue)](https://github.com/bg1avd/claude-code-node) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ---
 
-## 🔌 MCP 客户端
+## 🔌 MCP 客户端 / 接入 MCP 服务器
 
-通过 Model Context Protocol 连接外部工具服务器（支持 **stdio** 与 **远程 HTTP** 两种传输）。
+cc-node 可作为 **MCP 客户端**，通过 Model Context Protocol 连接外部 MCP 服务器，把它们暴露的**工具接入运行时工具表**，让模型可直接调用。支持 **stdio** 与 **远程 HTTP(streamable)** 两种传输。
 
-### 本地 stdio（spawn 子进程）
+### 快速上手：在配置里声明即可用
 
-```javascript
-import { MCPRegistry } from './src/mcp/index.js'
-
-const registry = new MCPRegistry()
-registry.register('my-server', {
-  command: 'npx',          // 受信任的启动命令（npx / uvx / mcp- 前缀）
-  args: ['my-mcp-server'],
-  env: { API_KEY: 'xxx' }
-})
-
-await registry.connectAll()
-const tools = registry.getAllTools()   // [{name, description, inputSchema, _mcpServer}]
-```
-
-### 远程 HTTP（连接独立部署的服务器）
-
-> 适用于"内网 cc-node + 外网搜索/工具节点"的跳板：外网起服务器，
-> 经 Cloudflare 域名 / Nginx 反代对内提供，客户端**仅需一行配置即可连接**。
-> 无需本地进程、不依赖命令白名单，天然契合跨网通信。
-
-```javascript
-registry.register('search', {
-  type: 'http',                                   // 或直接给 url 且不配 command
-  url: 'https://your-domain.example.com/mcp',     // streamable-HTTP 端点
-  token: 'your-secret',                            // Bearer 鉴权（推荐 + 服务器端开启）
-  timeoutMs: 30000,
-})
-await registry.connectAll()
-const res = await registry.callTool('search', 'search', { query: '天气预报', count: 5 })
-// res.content[0].text → 结果纯文本
-```
-
-`MCPClient` 会自动识别：配置带 `command` → stdio；带 `type:'http'`/`url` 且无 `command` → 走 HTTP。
-
-### 配套的开源搜索服务器（独立仓库）
-
-cc-node 只负责"作为 MCP 客户端去连接"，**不内置服务器实现**。
-配套的免搜索引擎 API Key 的搜索服务器是一个独立项目：
-
-> **[mcp-search-server](https://github.com/bg1avd/mcp-search-server)** ——
-> 零依赖、独立部署，DuckDuckGo 抓取解析，带 **API key 鉴权**，走 **streamable HTTP**。
-
-它建议架在外网节点（VPS / Cloudflare 域名 / Nginx 反代），cc-node 侧仅需配一项即可连：
+在 `.claude-code/config.json` 加一段 `mcp.servers`，**无需改任何代码**，cc-node 启动时自动连接并把工具注入工具表；不配置就完全不生效：
 
 ```jsonc
-// .claude-code/config.json
 {
-  "mcp": { "servers": { "search": { "type": "http", "url": "https://…/mcp", "token": "<API key>" } } }
+  "mcp": {
+    "servers": {
+      "search": {                 // 任意名字，会变成工具前缀 "search:search"
+        "type": "http",           // 远程 HTTP(streamable) 传输
+        "url": "https://search.example.com/mcp",
+        "token": "你的 API key"    // 作为 Authorization: Bearer 原样透传
+      }
+      // 例如要接 stdio 本地 MCP：
+      // "fs": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem"], "env": {} }
+    }
+  }
 }
 ```
 
-在 cc-node **程序同机**临时冒烟时，也可直接用该仓库的 `serve` 命令在本地起，再用上面的
-HTTP 配置连（无需改任何 cc-node 代码）。详见该仓库 README。
+启动后运行 `/tools` 即可看到来自 MCP 的工具（命名 `<服务器名>:<工具名>`，如 `search:search`）。
+工具仍走常规 `ask` 权限确认流，不会绕过安全模型。某个 MCP 连不上时会告警跳过，**绝不阻塞启动或崩溃**。
+
+### 到哪里去找 MCP 服务器软件
+
+先确认你想要的"工具"，再到官方/社区仓库搜对应 MCP：
+
+- **MCP 官方汇总**：<https://modelcontextprotocol.io> — 协议规范 + 官方参考实现
+- **官方/精选 MCP 服务器列表**
+  `Awesome MCP Servers`（GitHub）：<https://github.com/punkpeye/awesome-mcp-servers> —
+  收录了大量现成 server：filesystem、github、postgres、fetch、slack、memory 等
+- **npm 搜包**：多数用 `npx <pkg>` 即可启动 → `npm search mcp`，或查官方 registry。
+  常见的现成 MCP（`npx`/stdio 直接可用）：
+  - 文件系统 `@modelcontextprotocol/server-filesystem`
+  - Git `@modelcontextprotocol/server-github`（需 token）
+  - 搜索类也有多个社区实现，但多数要自己的 API key
+- 若要**免 API key 的网页搜索**：见下方"配套搜索服务器"，两行命令即可自建。
+
+### 配套的搜索服务器 mcp-search-server（免搜索引擎 API key，独立仓库）
+
+搜索类 MCP 服务器**常用但多数要 API key**。你要是也想要"零搜索成本、能放外网搜索节点上"的，
+本生态配套一个独立仓库：
+
+> **[mcp-search-server](https://github.com/bg1avd/mcp-search-server)** —— 零依赖、独立部署、
+> 带 **API key 鉴权**、**streamable HTTP**。搜索后端默认接**自建 SearXNG**（聚合并回退 Bing），规避
+> 数据中心 IP 被单引擎验证码封禁的问题（见该仓库 README 的实测与路由说明）。
+
+建议架构：**SearXNG(独自/容器) ← mcp-search-server(负责鉴权+对 cc-node) ← cc-node(客户端)**。
+
+```bash
+# 0) (可选) 先起一个 SearXNG 当搜索后端 —— 或让 mcp-search-server 自动回退到 Bing
+#推荐 docker 跑 SearXNG，再让 mcp-search-server 指过去。
+docker run -d --name searxng -p 127.0.0.1:8809:8080 searxng/searxng:latest
+
+# 1) 生成 API key（明文只打印一次，落盘只存 sha256 摘要）
+cd mcp-search-server && node src/cli.js keygen --file ./apikeys.json
+
+# 2) 启动服务器（指向 SearXNG + 用刚生成的 key）
+node src/cli.js serve --port 7397 --host 0.0.0.0 \
+     --searxng-url http://127.0.0.1:8809 \
+     --api-keys-file ./apikeys.json
+```
+
+然后 cc-node 的 `mcp.servers` 指向 `http://<服务器>:7397/mcp`，token 填第 1 步打印的 key 即可。
+完整架设步骤、Cloudflare/Nginx 反代、搜到的实际效果见该仓库 README。
+
+### 程序化接入（进阶）
+
+若不通过 config、希望代码里动态装工具，可用：
+
+```javascript
+import { loadMcpToolsFromConfig } from './src/mcp/loadTools.js'
+const { tools, registry } = await loadMcpToolsFromConfig(config)  // tools: ToolDef[]
+for (const t of tools) registryOfAgent.register(t)                 // 并入你的 ToolRegistry
+```
+
 
 
 [![npm version](https://img.shields.io/npm/v/@raolin2025/claude-code-node.svg)](https://www.npmjs.com/package/@raolin2025/claude-code-node) [![GitHub](https://img.shields.io/badge/GitHub-bg1avd%2Fclaude--code--node-blue)](https://github.com/bg1avd/claude-code-node) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
