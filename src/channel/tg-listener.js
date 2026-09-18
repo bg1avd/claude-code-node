@@ -353,6 +353,7 @@ export class TelegramListener {
         { command: 'channel', description: '🔔 管理通知通道' },
         { command: 'cd', description: '📁 切换工作目录' },
         { command: 'tools', description: '🛠️ 列出可用工具' },
+        { command: 'dream', description: '💭 查看/检索梦境记忆（/dream <方向>，/dream clear）' },
         { command: 'stop', description: '⏹️ 停止当前 AI 任务' },
         { command: 'allow', description: '🔓 工具权限管理' },
       ])
