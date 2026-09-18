@@ -6,13 +6,13 @@
  * - 版本增量逻辑（bumpVersion，临时目录）
  * - manualPublishDirect 的版本冲突检测（mock fetch）
  */
-import { test, describe, mock, after } from 'node:test'
+import { test, describe, mock, after, beforeEach } from 'node:test'
 import assert from 'node:assert'
 import { mkdtempSync, writeFileSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 
-import { npmPublishTool, parsePackJson } from '../tools/npm-publish.js'
+import { npmPublishTool, parsePackJson, pickTgzForVersion } from '../tools/npm-publish.js'
 
 describe('NpmPublish 工具结构', () => {
   test('工具元数据正确', () => {
@@ -103,5 +103,37 @@ describe('manualPublishDirect 版本冲突检测', () => {
     } finally {
       global.fetch = origFetch
     }
+  })
+})
+
+describe('pickTgzForVersion 版本追踪选择', () => {
+  let tmp
+  after(() => { if (tmp) rmSync(tmp, { recursive: true, force: true }) })
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), 'npp-pick-'))
+  })
+
+  test('历史残留多个版本时，精确选中与 package.json 一致的 tgz', () => {
+    writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: '@raolin2025/claude-code-node', version: '2.9.1' }))
+    // 残留旧的 / 别的版本（模拟目录里 2.9.0.tgz 更"新"，旧逻辑会误选它）
+    writeFileSync(join(tmp, 'raolin2025-claude-code-node-2.9.0.tgz'), Buffer.from('old'))
+    writeFileSync(join(tmp, 'raolin2025-claude-code-node-2.9.1.tgz'), Buffer.from('current'))
+    writeFileSync(join(tmp, 'raolin2025-claude-code-node-2.9.2.tgz'), Buffer.from('newer'))
+    const picked = pickTgzForVersion(tmp)
+    assert.ok(picked.endsWith('raolin2025-claude-code-node-2.9.1.tgz'), `应选中 2.9.1，实际 ${picked}`)
+  })
+
+  test('scoped 包名映射为文件名前缀（去@、斜杠转杠）', () => {
+    writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: '@sc/foo-bar', version: '3.0.0' }))
+    writeFileSync(join(tmp, 'sc-foo-bar-3.0.0.tgz'), Buffer.from('x'))
+    const picked = pickTgzForVersion(tmp)
+    assert.ok(picked.endsWith('sc-foo-bar-3.0.0.tgz'))
+  })
+
+  test('无匹配版本时报错并提示先 pack', () => {
+    writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: '@raolin2025/claude-code-node', version: '9.9.9' }))
+    writeFileSync(join(tmp, 'claude-code-node-2.9.1.tgz'), Buffer.from('stale'))
+    assert.throws(() => pickTgzForVersion(tmp), /先执行 NpmPublish pack/)
   })
 })

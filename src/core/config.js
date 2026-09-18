@@ -21,6 +21,17 @@ const DEFAULTS = {
   verbose: false,
   apiKey: '',
   sessionsDir: '.claude-code/sessions',
+  dreamsDir: '.claude-code/dreams',
+  dreamWakeRecent: 3,
+  dream: {
+    maxRetain: 50,
+    minLLMMessages: 8, // 会话达到此消息数才调用本地摘要模型（省成本）
+    // 本地小模型摘要（可选）：配置后入睡时用该模型把会话整理成"按方向分类"的总结，
+    // 不占用付费/云端主模型 token。示例：
+    // { "apiBase": "http://127.0.0.1:11434/v1", "model": "qwen2.5:7b", "apiKey": "" }
+    // 未配置时自动降级为纯本地启发式摘要（离线可用）。
+    summarizer: null,
+  },
   tools: {
     bash: { timeout: 120, allowed: true },
     fileRead: { maxLines: 2000, maxSizeKB: 256 },

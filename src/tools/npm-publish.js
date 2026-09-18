@@ -13,7 +13,7 @@
  * - manual-publish  仅 npm 发布（bypass token 手动 PUT 兜底）
  */
 import { execSync } from 'child_process'
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'fs'
 import { createHash } from 'crypto'
 import { join } from 'path'
 import { ToolDef } from '../types/index.js'
@@ -238,6 +238,33 @@ async function pack(cwd) {
   return `打包完成: ${filename}\n版本: ${pkg.version}`
 }
 
+/**
+ * 按 package.json 当前版本挑选应发布的 tarball。
+ * 替代旧的 `ls -t *.tgz | head -1`（盲目取"最近修改"文件，历史残留包会选错版本）。
+ *
+ * 精确校验 tgz 名里的版本与 package.json 一致，避免拿旧包配新版本号导致
+ * registry 报 "version should match X from package.json in packaged tarball"。
+ *
+ * @param {string} cwd 项目根目录
+ * @returns {string} tarball 绝对路径
+ * @throws 未找到与当前版本匹配的 tarball 时报错（提示先 pack）
+ */
+export function pickTgzForVersion(cwd) {
+  const pkg = readPackage(cwd)
+  const pkgName = pkg.name.replace(/^@/, '').replace(/\//g, '-') // @scope/pkg → scope-pkg
+  const prefix = `${pkgName}-`
+  const suffix = `-${pkg.version}.tgz`
+  let files = []
+  try { files = readdirSync(cwd) } catch { /* 目录不可读等 */ }
+  const hit = files.find(f => f.startsWith(prefix) && f.endsWith(suffix) && f.endsWith('.tgz'))
+  if (hit) return join(cwd, hit)
+  // 给出来预期文件名，便于用户按需 pack 生成正确包
+  throw new Error(
+    `未找到与 package.json 版本(${pkg.version})匹配的 tarball（期望前缀 ${prefix}、后缀 ${suffix}）。` +
+    `请先执行 NpmPublish pack 生成正确版本的 tarball，再执行 manual-publish。`
+  )
+}
+
 /** publish: 完整发布流程 */
 async function doPublish({ cwd, version, commitMessage, squash, doGitPush, doNpmPublish, changelog }) {
   const steps = []
@@ -361,10 +388,13 @@ async function handler(input) {
       case 'manual-publish': {
         const token = getNpmToken()
         if (!token) return '错误: 未找到 ~/.npmrc 的 _authToken'
-        // 找最新的 tgz
-        const tgz = sh('ls -t *.tgz 2>/dev/null | head -1', cwd)
-        if (!tgz) return '错误: 目录下没有 .tgz 文件，请先执行 pack'
-        const tarballPath = join(cwd, tgz)
+        // 按 package.json 版本精确挑选 tgz（而非盲目取 ls -t 最新文件）
+        let tarballPath
+        try {
+          tarballPath = pickTgzForVersion(cwd)
+        } catch (e) {
+          return `❌ 发布失败: ${e.message}`
+        }
         const r = await manualPublishDirect(cwd, tarballPath, token)
         return r.ok ? `✅ 发布成功 (${r.status})\n${r.body}` : `❌ 发布失败: ${r.error || r.body}`
       }

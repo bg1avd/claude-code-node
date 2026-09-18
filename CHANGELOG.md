@@ -1,6 +1,27 @@
 # CHANGELOG
 
-## v2.9.1
+## v3.0.0
+
+## [3.0.0] - 2026-09-18
+
+### ✨ 新增：梦境 (Dream) — 跨会话长期记忆（大版本核心功能）
+
+让 cc-node 在"用户只在需要编程时打开"的使用场景下，记住上次未完成的工作，并在第二天无缝续作。核心循环：
+
+- **入睡（关闭时沉淀）**：`/exit` 或一次性任务完成时，把本次会话沉淀为一条梦境记录（`.claude-code/dreams/dream-*.json`）。摘要来源优先级：
+  1. **专用本地摘要模型**（`dream.summarizer`，可选，不占用主模型 token）
+  2. **当时正在用的主模型**（正常退出时用当前 AI 做总结，`allowRemote=true` 放行云端）
+  3. **纯本地规则**（都不可用时，仍提炼主线 + 涉及文件 + 下一步，保证能续作）
+- **醒来（启动时想起）**：下次打开时按**重要度**注入记忆（未完成任务优先、持续关注加权、最近更新），生成**续作指令**（含明确下一步 + 涉及文件），让 AI 直接接续昨天的编程工作。
+- **工作现场快照**：`extractWorkspace` 从工具调用（Read/Edit/Write/Bash）和文本提取会话**涉及的文件**，让记忆不只是"做了什么"而是"改的是哪些文件"。
+- **方向分类摘要 + 按方向检索**：`/dream <方向>` 检索该方向历史；`/dream` 无参列出全部；`/dream clear` 清空。
+- **去重合并**：同方向的多次会话自动合并（保留演进，`next_steps` 用最新、`merge_count` 记录持续关注）。
+- **记忆保鲜度**：`wake` 按重要度打分（未完成任务优先、合并次数加权、最近更新加权）。
+- **安全**：`sanitizeSecrets` 对梦境文本脱敏（API key/token/密码/私钥/Bearer）；目录 `0700`、文件 `0600`；专用摘要模型仅允许本地/内网；`_truncateDream` 限制单条长度；超过 `maxRetain`（50）自动归档。
+- 新模块 `src/core/dream.js`（`DreamManager` / `dreamFromMessages` / `renderDreamContext` / `llmSummarizeDirections` / `wakeByDirection` / `sanitizeSecrets` / `extractWorkspace` / `renderResumeInstruction`），cli 启动/退出接线。
+
+### 🧪 测试
+- 新增 `src/__tests__/dream.test.js`（27 个用例：提炼/门槛/存储权限/归档/LLM 摘要/成本控制/去重合并/检索质量/记忆保鲜度/现场快照/续作指令/主模型摘要/无 LLM 续作/脱敏），全部通过。
 
 ## [2.9.1] - 2026-09-06
 

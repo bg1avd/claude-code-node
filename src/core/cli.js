@@ -29,6 +29,7 @@ import { isLocalLlmServer } from '../utils/index.js'
 import { SOCK_DIR, SOCK_PATH, CC_NODE_PID } from './paths.js'
 import { renderHeadpiece } from './headpiece.js'
 import { TelegramListener } from '../channel/tg-listener.js'
+import { DreamManager } from './dream.js'
 import { fetchViaSocks5 } from '../channel/tg-proxy.js'
 
 // ============================================================
@@ -275,6 +276,7 @@ Commands:
   /allow reset — reset to ask mode
   /allow <tool> — allow specific tool (e.g. Bash)
   /resume <session-id> — Resume a saved conversation
+  /dream [方向]       — 检索过往会话记忆（梦境）。无参列出全部，带方向按方向检索
   /exit          — Exit (also Ctrl+C)
   /quit          — Same as /exit
 
@@ -420,6 +422,23 @@ Unix Socket (for cc-notify):
 // 主入口
 // ============================================================
 
+/**
+ * 从当前引擎构建"主模型摘要器"（正常退出时用正在用的 AI 做梦境总结）。
+ * 返回 null 表示无法用主模型做摘要（如无 apiBase/model）。
+ * @param {object} engine — QueryEngine 实例
+ * @param {string} fallbackApiKey — 兜底的 apiKey（构造期已解析的）
+ */
+function buildMainSummarizer(engine, fallbackApiKey) {
+  const cfg = engine?.config
+  if (!cfg) return null
+  const apiBase = cfg.apiBase || ''
+  const model = cfg.model || ''
+  if (!apiBase || !model) return null
+  const apiKey = cfg.apiKey || fallbackApiKey || ''
+  // 主模型可能是云端（如 deepseek），摘要时显式放行（allowRemote=true）
+  return { apiBase, model, apiKey, timeoutMs: 60_000 }
+}
+
 export async function main() {
   const cliArgs = parseArgs(process.argv)
 
@@ -494,7 +513,38 @@ export async function main() {
     model = 'deepseek-chat'  // 无 apiBase 也无 model → DeepSeek 默认
   }
   const DEFAULT_SYSTEM_PROMPT = `You are cc-node, an AI coding assistant. Configuration files: user-level ~/.claude-code/config.json, project-level .claude-code/config.json (in project root). Runtime files (pid/socket): ~/.cc-node/. Never reference settings.json or .claude.json — those paths do not exist.`
-const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
+
+  // 梦境 (Dream)：跨会话长期记忆。
+  // 醒来 — 启动时读入最近几条过往会话的记忆（未完成任务/决策/技术栈约定），
+  // 注入系统提示，让 AI 自动"想起"上次做到哪。无梦境或读取失败则静默跳过。
+  // 支持配置本地小模型（config.dream.summarizer）做方向分类摘要，不占用主模型。
+  const dreamConfig = config.get('dream') || {}
+  const dreamManager = new DreamManager({
+    dreamsDir: config.get('dreamsDir'),
+    maxRetain: dreamConfig.maxRetain,
+    minLLMMessages: dreamConfig.minLLMMessages,
+    summarizer: dreamConfig.summarizer || null,
+    verbose,
+  })
+  let dreamContext = ''
+  let dreamLoaded = 0            // 本次启动加载的梦境条数
+  let dreamUnfinished = 0        // 其中含"未完成任务"的条数
+  try {
+    const wakeRecent = config.get('dreamWakeRecent') || 3
+    // 先读结构化信息，供启动时显示一行简洁的"醒来"提示
+    const recentDreams = await dreamManager.list()
+    if (recentDreams.length > 0) {
+      const picked = recentDreams.slice(0, wakeRecent)
+      dreamLoaded = picked.length
+      dreamUnfinished = picked.filter(d => d.has_unfinished).length
+    }
+    dreamContext = (await dreamManager.wake(wakeRecent)) || ''
+  } catch { /* 梦境读取失败不阻塞启动 */ }
+
+  let systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
+  if (dreamContext) {
+    systemPrompt = `${systemPrompt}\n\n${dreamContext}`
+  }
   const permissionMode = cliArgs.permissionMode || config.get('permissionMode')
   const maxTurns = cliArgs.maxTurns || config.get('maxTurns')
   let apiKey = cliArgs.apiKey || config.get('apiKey') || ''
@@ -624,6 +674,15 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
         result: result.response.slice(0, 200),
       }).catch(() => {})
     }
+    // 梦境 — 入睡：一次性任务完成即沉淀为梦境记录。
+    // 正常退出时用当前正在用的 AI（主模型）做总结摘要。
+    try {
+      await dreamManager.sleep(
+        session?.messages || [],
+        { title: session?.title, turnCount: engine.state?.turnCount },
+        { mainSummarizer: buildMainSummarizer(engine, apiKey) },
+      )
+    } catch { /* 入睡失败不影响退出 */ }
     process.exit(0)
   }
 
@@ -1005,6 +1064,46 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
           console.log(`\n💡 Tip: Use /sessions to list, /resume <id> to switch.`)
           break
         }
+        case 'dream': {
+          // 梦境 — 按方向检索过往记忆。/dream 无参 → 列出全部；/dream <方向> → 检索；/dream clear → 清空
+          try {
+            if (rest.length > 0 && rest[0] === 'clear') {
+              const n = await dreamManager.clear()
+              console.log(n > 0 ? `🗑️  已清空 ${n} 条梦境记录。` : '💭 当前没有梦境记录可清空。')
+              break
+            }
+            if (rest.length === 0) {
+              const all = await dreamManager.list()
+              if (all.length === 0) {
+                console.log('💭 还没有梦境记录。每次退出时会把本次会话沉淀为梦境，下次启动自动想起。')
+              } else {
+                console.log(`💭 共 ${all.length} 条梦境记录（显示最近 ${Math.min(all.length, 10)} 条，更新排序）：`)
+                for (const d of all.slice(0, 10)) {
+                  const date = (d.created || '').slice(0, 16).replace('T', ' ')
+                  const dirs = (d.directions?.length
+                    ? d.directions.map(x => `「${x.name}」`).join(' ')
+                    : (d.main_goal || '无标题'))
+                  const flag = d.has_unfinished ? ' ⏳未完成' : ''
+                  const proj = d.project ? ` [${d.project}]` : ''
+                  const merged = d.merge_count > 1 ? ` (合并×${d.merge_count})` : ''
+                  console.log(`  · ${date}${proj}${flag}${merged}\n    ${dirs}`)
+                }
+                console.log('\n  提示：/dream <方向> 检索该方向的记忆（如 /dream http 客户端）· /dream clear 清空')
+              }
+            } else {
+              const query = rest.join(' ')
+              const ctx = await dreamManager.wakeByDirection(query)
+              if (!ctx) {
+                console.log(`💭 未找到与「${query}」相关的过往记忆。可先 /dream 查看现有方向。`)
+              } else {
+                console.log(ctx)
+              }
+            }
+          } catch (e) {
+            console.log(`❌ 梦境检索失败：${e.message}`)
+          }
+          break
+        }
         case 'sessions': {
           const sessions = await sessionManager.list()
           if (sessions.length === 0) console.log('No sessions found')
@@ -1130,6 +1229,23 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
           if (tgListener?.bot) {
             try { await tgListener.flushOffset() } catch {}
           }
+          // 梦境 — 入睡：把本次会话沉淀为一条梦境记录，供下次启动时"想起"。
+          // 发生在边界时刻（退出）。正常退出时用当前正在用的 AI（主模型）做总结摘要，
+          // 因此这里把主模型信息（engine.config）作为 mainSummarizer 传入。
+          try {
+            const dream = await dreamManager.sleep(
+              session?.messages || engine.state.messages || [],
+              { title: session?.title, turnCount: engine.state?.turnCount },
+              { mainSummarizer: buildMainSummarizer(engine, apiKey) },
+            )
+            if (dream) {
+              const dirs = (dream.directions?.length
+                ? dream.directions.map(x => `「${x.name}」`).join(' ')
+                : (dream.main_goal ? `「${dream.main_goal.slice(0, 20)}」` : ''))
+              const unfinished = dream.has_unfinished ? '，含未完成任务' : ''
+              console.log(`💭 本次会话已沉淀为梦境${dirs ? `（${dirs}）` : ''}${unfinished}，下次启动会自动想起。`)
+            }
+          } catch { /* 入睡失败不影响退出 */ }
           console.log('Goodbye!')
           process.exit(0)
         }
@@ -1485,6 +1601,11 @@ const systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
     const chList = channelManager.list().join(', ')
     const def = channelManager.defaultChannel ? ` (default: ${channelManager.defaultChannel})` : ''
     console.log(`Channels: ${chList}${def}`)
+  }
+  // 梦境 — 醒来提示：启动加载了过往记忆时，用一行简洁提示让用户感知。
+  if (dreamLoaded > 0) {
+    const unfinished = dreamUnfinished > 0 ? `，${dreamUnfinished} 条含未完成任务` : ''
+    console.log(`💭 已从 ${dreamLoaded} 条过往梦境记忆中醒来${unfinished}。输入 /dream 查看，/dream <方向> 检索特定方向。`)
   }
   console.log()
   // 显示初始提示符
