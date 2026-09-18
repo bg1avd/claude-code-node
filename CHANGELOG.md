@@ -4,6 +4,9 @@
 
 ## [3.0.0] - 2026-09-18
 
+### 🐛 修复
+- **启动崩溃 `Fatal error: Cannot access 'verbose' before initialization`**：v3.0.0 接入梦境功能时，`main()` 中 Dream 块使用 `verbose` 传入 `DreamManager`，但 `const verbose` 声明在更靠后的位置（TDZ），导致所有配置下启动即崩溃。修复：将 `verbose` 声明提前到 Dream 块之前（首个使用点之前）。
+
 ### ✨ 新增：梦境 (Dream) — 跨会话长期记忆（大版本核心功能）
 
 让 cc-node 在"用户只在需要编程时打开"的使用场景下，记住上次未完成的工作，并在第二天无缝续作。核心循环：

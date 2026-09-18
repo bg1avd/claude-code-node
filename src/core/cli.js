@@ -513,6 +513,7 @@ export async function main() {
     model = 'deepseek-chat'  // 无 apiBase 也无 model → DeepSeek 默认
   }
   const DEFAULT_SYSTEM_PROMPT = `You are cc-node, an AI coding assistant. Configuration files: user-level ~/.claude-code/config.json, project-level .claude-code/config.json (in project root). Runtime files (pid/socket): ~/.cc-node/. Never reference settings.json or .claude.json — those paths do not exist.`
+  const verbose = cliArgs.verbose || config.get('verbose')
 
   // 梦境 (Dream)：跨会话长期记忆。
   // 醒来 — 启动时读入最近几条过往会话的记忆（未完成任务/决策/技术栈约定），
@@ -548,7 +549,6 @@ export async function main() {
   const permissionMode = cliArgs.permissionMode || config.get('permissionMode')
   const maxTurns = cliArgs.maxTurns || config.get('maxTurns')
   let apiKey = cliArgs.apiKey || config.get('apiKey') || ''
-  const verbose = cliArgs.verbose || config.get('verbose')
 
   const registry = createDefaultRegistry()
   const sessionManager = new SessionManager({ sessionsDir: config.get('sessionsDir') })
