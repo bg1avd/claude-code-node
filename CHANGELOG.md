@@ -1,5 +1,14 @@
 # CHANGELOG
 
+## v3.0.2
+
+## 3.0.2
+
+- fix(cli): 修复 v3.0.0 启动崩溃 — `verbose` 在 Dream 块 / MCP 接线使用之后才声明（TDZ 暂时性死区），现提前到首个使用点之前 (819fda8)
+- fix(tg): Telegram 机器人命令菜单注册 `/dream` 指令 (672adc9)
+- note: 3.0.1 在 npm 侧卡在 staged 状态无法上线，版本号跳过（同 2.6.0 先例）
+
+
 ## v3.0.1
 
 ## 3.0.1
