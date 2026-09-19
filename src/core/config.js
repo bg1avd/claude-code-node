@@ -77,17 +77,19 @@ export class Config {
     this.data = { ...DEFAULTS }
     this._projectPath = null
     this._userPath = USER_CONFIG_FILE
+    // 顶层键来源追踪: 'user' | 'project' — 用于诊断"配置值到底来自哪个文件"
+    this._keySources = {}
   }
 
   /** 从项目目录加载配置 */
   async loadFromProject(projectDir) {
     this._projectPath = join(projectDir, PROJECT_CONFIG_FILE)
-    await this._load(this._projectPath)
+    await this._load(this._projectPath, 'project')
   }
 
   /** 从用户目录加载配置 */
   async loadFromUser() {
-    await this._load(this._userPath)
+    await this._load(this._userPath, 'user')
   }
 
   /** 完整加载流程：用户级 → 项目级（项目级覆盖用户级） */
@@ -96,10 +98,45 @@ export class Config {
     if (projectDir) await this.loadFromProject(projectDir)
   }
 
-  async _load(filePath) {
+  /** 查询顶层键来自哪个配置源: 'user' | 'project' | null(内置默认) */
+  keySource(key) {
+    return this._keySources[key.split('.')[0]] || null
+  }
+
+  /**
+   * 一次性迁移：把配置文件里残留的旧模型名 deepseek-chat 自动改名为 deepseek-flash。
+   * 背景: 旧版 /window 曾把当时默认值 model:'deepseek-chat' 全量快照固化进配置文件，
+   * 导致升级后新默认值永远不生效。DeepSeek 官方已由 V4.1 Flash 接管 deepseek-chat，
+   * 改名即可无缝迁移，故启动时自动重写磁盘文件并更新内存。
+   * 仅在 apiBase 指向 DeepSeek 官方时执行，避免误改第三方代理下的同名模型。
+   * @returns {boolean} 是否发生了迁移
+   */
+  async migrateLegacyModelName(oldName = 'deepseek-chat', newName = 'deepseek-flash') {
+    if (this.get('model') !== oldName) return false
+    const apiBase = String(this.get('apiBase') || DEFAULTS.apiBase || '')
+    if (!apiBase.includes('api.deepseek.com')) return false
+    for (const p of [this._projectPath, this._userPath]) {
+      if (!p) continue
+      try {
+        const disk = JSON.parse(await readFile(p, 'utf8'))
+        if (disk && typeof disk === 'object' && disk.model === oldName) {
+          disk.model = newName
+          await writeFile(p, JSON.stringify(disk, null, 2), 'utf-8')
+          console.log(`🔄 已自动迁移 ${p}: model ${oldName} → ${newName}（deepseek-chat 已由 Flash 接管）`)
+        }
+      } catch { /* 文件不存在或不可写 — 跳过 */ }
+    }
+    this.set('model', newName)
+    return true
+  }
+
+  async _load(filePath, level) {
     try {
       const raw = await readFile(filePath, 'utf-8')
       const data = JSON.parse(raw)
+      if (level && data && typeof data === 'object' && !Array.isArray(data)) {
+        for (const k of Object.keys(data)) this._keySources[k] = level
+      }
       this.data = this._deepMerge(this.data, data)
     } catch {
       // 文件不存在或不合法 — 使用默认值

@@ -453,6 +453,8 @@ export async function main() {
 
   const config = new Config()
   await config.load(process.cwd())
+  // 一次性迁移旧模型名（deepseek-chat → deepseek-flash），修复旧版快照固化导致的"升级后 banner 仍是旧模型"
+  try { await config.migrateLegacyModelName() } catch { /* 迁移失败不阻塞启动 */ }
 
   let apiBase = cliArgs.apiBase || config.get('apiBase') || process.env.LLM_API_BASE || ''
   // apiBase 指向自建本地服务（Ollama / llama.cpp / vLLM 等）时允许缺省 apiKey
