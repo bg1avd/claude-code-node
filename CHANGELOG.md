@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## v3.0.4
+
+## 3.0.4
+
+- feat(config): 新增顶层 `systemPrompt` 配置键（整体替换内置默认系统提示词，优先级 `-s` > config > 默认）
+- feat(config): `preferences.*` 字符串键值自动注入为 `[用户偏好]` 补充系统提示 —— 修复个人偏好配置从未被读取的问题（之前在代码中零引用）
+
+
 ## 3.0.3
 
 - fix(cli): 修复 v3.0.0 启动崩溃 — `verbose` 在 Dream 块 / MCP 接线使用之后才声明（TDZ 暂时性死区），现提前到首个使用点之前 (819fda8)
