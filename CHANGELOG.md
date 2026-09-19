@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## v3.0.6
+
+## 3.0.6
+
+- fix(config): `/window` 持久化改用新增的 `Config.saveKeyToUser()`，只写目标键、不再全量快照 —— 修复升级后 banner 模型名不更新（旧版 `/window` 曾把当时默认值 `model: "deepseek-chat"` 固化进用户级配置，覆盖新默认）
+- 提示：受影响用户请编辑 `~/.claude-code/config.json`（Windows 为 `%USERPROFILE%\.claude-code\config.json`），删除或修改其中的 `"model"` 行
+
+
 ## v3.0.5
 
 ## 3.0.5
