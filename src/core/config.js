@@ -32,6 +32,9 @@ async function atomicWriteFile(filePath, content) {
 const DEFAULTS = {
   model: 'deepseek-flash',
   apiBase: 'https://api.deepseek.com/v1',
+  // Telegram 提示语言：'zh'/'中文' 等含中文标识 → 中文；
+  // 留空则自动（TG 消息 from.language_code 是 zh → 中文，否则英文）
+  language: '',
   maxTurns: 100,
   maxBudgetTokens: 1_000_000,
   permissionMode: 'ask',

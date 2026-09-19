@@ -30,6 +30,7 @@ import { SOCK_DIR, SOCK_PATH, CC_NODE_PID } from './paths.js'
 import { renderHeadpiece } from './headpiece.js'
 import { TelegramListener } from '../channel/tg-listener.js'
 import { DreamManager } from './dream.js'
+import { setConfigLanguage, setLanguage, detectLanguage, t } from './i18n.js'
 import { fetchViaSocks5 } from '../channel/tg-proxy.js'
 
 // ============================================================
@@ -518,6 +519,11 @@ export async function main() {
   const DEFAULT_SYSTEM_PROMPT = `You are cc-node, an AI coding assistant. Configuration files: user-level ~/.claude-code/config.json, project-level .claude-code/config.json (in project root). Runtime files (pid/socket): ~/.cc-node/. Never reference settings.json or .claude.json — those paths do not exist.`
   const verbose = cliArgs.verbose || config.get('verbose')
 
+  // TG 提示语言基准：config.language 有中文标识（zh/中文/chinese/cn）→ 中文；
+  // 留空则每条 Telegram 消息按 from.language_code 自动判定（任一有中文 → 中文）。
+  setConfigLanguage(config.get('language') || '')
+  setLanguage(detectLanguage({ configLang: config.get('language') || '' }))
+
   // 梦境 (Dream)：跨会话长期记忆。
   // 醒来 — 启动时读入最近几条过往会话的记忆（未完成任务/决策/技术栈约定），
   // 注入系统提示，让 AI 自动"想起"上次做到哪。无梦境或读取失败则静默跳过。
@@ -826,7 +832,7 @@ export async function main() {
         // 不是 y/n/a，忽略这次（不打断确认等待），但也可能是误发，继续等待
         pendingConfirm = confirm
         if (tgListener?.bot) {
-          await sendTelegram('⚠️ 请回复 y（允许一次）/ n（拒绝）/ a（本会话全部允许）', tgChatId || null).catch(() => {})
+          await sendTelegram(t('tg.confirm.invalidReply'), tgChatId || null).catch(() => {})
         }
       }
       return
@@ -847,7 +853,7 @@ export async function main() {
         engine.config.model = selected
         console.log(`Model → ${selected}`)
         if (tgListener?.bot) {
-          await sendTelegram(`✅ 已切换模型 → ${selected}`, tgChatId || null).catch(() => {})
+          await sendTelegram(t('tg.model.switched', { model: selected }), tgChatId || null).catch(() => {})
         }
         return
       }
@@ -1288,7 +1294,7 @@ export async function main() {
 
     // 发送到引擎 — 引擎忙（如正在处理上一条消息）时，提示而不是崩溃/吞掉
     if (engine.state.isRunning) {
-      const busyMsg = '⏳ 引擎正在处理其他任务，请稍候或输入 /stop 停止当前任务。'
+      const busyMsg = t('tg.busy')
       console.log(busyMsg)
       if (source === 'telegram' && tgListener?.bot) {
         await sendTelegram(busyMsg, tgChatId || null).catch(() => {})
@@ -1429,7 +1435,7 @@ export async function main() {
     if (!tgListener?.bot || !tgThinking.target || !tgThinking.buffer) return
     tgThinking.flushing = true
     const target = tgThinking.target
-    const body = `🧠 思考中…\n\n${tgThinking.buffer.slice(-3500)}`
+    const body = `${t('tg.thinking')}\n\n${tgThinking.buffer.slice(-3500)}`
     try {
       // 周期性重置：若已有一条消息且距上次重置超过阈值，删除旧消息并发新消息，
       // 让用户每隔几秒看到"🧠 思考中…"重新出现，明确 AI 仍在工作（而非已卡死/完成）。
@@ -1481,7 +1487,7 @@ export async function main() {
 
       // Telegram 远程模式：把权限确认推送到 Telegram，等待远程用户回复 y/n/a
       if (currentSource === 'telegram' && tgListener?.bot) {
-        const promptText = `⚠️  需要工具权限\n工具: ${toolName}\n输入: ${snippet}\n\n请回复：\ny = 允许一次\nn = 拒绝\na = 本会话全部允许`
+        const promptText = t('tg.toolConfirm.prompt', { tool: toolName, snippet })
         await sendTelegram(promptText, null).catch(() => {})
         return new Promise((resolve) => {
           // 60 秒内未回复则自动拒绝，避免远程确认永久挂起阻塞对话
@@ -1519,10 +1525,10 @@ export async function main() {
   // - CLI 本地模式：同步等待本地终端输入。
   engine.config.onAskUser = (question) => {
     if (tgListener?.bot && tgChatId) {
-      const promptText = `❓ ${question}\n\n请直接回复你的回答。`
+      const promptText = t('tg.askUser.prompt', { question })
       sendTelegram(promptText, null).catch(() => {})
       // 立即返回，不挂起；用户回复会在下一轮以正常消息进入
-      return `(已向用户提问，等待回复): ${question}`
+      return t('tg.askUser.waiting', { question })
     }
     // CLI 本地模式：同步等待终端输入
     return askQuestion(`❓ ${question}\n> `)

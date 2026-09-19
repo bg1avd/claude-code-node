@@ -20,6 +20,7 @@
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { join, dirname } from 'path'
+import { t, applyMessageLanguage } from '../core/i18n.js'
 
 const TG_MD_ESCAPE_CHARS = /[_*[\]()~`>#+\-=|{}.!]/g
 const TG_CODE_ESCAPE_CHARS = /[`\\]/g
@@ -329,33 +330,34 @@ export class TelegramListener {
     log(`[TG] Starting long polling...`)
 
     // 设置命令菜单（Telegram 输入框 / 提示，最多 100 个命令）
+    // 语言：启动期无消息上下文，按 config.language 决定（cli.js 启动时已 setLanguage）
     try {
       await this.bot.setMyCommands([
         // —— 系统命令（本进程处理）——
-        { command: 'ping', description: '🏓 检查服务状态' },
-        { command: 'status', description: '📊 查看 cc-node 状态' },
-        { command: 'run', description: '💻 执行 shell 命令（如 /run ls -la）' },
-        { command: 'notify', description: '📢 广播通知消息' },
-        { command: 'cancel', description: '🚫 取消当前操作' },
-        { command: 'help', description: '❓ 查看帮助' },
+        { command: 'ping', description: t('tg.menu.ping') },
+        { command: 'status', description: t('tg.menu.status') },
+        { command: 'run', description: t('tg.menu.run') },
+        { command: 'notify', description: t('tg.menu.notify') },
+        { command: 'cancel', description: t('tg.menu.cancel') },
+        { command: 'help', description: t('tg.menu.help') },
         // —— AI 编程命令（转发给 cc-node）——
-        { command: 'model', description: '🤖 切换模型（如 /model gpt-4o）' },
-        { command: 'models', description: '📋 列出可用模型' },
-        { command: 'window', description: '🧠 查看/设置上下文窗口（如 /window 128k）' },
-        { command: 'budget', description: '💰 查看 token 预算使用' },
-        { command: 'compact', description: '🗜️ 手动压缩上下文' },
-        { command: 'clear', description: '🧹 清空当前对话' },
-        { command: 'session', description: '🗂️ 查看会话信息' },
-        { command: 'sessions', description: '📂 列出所有会话' },
-        { command: 'resume', description: '↩️ 恢复会话（/resume <id>）' },
-        { command: 'config', description: '⚙️ 查看配置（/config model）' },
-        { command: 'cost', description: '💲 查看 API 费用' },
-        { command: 'channel', description: '🔔 管理通知通道' },
-        { command: 'cd', description: '📁 切换工作目录' },
-        { command: 'tools', description: '🛠️ 列出可用工具' },
-        { command: 'dream', description: '💭 查看/检索梦境记忆（/dream <方向>，/dream clear）' },
-        { command: 'stop', description: '⏹️ 停止当前 AI 任务' },
-        { command: 'allow', description: '🔓 工具权限管理' },
+        { command: 'model', description: t('tg.menu.model') },
+        { command: 'models', description: t('tg.menu.models') },
+        { command: 'window', description: t('tg.menu.window') },
+        { command: 'budget', description: t('tg.menu.budget') },
+        { command: 'compact', description: t('tg.menu.compact') },
+        { command: 'clear', description: t('tg.menu.clear') },
+        { command: 'session', description: t('tg.menu.session') },
+        { command: 'sessions', description: t('tg.menu.sessions') },
+        { command: 'resume', description: t('tg.menu.resume') },
+        { command: 'config', description: t('tg.menu.config') },
+        { command: 'cost', description: t('tg.menu.cost') },
+        { command: 'channel', description: t('tg.menu.channel') },
+        { command: 'cd', description: t('tg.menu.cd') },
+        { command: 'tools', description: t('tg.menu.tools') },
+        { command: 'dream', description: t('tg.menu.dream') },
+        { command: 'stop', description: t('tg.menu.stop') },
+        { command: 'allow', description: t('tg.menu.allow') },
       ])
     } catch {}
 
@@ -469,6 +471,9 @@ export class TelegramListener {
   async _handleMessage(msg) {
     const chatId = msg.chat?.id
     if (!chatId) return
+
+    // 语言判定：config.language 有中文标识 OR 该用户 TG 客户端语言是 zh → 中文，否则英文
+    applyMessageLanguage(msg.from?.language_code)
 
     const chatType = msg.chat?.type || 'private' // private, group, supergroup
     const fromName = msg.from?.username || msg.from?.first_name || '?'
@@ -597,17 +602,17 @@ export class TelegramListener {
         const nodeInfo = await this._findCcNode()
         const chNames = Object.keys(this.config.channels || {})
         return [
-          '📊 *cc-notify 状态*',
+          t('tg.status.title'),
           '',
-          `• 运行时间: ${Math.floor(process.uptime())}s`,
-          `• 通道: ${chNames.join(', ') || '无'}`,
-          `• cc-node: ${nodeInfo.running ? '✅ 运行中' : '❌ 未运行'}`,
+          t('tg.status.uptime', { n: Math.floor(process.uptime()) }),
+          t('tg.status.channels', { n: chNames.join(', ') || t('tg.status.none') }),
+          nodeInfo.running ? t('tg.status.nodeRunning') : t('tg.status.nodeStopped'),
           `• PID: ${process.pid}`,
         ].join('\n')
       }
 
       case '/run': {
-        if (!args) return '⚠️ 用法: /run <shell命令>\n例如: /run ls -la\n或者发普通消息让 AI 处理'
+        if (!args) return t('tg.run.usage')
         // 发送 typing 提示
         this.bot.sendChatAction(chatId).catch(() => {})
         // 直接执行命令（不经过 AI）
@@ -616,12 +621,12 @@ export class TelegramListener {
           const output = result.slice(0, 3500)
           return `💻 $ ${escapeMarkdownV2(args)}\n\`\`\`\n${escapeMarkdownV2(output)}\n\`\`\``
         } catch (e) {
-          return `❌ 命令执行失败:\n${escapeMarkdownV2(e.message)}`
+          return t('tg.run.failed', { msg: escapeMarkdownV2(e.message) })
         }
       }
 
       case '/notify': {
-        if (!args) return '⚠️ 用法: /notify <消息内容>'
+        if (!args) return t('tg.notify.usage')
         try {
           const { sendToChannel, ChannelManager } = await import('./index.js')
           const cm = new ChannelManager(this.config.channels || {}, this.config.defaultChannel)
@@ -629,13 +634,13 @@ export class TelegramListener {
           const lines = results.map(r => r.ok ? `✅ ${r.channel}` : `❌ ${r.channel}: ${r.error}`)
           return lines.join('\n')
         } catch (e) {
-          return `❌ 通知失败: ${e.message}`
+          return t('tg.notify.failed', { msg: e.message })
         }
       }
 
       case '/cancel':
         this.conversations.delete(chatId)
-        return '🚫 已取消当前操作'
+        return t('tg.cancel.done')
 
       default:
         // 未知命令 — 当作编程请求发给 cc-node
@@ -643,44 +648,44 @@ export class TelegramListener {
     }
   }
 
-  /** 生成帮助文本（含 cc-notify 系统命令 + cc-node AI 编程命令） */
+  /** 生成帮助文本（含 cc-notify 系统命令 + cc-node AI 编程命令），按当前语言输出 */
   _helpText() {
     return [
       '🤖 *cc-notify — AI Code Agent*',
       '',
-      '通过 Telegram 远程操控 AI 编程助手。',
-      '直接发消息 → AI 处理；发 / 开头命令 → 执行对应操作。',
+      t('tg.help.intro1'),
+      t('tg.help.intro2'),
       '',
-      '*🔧 系统命令*',
-      '• `/ping` — 检查服务状态',
-      '• `/status` — 查看详细状态',
-      '• `/run <cmd>` — 直接执行 shell 命令',
-      '• `/notify <msg>` — 广播通知到所有通道',
-      '• `/cancel` — 取消当前操作',
+      t('tg.help.sysTitle'),
+      t('tg.help.sys.ping'),
+      t('tg.help.sys.status'),
+      t('tg.help.sys.run'),
+      t('tg.help.sys.notify'),
+      t('tg.help.sys.cancel'),
       '',
-      '*🤖 AI 编程命令*（转发给 cc-node 处理）',
-      '• `/model NAME` — 切换模型（如 /model gpt-4o）',
-      '• `/models` — 列出可用模型',
-      '• `/window [N]` — 查看/设置上下文窗口（/window 128k、/window auto）',
-      '• `/budget` — 查看 token 预算使用',
-      '• `/compact` — 手动压缩上下文',
-      '• `/clear` — 清空当前对话',
-      '• `/session` — 查看会话信息',
-      '• `/sessions` — 列出所有会话',
-      '• `/resume <id>` — 恢复历史会话',
-      '• `/config KEY` — 查看配置（如 /config model）',
-      '• `/cost` — 查看 API 费用',
-      '• `/channel` — 管理通知通道',
-      '• `/cd PATH` — 切换工作目录',
-      '• `/tools` — 列出可用工具',
-      '• `/stop` — 停止当前 AI 任务',
-      '• `/allow` — 工具权限管理',
+      t('tg.help.aiTitle'),
+      t('tg.help.ai.model'),
+      t('tg.help.ai.models'),
+      t('tg.help.ai.window'),
+      t('tg.help.ai.budget'),
+      t('tg.help.ai.compact'),
+      t('tg.help.ai.clear'),
+      t('tg.help.ai.session'),
+      t('tg.help.ai.sessions'),
+      t('tg.help.ai.resume'),
+      t('tg.help.ai.config'),
+      t('tg.help.ai.cost'),
+      t('tg.help.ai.channel'),
+      t('tg.help.ai.cd'),
+      t('tg.help.ai.tools'),
+      t('tg.help.ai.stop'),
+      t('tg.help.ai.allow'),
       '',
-      '*普通消息*',
-      '直接发送文字 → 自动发给 AI 处理',
-      '支持发送图片（AI 无法看图，但会作为附件）',
+      t('tg.help.plainTitle'),
+      t('tg.help.plain.text'),
+      t('tg.help.plain.image'),
       '',
-      '💡 任意 `/help <命令>` 查看某个命令的详细用法。',
+      t('tg.help.tip'),
       '',
     ].join('\n')
   }
