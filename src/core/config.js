@@ -13,7 +13,7 @@ const USER_CONFIG_FILE = join(homedir(), '.claude-code/config.json')
  * 默认配置
  */
 const DEFAULTS = {
-  model: 'deepseek-chat',
+  model: 'deepseek-flash',
   apiBase: 'https://api.deepseek.com/v1',
   maxTurns: 100,
   maxBudgetTokens: 1_000_000,

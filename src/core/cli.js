@@ -286,7 +286,7 @@ Commands:
 const DETAILED_HELP = {
   help:    "/help [command]\n  Show help. Without argument: list all commands.\n  With a command name: show detailed help for that command.\n\n  Example: /help model",
 
-  model:   "/model <model_name>\n  Switch the LLM model in real-time.\n  The change takes effect immediately for the next message.\n  You can use any model name supported by your current API provider.\n\n  Example: /model deepseek-chat\n  Example: /model gpt-4o",
+  model:   "/model <model_name>\n  Switch the LLM model in real-time.\n  The change takes effect immediately for the next message.\n  You can use any model name supported by your current API provider.\n\n  Example: /model deepseek-flash\n  Example: /model gpt-4o",
 
   models:  "/models\n  Fetch and display all available models from the current API provider.\n  Shows a numbered list, then prompts you to select by number or name.\n  Requires a configured API key (the one you used to start cc-node).\n  Uses the endpoint: <apiBase>/models",
 
@@ -333,7 +333,8 @@ const DETAILED_HELP = {
 
 function parseArgs(argv) {
   const args = {
-    model: 'deepseek-chat',
+    // 注意：必须默认空串！若硬编码具体模型名会遮蔽 config.get('model')（优先级链失效）
+    model: '',
     systemPrompt: '',
     permissionMode: 'ask',
     maxTurns: 100,
@@ -480,7 +481,7 @@ export async function main() {
               const id = m.id || m
               console.log(`  ${(i + 1).toString().padStart(2)}. ${id}`)
             })
-            console.log('输入编号选择，或直接输入模型名（回车跳过用 deepseek-chat）:')
+            console.log('输入编号选择，或直接输入模型名（回车跳过用 deepseek-flash）:')
             // 用 readline 等待输入（此时 REPL 还没启动，需要临时创建）
             const tmpRl = readline.createInterface({ input: process.stdin, output: process.stdout })
             const answer = await new Promise(resolve => tmpRl.question('> ', resolve))
@@ -491,26 +492,26 @@ export async function main() {
             } else if (answer.trim()) {
               model = answer.trim()
             } else {
-              model = 'deepseek-chat'
+              model = 'deepseek-flash'
             }
             console.log(`✅ Model → ${model}`)
           } else {
-            model = 'deepseek-chat'
-            console.log('API 返回空模型列表，使用默认: deepseek-chat')
+            model = 'deepseek-flash'
+            console.log('API 返回空模型列表，使用默认: deepseek-flash')
           }
         } else {
-          model = 'deepseek-chat'
-          console.log('无法获取模型列表，使用默认: deepseek-chat')
+          model = 'deepseek-flash'
+          console.log('无法获取模型列表，使用默认: deepseek-flash')
         }
       } catch (e) {
-        model = 'deepseek-chat'
-        console.log(`获取模型列表失败 (${e.message})，使用默认: deepseek-chat`)
+        model = 'deepseek-flash'
+        console.log(`获取模型列表失败 (${e.message})，使用默认: deepseek-flash`)
       }
     } else {
-      model = 'deepseek-chat'
+      model = 'deepseek-flash'
     }
   } else if (!model) {
-    model = 'deepseek-chat'  // 无 apiBase 也无 model → DeepSeek 默认
+    model = 'deepseek-flash'  // 无 apiBase 也无 model → DeepSeek 默认
   }
   const DEFAULT_SYSTEM_PROMPT = `You are cc-node, an AI coding assistant. Configuration files: user-level ~/.claude-code/config.json, project-level .claude-code/config.json (in project root). Runtime files (pid/socket): ~/.cc-node/. Never reference settings.json or .claude.json — those paths do not exist.`
   const verbose = cliArgs.verbose || config.get('verbose')

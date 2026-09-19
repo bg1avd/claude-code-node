@@ -10,7 +10,10 @@
 // ============================================================
 
 const PRICING = {
-  // DeepSeek
+  // DeepSeek（USD/百万tokens，按官方高峰时段价折算；空闲时段为半价）
+  // deepseek-flash = V4.1 Flash: 输入峰值 2 元 cache-miss / 0.04 元 cache-hit，输出 8 元
+  'deepseek-flash':          { input: 0.28,  output: 1.11,  cache_read: 0.006 },
+  'deepseek-v4-pro':         { input: 1.25,  output: 3.75,  cache_read: 0.042 },
   'deepseek-chat':           { input: 0.27,  output: 1.10,  cache_read: 0.07 },
   'deepseek-reasoner':       { input: 0.55,  output: 2.19,  cache_read: 0.14 },
 

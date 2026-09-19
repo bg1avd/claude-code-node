@@ -18,7 +18,9 @@
 // 缺失的厂商/模型会回落到 fallback；不精确属预期，可用 /window 手动纠正。
 export const MODEL_CONTEXT_TABLE = {
   // DeepSeek
-  'deepseek-chat': 128_000,
+  'deepseek-flash': 1_000_000,   // V4.1 Flash，官方 1M 上下文
+  'deepseek-v4-pro': 128_000,
+  'deepseek-chat': 128_000,      // 旧模型名，保留兼容
   'deepseek-reasoner': 128_000,
   'deepseek-coder': 128_000,
   'deepseek-v3': 128_000,

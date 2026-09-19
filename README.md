@@ -59,7 +59,7 @@ cc-node --resume session-1747000000000-abc123
 
 | 参数 | 短写 | 说明 | 默认值 |
 |------|------|------|--------|
-| `--model` | `-m` | LLM 模型名 | `deepseek-chat` |
+| `--model` | `-m` | LLM 模型名 | `deepseek-flash` |
 | `--system-prompt` | `-s` | 系统提示词 | `""` |
 | `--permission-mode` | `-p` | 权限模式 | `ask` |
 | `--max-turns` | `-t` | 最大工具循环轮数 | `100` |
@@ -389,7 +389,7 @@ cc-node --api-base http://localhost:11434/v1
 
 ```json
 {
-  "model": "deepseek-chat",
+  "model": "deepseek-flash",
   "maxTurns": 100,
   "maxBudgetTokens": 128000,
   "maxMessages": 80,
@@ -771,7 +771,7 @@ export DEEPSEEK_API_BASE=https://api.deepseek.com/v1
   "llm": {
     "apiKey": "sk-xxx",
     "apiBase": "https://api.deepseek.com/v1",
-    "model": "deepseek-chat"
+    "model": "deepseek-flash"
   },
   "reviewRules": {
     "checks": {

@@ -13,7 +13,7 @@ export async function callLLM(systemPrompt, userPrompt, apiConfig = {}) {
   const {
     apiKey = process.env.LLM_API_KEY || process.env.DEEPSEEK_API_KEY,
     apiBase = process.env.LLM_API_BASE || 'https://api.deepseek.com/v1',
-    model = process.env.LLM_MODEL || 'deepseek-chat'
+    model = process.env.LLM_MODEL || 'deepseek-flash'
   } = apiConfig
 
   if (!apiKey) {
