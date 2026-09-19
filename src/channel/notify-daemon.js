@@ -23,7 +23,7 @@
 import { createServer } from 'node:http'
 import {
   readFileSync, writeFileSync, unlinkSync, existsSync, appendFileSync,
-  mkdirSync, openSync, closeSync,
+  mkdirSync, openSync, closeSync, statSync, renameSync,
 } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -685,7 +685,7 @@ function startDaemon(config) {
   child.unref()
   console.log(`cc-notify daemon started (PID ${child.pid})`)
   console.log(`PID: ${config.pidFile}`)
-  console.log(`Log: ${config.logFile}`)
+  console.log(`Log: ${config.logFile} (rotate at ${Math.round(LOG_MAX_BYTES / 1024 / 1024)}MB)` )
   console.log(`HTTP: http://localhost:${config.port}`)
   console.log(`API Key: ${config.apiKey.slice(0, 8)}...`)
   process.exit(0)
@@ -740,11 +740,39 @@ function readBody(req) {
   })
 }
 
+// ---- 日志轮转：防止 cc-notify.log 无限膨胀（实测曾涨到 5GB+ / 1 亿行）----
+// 超过 LOG_MAX_BYTES 时把当前日志改名 .1（旧 .1 直接覆盖），随后新写入自动建新文件。
+// 上限可通过环境变量 CC_NOTIFY_LOG_MAX_MB 调整（默认 10MB，磁盘占用封顶 ~20MB）。
+export const LOG_MAX_BYTES =
+  Math.max(1, parseInt(process.env.CC_NOTIFY_LOG_MAX_MB, 10) || 10) * 1024 * 1024
+let _logBytesSinceCheck = 0 // 距上次真实 stat 检查累计写入的字节数，用于降低 statSync 频率
+
+/**
+ * 日志轮转检查：logPath 大小超过 maxBytes 时改名为 logPath.1（旧 .1 直接覆盖）。
+ * logPath/maxBytes 参数化便于单元测试；生产调用省略参数即操作真实日志。
+ * @returns {boolean} 是否发生了轮转
+ */
+export function rotateLogIfNeeded(logPath = CC_NOTIFY_LOG, maxBytes = LOG_MAX_BYTES) {
+  try {
+    if (!existsSync(logPath)) return false
+    if (statSync(logPath).size <= maxBytes) return false
+    try { renameSync(logPath, logPath + '.1'); return true } catch { return false }
+  } catch { return false }
+}
+
 function log(msg) {
   const ts = new Date().toISOString().slice(11, 19)
   const line = `[${ts}] ${msg}\n`
   process.stdout.write(line)
-  try { appendFileSync(CC_NOTIFY_LOG, line) } catch {}
+  try {
+    // 首次写入时立即检查一次（可处理启动前遗留的超大日志），此后每累计 ~1MB 检查一次
+    if (_logBytesSinceCheck === 0 || _logBytesSinceCheck >= 1024 * 1024) {
+      rotateLogIfNeeded()
+      _logBytesSinceCheck = 0
+    }
+    appendFileSync(CC_NOTIFY_LOG, line)
+    _logBytesSinceCheck += line.length
+  } catch {}
 }
 
 // ============================================================
