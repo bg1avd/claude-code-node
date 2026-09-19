@@ -26,6 +26,7 @@ import {
   WINDOW_SOURCE,
 } from './context-window.js'
 import { isLocalLlmServer } from '../utils/index.js'
+import { stripAnsiCodes } from '../utils/ansi.js'
 import { SOCK_DIR, SOCK_PATH, CC_NODE_PID } from './paths.js'
 import { renderHeadpiece } from './headpiece.js'
 import { TelegramListener } from '../channel/tg-listener.js'
@@ -685,7 +686,7 @@ export async function main() {
     }
     const result = await engine.processMessage(cliArgs.oneShot)
     // 引擎已流式输出正文（无 onDelta 时引擎内部直写终端）→ 不再重复打印，避免"回答两次"
-    if (!engine.lastStreamed) console.log(result.response)
+    if (!engine.lastStreamed) console.log(stripAnsiCodes(result.response))
     // 保存会话
     session = await sessionManager.create(`one-shot: ${cliArgs.oneShot.slice(0, 50)}`)
     await sessionManager.appendMessage({ role: 'user', content: cliArgs.oneShot })
@@ -1314,7 +1315,7 @@ export async function main() {
       // 正文已被 onDelta 实时流式输出到终端 → 不重复打印（否则出现"回答两次"的双层显示）。
       // 仅当没有流式输出（noStream / 流式失败 / 无 onDelta 回调）时才打印完整 response。
       if (!engine.lastStreamed && !streamedText) {
-        console.log(result.response)
+        console.log(stripAnsiCodes(result.response))
       }
       console.log()
       await sessionManager.appendMessage({ role: 'user', content: input })
@@ -1329,7 +1330,7 @@ export async function main() {
       }
       // 将 AI 回复同步发送到 Telegram（镜像 CLI 显示）
       if (tgListener?.bot && result?.response) {
-        await sendTelegram(result.response, tgChatId || null)
+        await sendTelegram(stripAnsiCodes(result.response), tgChatId || null)
       }
     } catch (err) {
       tgThinkingEnd()

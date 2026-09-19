@@ -18,6 +18,7 @@ import { compactMessages, trimToWindow, foldHistoryByCount, trimToolResults } fr
 import { CostTracker } from './cost-tracker.js'
 import { EnhancedPermissionChecker } from '../security/enhanced-permission.js'
 import { isLocalLlmServer, buildAuthHeaders } from '../utils/index.js'
+import { stripAnsiCodes } from '../utils/ansi.js'
 
 /**
  * 配置选项
@@ -103,7 +104,8 @@ export class QueryEngine {
     this.state.turnCount++
     this.lastStreamed = false  // 本轮是否已流式输出正文
     this.abortController = new AbortController()
-    const userMsg = new UserMessage(userInput, images)
+    // 用户输入入库前剥离 ANSI（粘贴带色文本等场景，防截断切断序列后泄漏）
+    const userMsg = new UserMessage(stripAnsiCodes(userInput), images)
     this.state.messages.push(userMsg)
 
     // M3: 自动上下文压缩 + 滑动窗口兜底
@@ -252,11 +254,14 @@ export class QueryEngine {
       const toolResults = await this._executeToolCalls(response.toolCalls)
 
       // 工具结果加入 state.messages（OpenAI 兼容格式）
+      // 入库前剥离 ANSI 序列：颜色码对模型无意义（白耗 token），且会被
+      // 截断逻辑（trimToolResults/compact）拦腰切断造成终端颜色泄漏
       for (const result of toolResults) {
+        const cleanContent = stripAnsiCodes(result.content)
         this.state.messages.push({
           role: 'tool',
           tool_call_id: result.toolCallId,
-          content: result.isError ? `[ERROR] ${result.content}` : result.content,
+          content: result.isError ? `[ERROR] ${cleanContent}` : cleanContent,
         })
         this.state.toolResults.set(result.toolCallId, result)
       }
@@ -697,10 +702,12 @@ export class QueryEngine {
           // 记录已流式输出正文（供调用方避免重复打印最终 response）
           if (event.text) this.lastStreamed = true
           // 实时输出（有 onDelta 回调时交给调用方，如 VS Code 扩展；否则写终端）
+          // 终端直写前剥离 ANSI：工具输出里的颜色序列（npm warning 黄色等）若被
+          // 截断/复述后只有开启无复位，终端颜色会永久卡死（整屏变黄）
           if (typeof this.config.onDelta === 'function') {
             this.config.onDelta({ type: 'text', text: event.text })
           } else {
-            process.stdout.write(event.text)
+            process.stdout.write(stripAnsiCodes(event.text))
           }
           currentText += event.text
         } else if (event.type === 'reasoning') {
@@ -708,7 +715,7 @@ export class QueryEngine {
           if (typeof this.config.onDelta === 'function') {
             this.config.onDelta({ type: 'reasoning', text: event.text })
           } else if (this.config.verbose) {
-            process.stdout.write(event.text)
+            process.stdout.write(stripAnsiCodes(event.text))
           }
         } else if (event.type === 'tool_use') {
           // 收集工具调用

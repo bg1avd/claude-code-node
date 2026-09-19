@@ -125,6 +125,8 @@ export function createMultilineInput({ prompt = '> ', onSubmit, onExit, stdin, s
   }
 
   function showPrompt() {
+    // 复位任何残留的 ANSI 样式（如工具输出泄漏的颜色），保证提示符始终是默认样式
+    if (output.isTTY) output.write('\x1b[0m')
     output.write(PROMPT)
     displayedRows = 1
   }
