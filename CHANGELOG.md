@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## v3.0.7
+
+## 3.0.7
+
+- feat(config): 启动时自动迁移配置文件里残留的旧模型名 `deepseek-chat` → `deepseek-flash`（旧版 `/window` 快照固化问题就此自愈，无需手动清理配置）
+- 安全边界：仅当 apiBase 指向 `api.deepseek.com` 时执行；只改写 `model` 一个键、其余配置原样保留；幂等
+
+
 ## v3.0.6
 
 ## 3.0.6
