@@ -888,6 +888,15 @@ export async function main() {
             }
             model = engine.config.model
             console.log(`Model → ${engine.config.model}`)
+            // 新模型可能不支持视觉（纯文字模型）：剥离会话历史中的图片。
+            // 否则历史图片每轮随请求发送，纯文字模型会以 "image not supported" 拒绝
+            // 所有后续消息（典型：多模态发图识别 → 切回纯文字模型 → 全部报错）。
+            try {
+              const removedImgs = engine.stripImagesFromHistory()
+              if (removedImgs > 0) {
+                console.log(`  ↳ 已从会话历史移除 ${removedImgs} 张图片（新模型可能不支持视觉；如需继续讨论请重新发送图片）`)
+              }
+            } catch { /* 清理失败不阻断切换 */ }
             // 切换模型后重新探测上下文窗口（仅当非手动指定时自动更新）
             if ((config.get('maxBudgetTokens') || 0) <= 0) {
               const { window: win, source } = await reapplyWindow()

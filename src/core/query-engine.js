@@ -598,6 +598,7 @@ export class QueryEngine {
       return Math.round(jitter)
     }
     let lastError = null
+    let strippedImagesOnce = false // 图片降级只做一次，防止剥离后仍报同样错误时死循环
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         if (this.abortController?.signal?.aborted) {
@@ -651,6 +652,23 @@ export class QueryEngine {
         }
       } catch (err) {
         lastError = err
+        // 兜底：纯文字模型收到历史中的图片时，API 通常以 400 报错且错误文本提及
+        // image/vision/multimodal。典型场景：先用多模态模型发图识别，再 /model 切回
+        // 纯文字模型 —— 历史图片每轮都随请求发送，之后所有消息都会被拒。
+        // 自动剥离【本次请求体 + 会话历史】中的全部图片并立即重试，无需用户 /clear。
+        if (
+          !strippedImagesOnce &&
+          err.name !== 'AbortError' &&
+          /image|vision|multimodal|visual|图片/i.test(err.message)
+        ) {
+          strippedImagesOnce = true
+          const nReq = this._stripImageParts(messages)       // 本次请求体（_buildRequest 产物）
+          const nHist = this.stripImagesFromHistory()        // 会话历史（state.messages）
+          if (nReq + nHist > 0) {
+            console.error(`[fallback] 当前模型不支持图片 → 已从会话历史移除 ${nReq + nHist} 张图片并重试`)
+            continue
+          }
+        }
         // 网络错误重试
         if (err.name !== 'AbortError' && attempt < maxRetries && !err.message.startsWith('API 错误')) {
           const waitMs = retryDelay(1000, attempt)
@@ -744,6 +762,44 @@ export class QueryEngine {
       parts.push({ type: 'image_url', image_url: { url } })
     }
     return parts
+  }
+
+  /**
+   * 从 OpenAI 兼容消息数组中剥离所有 image_url 内容。
+   * content 数组剥离图片 part 后，若只剩单个 text part 则简化回纯字符串
+   * （部分纯文字 API 对数组格式的兼容性差，字符串最稳）。
+   * @param {Array} messages — 消息数组（原地修改）
+   * @returns {number} 移除的图片数
+   */
+  _stripImageParts(messages) {
+    let removed = 0
+    for (const m of messages || []) {
+      if (!m || !Array.isArray(m.content)) continue
+      const kept = m.content.filter(p => !(p && p.type === 'image_url'))
+      if (kept.length === m.content.length) continue
+      removed += m.content.length - kept.length
+      m.content = kept.length === 1 && kept[0] && kept[0].type === 'text' ? kept[0].text : kept
+    }
+    return removed
+  }
+
+  /**
+   * 剥离会话历史中的所有图片（切换到可能不支持视觉的模型时调用）。
+   * 处理两处图片来源：
+   *   1. user 消息的 images 字段（_buildUserContent 构建请求时转成 image_url part）
+   *   2. 已序列化为 content 数组的 image_url part（兼容任何形式的请求构建）
+   * @returns {number} 移除的图片张数
+   */
+  stripImagesFromHistory() {
+    let removed = 0
+    for (const m of this.state.messages || []) {
+      if (m && Array.isArray(m.images) && m.images.length) {
+        removed += m.images.length
+        m.images = []
+      }
+    }
+    removed += this._stripImageParts(this.state.messages)
+    return removed
   }
 
   /** 取消当前运行 */
