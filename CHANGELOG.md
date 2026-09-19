@@ -1,5 +1,18 @@
 # CHANGELOG
 
+## v3.1.0
+
+## v3.1.0 — Telegram 提示中英文切换
+
+- **feat(tg)**: Telegram 通道提示信息支持中英文切换
+- 语言判定（任一有中文 → 中文，都没有 → 英文）：
+  1. config 顶层 `language` 键（`"zh"` / `"中文"` / `"Chinese"` / `"cn"` 均识别为中文）
+  2. Telegram 用户客户端语言 `from.language_code` 以 `zh` 开头
+- 覆盖范围：命令菜单、/status、/run、/notify、/cancel、/help、引擎忙、工具权限确认、模型切换、AskUser 提问、思考中
+- config 不配置 `language` 则纯按 TG 客户端语言自动判定；CLI 本地终端输出不受影响
+- 新增 7 项单元测试（含 en/zh 字典键一致性防漏翻）
+
+
 ## v3.0.9
 
 ## v3.0.9 — 修复多模态/纯文字模型切换后图片卡死
