@@ -957,9 +957,8 @@ export async function main() {
           }
           const lower = arg.toLowerCase()
           if (lower === 'auto' || lower === 'reset') {
-            // 清除手动指定并重新探测
-            config.set('maxBudgetTokens', 0)
-            try { await config.saveToUser() } catch {}
+            // 清除手动指定并重新探测（只持久化该键，不做全量快照固化）
+            try { await config.saveKeyToUser('maxBudgetTokens', 0) } catch {}
             const { window: win, source } = await reapplyWindow()
             console.log(`Cleared manual override. Context window → ${formatTokens(win)} (${windowSourceLabel(source)})`)
             break
@@ -969,11 +968,10 @@ export async function main() {
             console.log(`❌ Invalid window: "${arg}". Use a number or K/M suffix, e.g. /window 128k, /window 64k, /window 1m`)
             break
           }
-          // 手动指定：立即生效 + 持久化
+          // 手动指定：立即生效 + 只持久化该键（不做全量快照固化，避免把默认值写死进用户配置）
           tokenBudget.setWindow(win, WINDOW_SOURCE.MANUAL)
           windowSource = WINDOW_SOURCE.MANUAL
-          config.set('maxBudgetTokens', win)
-          try { await config.saveToUser() } catch (e) { console.log(`⚠️  Failed to persist to config: ${e.message}`) }
+          try { await config.saveKeyToUser('maxBudgetTokens', win) } catch (e) { console.log(`⚠️  Failed to persist to config: ${e.message}`) }
           console.log(`Context window → ${formatTokens(win)} (${windowSourceLabel(WINDOW_SOURCE.MANUAL)}, persisted)`)
           break
         }

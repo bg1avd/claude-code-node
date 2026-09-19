@@ -121,6 +121,30 @@ export class Config {
     await writeFile(this._userPath, JSON.stringify(this.data, null, 2), 'utf-8')
   }
 
+  /**
+   * 只持久化单个键到用户级配置（支持点路径）。
+   * 与 saveToUser 的区别：saveToUser 写【内存全量快照】，会把当时未改动的默认值
+   * （如 model）一并固化进用户配置文件，之后升级改默认值也永远不生效（用户级 > 默认）。
+   * 本方法只改磁盘文件上的这一个键，其余内容原样保留，不引入快照固化。
+   */
+  async saveKeyToUser(key, value) {
+    this.set(key, value)
+    let disk = {}
+    try {
+      disk = JSON.parse(await readFile(this._userPath, 'utf8')) || {}
+      if (typeof disk !== 'object' || Array.isArray(disk)) disk = {}
+    } catch { /* 文件不存在或不合法 → 从空对象开始 */ }
+    const parts = key.split('.')
+    let cur = disk
+    for (let i = 0; i < parts.length - 1; i++) {
+      if (cur[parts[i]] == null || typeof cur[parts[i]] !== 'object') cur[parts[i]] = {}
+      cur = cur[parts[i]]
+    }
+    cur[parts[parts.length - 1]] = value
+    await mkdir(join(homedir(), '.claude-code'), { recursive: true })
+    await writeFile(this._userPath, JSON.stringify(disk, null, 2), 'utf-8')
+  }
+
   /** 获取配置值（支持点号路径，如 "tools.bash.timeout"） */
   get(key) {
     if (!key) return this.data
