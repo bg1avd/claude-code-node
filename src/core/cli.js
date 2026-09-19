@@ -307,7 +307,7 @@ const DETAILED_HELP = {
 
   stop:  "/stop\n  Stop the currently running AI work.\n  Use when the AI appears stuck or takes too long to respond.\n  Sends an abort signal to interrupt the current task.\n  After stopping, you can issue a new command.",
 
-  config:  "/config [key]\n  Without key: show the entire config as JSON.\n  With a key path: show the value for that specific path.\n\n  Example: /config\n  Example: /config model",
+  config:  "/config [key]\n  Without key: show the entire config as JSON.\n  With a key path: show the value for that specific path.\n\n  Example: /config\n  Example: /config model\n\n  系统提示词相关键:\n  - systemPrompt: 顶层字符串，整体替换内置默认提示词\n  - preferences.*: 每个字符串键值自动追加为 [用户偏好] 补充提示（个人定制推荐用这个）",
 
   budget:  "/budget\n  Show token budget usage for the current session.\n  Displays how many tokens have been used vs the limit.",
 
@@ -375,7 +375,7 @@ function parseArgs(argv) {
 
 Options:
   -m, --model NAME          Model to use
-  -s, --system-prompt TEXT  System prompt
+  -s, --system-prompt TEXT  System prompt（优先级: -s > config systemPrompt > 内置默认；config 的 preferences.* 会自动追加为补充提示）
   -p, --permission-mode     Permission mode: ask|always-allow|deny
   -t, --max-turns N         Max tool loop turns (default: 100)
   --api-base URL            API base URL
@@ -542,9 +542,22 @@ export async function main() {
     dreamContext = (await dreamManager.wake(wakeRecent)) || ''
   } catch { /* 梦境读取失败不阻塞启动 */ }
 
-  let systemPrompt = cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT
+  // 系统提示词优先级：CLI -s 参数 > config.json 顶层 systemPrompt > 内置默认
+  let systemPrompt = cliArgs.systemPrompt || config.get('systemPrompt') || DEFAULT_SYSTEM_PROMPT
   if (dreamContext) {
     systemPrompt = `${systemPrompt}\n\n${dreamContext}`
+  }
+  // config.json 的 preferences.* 全量注入为补充系统提示（个人偏好，不改核心操作规则）。
+  // 例: "preferences": { "thinking_language": "中文", "note": "所有思维链用中文输出" }
+  // 每个字符串键值变成一行 "- key: value"，空对象/无字符串值时零影响。
+  const _prefs = config.get('preferences')
+  if (_prefs && typeof _prefs === 'object' && !Array.isArray(_prefs)) {
+    const _prefLines = Object.entries(_prefs)
+      .filter(([, v]) => typeof v === 'string' && v.trim())
+      .map(([k, v]) => `- ${k}: ${v.trim()}`)
+    if (_prefLines.length > 0) {
+      systemPrompt += `\n\n[用户偏好 / User preferences — 必须遵守]\n${_prefLines.join('\n')}`
+    }
   }
   const permissionMode = cliArgs.permissionMode || config.get('permissionMode')
   const maxTurns = cliArgs.maxTurns || config.get('maxTurns')
