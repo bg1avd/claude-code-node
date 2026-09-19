@@ -1,5 +1,14 @@
 # CHANGELOG
 
+## v3.0.5
+
+## 3.0.5
+
+- feat(model): 缺省模型 `deepseek-chat` → **`deepseek-flash`**（DeepSeek V4.1 Flash，1M 上下文）
+- fix: `parseArgs` 硬编码 `args.model` 遮蔽 `config.get('model')` —— 修复配置文件里的 `model` 键从未生效的问题（配置优先级链恢复：`-m` > config > 默认）
+- context-window: `deepseek-flash` = 1M；cost-tracker: 新增 `deepseek-flash` / `deepseek-v4-pro` 官方价格表
+
+
 ## v3.0.4
 
 ## 3.0.4
