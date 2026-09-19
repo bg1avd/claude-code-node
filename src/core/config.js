@@ -2,12 +2,29 @@
  * 配置管理
  * 对应原版: src/query/config.ts + src/utils/config.ts
  */
-import { readFile, writeFile, mkdir } from 'fs/promises'
+import { readFile, writeFile, rename, unlink, copyFile, mkdir } from 'fs/promises'
 import { join } from 'path'
 import { homedir } from 'os'
 
 const PROJECT_CONFIG_FILE = '.claude-code/config.json'
 const USER_CONFIG_FILE = join(homedir(), '.claude-code/config.json')
+
+/**
+ * 原子写文件：先写同目录临时文件，再 rename 覆盖目标。
+ * rename 在同一文件系统上是原子操作 — 即使进程在写入中途崩溃/断电，
+ * 也只会留下一个 .tmp-* 残留文件，绝不会把目标 JSON 写坏一半。
+ * （直接 writeFile 覆盖已有文件在崩溃时可能留下截断的 JSON，导致配置丢失）
+ */
+async function atomicWriteFile(filePath, content) {
+  const tmp = `${filePath}.tmp-${process.pid}-${Date.now()}`
+  try {
+    await writeFile(tmp, content, 'utf-8')
+    await rename(tmp, filePath)
+  } catch (e) {
+    try { await unlink(tmp) } catch { /* 清理失败不掩盖原错误 */ }
+    throw e
+  }
+}
 
 /**
  * 默认配置
@@ -121,8 +138,10 @@ export class Config {
         const disk = JSON.parse(await readFile(p, 'utf8'))
         if (disk && typeof disk === 'object' && disk.model === oldName) {
           disk.model = newName
-          await writeFile(p, JSON.stringify(disk, null, 2), 'utf-8')
-          console.log(`🔄 已自动迁移 ${p}: model ${oldName} → ${newName}（deepseek-chat 已由 Flash 接管）`)
+          // 写前备份原文件（.bak，覆盖旧备份）— 迁移万一有问题可手工恢复
+          try { await copyFile(p, p + '.bak') } catch { /* 备份失败不阻断迁移 */ }
+          await atomicWriteFile(p, JSON.stringify(disk, null, 2))
+          console.log(`🔄 已自动迁移 ${p}: model ${oldName} → ${newName}（deepseek-chat 已由 Flash 接管，原文件备份为 config.json.bak）`)
         }
       } catch { /* 文件不存在或不可写 — 跳过 */ }
     }
@@ -148,14 +167,14 @@ export class Config {
     const dir = join(projectDir, '.claude-code')
     await mkdir(dir, { recursive: true })
     const filePath = join(dir, 'config.json')
-    await writeFile(filePath, JSON.stringify(this.data, null, 2), 'utf-8')
+    await atomicWriteFile(filePath, JSON.stringify(this.data, null, 2))
   }
 
   /** 保存到用户配置 */
   async saveToUser() {
     const dir = join(homedir(), '.claude-code')
     await mkdir(dir, { recursive: true })
-    await writeFile(this._userPath, JSON.stringify(this.data, null, 2), 'utf-8')
+    await atomicWriteFile(this._userPath, JSON.stringify(this.data, null, 2))
   }
 
   /**
@@ -179,7 +198,7 @@ export class Config {
     }
     cur[parts[parts.length - 1]] = value
     await mkdir(join(homedir(), '.claude-code'), { recursive: true })
-    await writeFile(this._userPath, JSON.stringify(disk, null, 2), 'utf-8')
+    await atomicWriteFile(this._userPath, JSON.stringify(disk, null, 2))
   }
 
   /** 获取配置值（支持点号路径，如 "tools.bash.timeout"） */

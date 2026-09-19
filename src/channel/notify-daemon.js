@@ -685,7 +685,7 @@ function startDaemon(config) {
   child.unref()
   console.log(`cc-notify daemon started (PID ${child.pid})`)
   console.log(`PID: ${config.pidFile}`)
-  console.log(`Log: ${config.logFile} (rotate at ${Math.round(LOG_MAX_BYTES / 1024 / 1024)}MB)` )
+  console.log(`Log: ${config.logFile} (rotate at ${Math.round(LOG_MAX_BYTES / 1024 / 1024)}MB)`)
   console.log(`HTTP: http://localhost:${config.port}`)
   console.log(`API Key: ${config.apiKey.slice(0, 8)}...`)
   process.exit(0)
