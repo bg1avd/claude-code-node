@@ -1,5 +1,14 @@
 # CHANGELOG
 
+## v3.0.8
+
+## v3.0.8 — 稳健性加固
+
+- **feat(log)**: cc-notify 日志轮转 — 超过阈值（默认 10MB，`CC_NOTIFY_LOG_MAX_MB` 可调）自动改名 `.1` 归档，磁盘占用封顶 ~20MB（此前实测曾无限膨胀到 5GB+/1 亿行）
+- **fix(config)**: 配置写入全部改用原子写（先写 `.tmp-*` 再 `rename`）— 进程中途崩溃/断电不再产生截断的 JSON；模型名自动迁移（deepseek-chat → deepseek-flash）改写磁盘前先备份 `config.json.bak`
+- 新增 12 项单元测试（日志轮转 6 + 配置原子写 6）
+
+
 ## v3.0.7
 
 ## 3.0.7
