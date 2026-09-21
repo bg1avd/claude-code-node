@@ -1,5 +1,22 @@
 # CHANGELOG
 
+## v3.2.0 — 定时任务系统(按需闹钟模型)
+
+- **feat(schedule)**: 全新定时任务系统,跨平台零系统依赖(不依赖 cron/schtasks/launchd)
+- 架构:双文件(~/.cc-node/schedule.json 队列 + schedule.done.json 归档,100 条滚动)+ 短轮询对账(30s tick 比对绝对时刻)
+- ID 生命周期:pending → running → done/failed/cancelled/missed/expired;once 执行后归档(=删除),daily/every 续期留队列直到显式 remove
+- 启停机制:有任务才启动 tick,队列空自动熄火(零空转、零 token);重启自动恢复,启动对账含过期分流
+- 忙时行为:任务触发时 AI 忙 → 保持 pending 延迟重试(30s),出口仅"执行成功"或"过期"(grace 线);绝不让任务因忙而丢失
+- 过期判定:graceMinutes(once 默认 10)/lateMinutes(daily 默认 120)+ onExpire=notify 过期通知
+- TG 消息忙时排队(修复"回复忙后丢弃"):FIFO 上限 10,空闲钩子逐条消化,回复"已排队"
+- 多实例互斥:schedule.lock(pid 探活清理陈旧锁);原子写(temp+rename);坏 JSON 不崩沿用内存副本
+- 新增 MCP 工具:schedule_add / schedule_list / schedule_remove / schedule_history(agent 可自主设任务)
+- telegram_remind 占位 → 真实现(转调 scheduler,支持相对时间/时刻)
+- REPL 命令:/schedule [list|history|remove <id>|tick]、/tick
+- prompt 任务走主循环同路径(TG 渠道任务自动切换回复目标);agent 自设任务带 createdBy=agent 可审计
+- 新增 19 项单元测试(状态机/窗口判定/过期分流/防重/归档轮转/多实例锁/热更新/崩溃恢复)
+- 设计文档:SCHEDULER_DESIGN.md(v3)
+
 ## v3.1.1
 
 ## v3.1.1 — 终端颜色泄漏修复

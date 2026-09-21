@@ -241,20 +241,63 @@ async function getMe() {
   return { ok: true, username: result?.username, id: result?.id, firstName: result?.first_name }
 }
 
-/** 定时提醒（复用 qqbot_remind 的调度占位，目标改为 Telegram chatId） */
+/** 定时提醒 — 转调 scheduler 单例(按需闹钟模型,见 SCHEDULER_DESIGN.md) */
 async function remind(args) {
   const { action, content, time, chatId, jobId } = args
-  if (!action || !['add', 'list', 'remove'].includes(action)) {
-    throw new Error('action 必须为 add/list/remove')
+  if (!action || !['add', 'list', 'remove', 'history'].includes(action)) {
+    throw new Error('action 必须为 add/list/remove/history')
   }
-  const resolvedChatId = resolveChatId(chatId)
-  if (!resolvedChatId) throw new Error('chatId 必填（或设置 CC_NODE_CHANNEL_TELEGRAM_CHAT_ID 作为默认）')
+  const { getGlobalScheduler, parseRelativeTime, parseTimeOfDay } = await import('../core/scheduler.js')
+  const s = getGlobalScheduler()
+  if (!s) throw new Error('定时任务系统未初始化(scheduler 未启动)')
 
-  // TODO: 与 cc-node 调度系统集成后实现真正的定时发送
-  // 当前占位：返回需集成的提示
+  const resolvedChatId = resolveChatId(chatId)
+
+  if (action === 'add') {
+    if (!content) throw new Error('content 必填(提醒内容)')
+    if (!resolvedChatId) throw new Error('chatId 必填(或设置 CC_NODE_CHANNEL_TELEGRAM_CHAT_ID 作为默认)')
+    // time 支持:相对时间("5m"/"1h30m")或时刻("HH:MM");默认 5 分钟
+    let dueAt
+    if (time) {
+      const rel = parseRelativeTime(String(time))
+      const tod = rel ? null : parseTimeOfDay(String(time))
+      if (!rel && !tod) throw new Error(`无法解析 time: "${time}"(支持 "5m"/"1h30m"/"HH:MM")`)
+      dueAt = rel ? Date.now() + rel : tod
+    } else {
+      dueAt = Date.now() + 5 * 60_000
+    }
+    const id = s.addTask({
+      kind: 'once', dueAt,
+      text: content, actionType: 'tg', channel: 'telegram', chatId: resolvedChatId,
+      createdBy: 'telegram',
+    })
+    return { ok: true, id, dueAt: new Date(dueAt).toLocaleString(), content }
+  }
+
+  if (action === 'list') {
+    const tasks = s.list()
+    return {
+      ok: true, count: tasks.length,
+      tasks: tasks.map(t => ({
+        id: t.id, due: t.dueDesc, content: t.action?.text,
+        channel: t.channel, createdBy: t.createdBy,
+      })),
+    }
+  }
+
+  if (action === 'remove') {
+    if (!jobId) throw new Error('jobId 必填(可从 list 获得)')
+    const ok = s.cancel(jobId)
+    return ok ? { ok: true, removed: jobId } : { ok: false, error: `未找到任务 ${jobId}`, activeIds: s.list().map(t => t.id) }
+  }
+
+  // history
   return {
-    ok: false,
-    error: `telegram_remind 尚未完整集成定时任务系统。当前收到: action=${action}, content=${content}, time=${time}, chatId=${resolvedChatId}`
+    ok: true,
+    tasks: s.history(20).map(t => ({
+      id: t.id, status: t.status, content: t.action?.text,
+      finishedAt: t.finishedAt ? new Date(t.finishedAt).toLocaleString() : undefined,
+    })),
   }
 }
 
@@ -347,22 +390,26 @@ export const telegramTools = [
 
   new ToolDef(
     'telegram_remind',
-    `Telegram 定时提醒（计划集成调度系统）。
-使用方法：
-  action: add|list|remove
-  content: 提醒内容
-  time: 相对时间 (5m, 1h30m) 或 cron 表达式
-  chatId: 目标聊天 ID（可省略用默认）
+    `Telegram 定时提醒(基于按需闹钟调度系统)。
+使用方法:
+  action: add|list|remove|history
+  content: 提醒内容(add 必填)
+  time: 相对时间 ("5m", "1h30m") 或时刻 ("HH:MM",已过则明天);缺省 5 分钟
+  jobId: 任务 ID(remove 必填,从 list 获得)
+  chatId: 目标聊天 ID(可省略用默认)
 
-注意：当前为占位实现，完整调度待集成。`,
+示例:
+- 添加: { "action": "add", "content": "起来活动一下", "time": "30m" }
+- 列出: { "action": "list" }
+- 取消: { "action": "remove", "jobId": "r7f3k2" }`,
     {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['add', 'list', 'remove'], description: '操作类型' },
-        content: { type: 'string', description: '提醒内容' },
-        time: { type: 'string', description: '相对时间 (5m, 1h30m) 或 cron 表达式 ("0 8 * * *")' },
-        chatId: { type: 'string', description: '目标聊天 ID（可省略用默认）' },
-        jobId: { type: 'string', description: '任务 ID（仅 remove 使用）' }
+        action: { type: 'string', enum: ['add', 'list', 'remove', 'history'], description: '操作类型' },
+        content: { type: 'string', description: '提醒内容(add 必填)' },
+        time: { type: 'string', description: '相对时间 ("5m") 或时刻 ("HH:MM");缺省 5 分钟' },
+        chatId: { type: 'string', description: '目标聊天 ID(可省略用默认)' },
+        jobId: { type: 'string', description: '任务 ID(remove 必填)' }
       },
       required: ['action']
     },

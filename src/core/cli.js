@@ -6,6 +6,7 @@
  */
 import * as readline from 'readline'
 import { createMultilineInput } from './multiline-input.js'
+import { createScheduler, setGlobalScheduler, getGlobalScheduler } from './scheduler.js'
 import { createServer as createNetServer } from 'net'
 import { writeFileSync, unlinkSync, existsSync, mkdirSync, readFileSync, chmodSync } from 'fs'
 import { join } from 'path'
@@ -279,6 +280,8 @@ Commands:
   /allow <tool> — allow specific tool (e.g. Bash)
   /resume <session-id> — Resume a saved conversation
   /dream [方向]       — 检索过往会话记忆（梦境）。无参列出全部，带方向按方向检索
+  /schedule [list|history|remove <id>|tick] — 定时任务管理
+  /tick          — 手动触发一次定时任务到期检查
   /exit          — Exit (also Ctrl+C)
   /quit          — Same as /exit
 
@@ -760,6 +763,25 @@ export async function main() {
   let pendingModelSelect = false
   // 流式输出标志 — onDelta 已实时把回答输出到终端时，不再重复打印完整 response
   let streamedText = false
+
+  // Telegram 忙时排队队列(FIFO,上限 10;§十三.2) — 空闲钩子逐条消化
+  const tgQueue = []
+  const TG_QUEUE_MAX = 10
+  let drainingTgQueue = false
+  async function drainTgQueue() {
+    if (drainingTgQueue || engine.state.isRunning) return
+    drainingTgQueue = true
+    try {
+      while (tgQueue.length && !engine.state.isRunning) {
+        const m = tgQueue.shift()
+        await processInputLine(m.input, 'telegram', m.tgChatId, m.images)
+      }
+    } finally {
+      drainingTgQueue = false
+      // 队列消化完 → 主动叫醒调度器(到期的定时任务不必等下一个 30s tick)
+      try { getGlobalScheduler()?.tickNow() } catch {}
+    }
+  }
 
   // 处理输入行
   // source: 'cli' 来自终端输入, 'telegram' 来自 Telegram
@@ -1253,7 +1275,50 @@ export async function main() {
           }
           break
         }
+        case 'schedule': {
+          // 定时任务管理:/schedule [list|history|remove <id>|tick]
+          const sch = getGlobalScheduler()
+          if (!sch) { console.log('定时任务系统未启动'); break }
+          const sub = rest[0] || 'list'
+          if (sub === 'list') {
+            const tasks = sch.list()
+            if (!tasks.length) { console.log('没有待办定时任务(用 schedule_add 工具或 /schedule add 创建)'); break }
+            console.log(`待办 ${tasks.length} 条:`)
+            for (const task of tasks) {
+              console.log(`  ${task.id}  [${task.kind}] ${task.status === 'running' ? '🏃 执行中' : '⏳ pending'}  ${task.dueDesc}`)
+              console.log(`        ${(task.action?.text || '').slice(0, 60)}  (${task.channel}${task.createdBy !== 'repl' ? '/' + task.createdBy : ''})`)
+            }
+          } else if (sub === 'history') {
+            const hist = sch.history(20)
+            if (!hist.length) { console.log('归档为空'); break }
+            console.log(`最近 ${hist.length} 条:`)
+            for (const h of hist) {
+              const mark = { done: '✅', failed: '❌', cancelled: '🚫', missed: '💤', expired: '⏰' }[h.status] || '·'
+              console.log(`  ${mark} ${h.id}  [${h.status}] ${h.finishedAt ? new Date(h.finishedAt).toLocaleString() : ''}  ${(h.action?.text || '').slice(0, 40)}`)
+            }
+          } else if (sub === 'remove' || sub === 'cancel') {
+            const id = rest[1]
+            if (!id) { console.log('用法: /schedule remove <id>   (id 用 /schedule list 查看)'); break }
+            console.log(sch.cancel(id) ? `✅ 已取消 ${id}` : `❌ 未找到 ${id}`)
+          } else if (sub === 'tick') {
+            sch.tickNow()
+            console.log('✅ 已触发一次到期检查')
+          } else {
+            console.log('用法: /schedule [list|history|remove <id>|tick]')
+          }
+          break
+        }
+        case 'tick': {
+          // 手动心跳(telegram 档外部驱动的本地模拟,或调试用)
+          const sch = getGlobalScheduler()
+          if (!sch) { console.log('定时任务系统未启动'); break }
+          sch.tickNow()
+          console.log('✅ 已触发一次到期检查')
+          break
+        }
         case 'exit': case 'quit': {
+          // 先停定时任务系统(释放锁,避免退出序列中触发任务)
+          try { getGlobalScheduler()?.dispose() } catch {}
           // 退出前确认消费 Telegram update（避免 /quit 等命令残留在服务器缓冲区，
           // 下次启动重放导致死循环起不来）。配合 tg-listener 的 offset 持久化双保险。
           if (tgListener?.bot) {
@@ -1293,12 +1358,19 @@ export async function main() {
       return
     }
 
-    // 发送到引擎 — 引擎忙（如正在处理上一条消息）时，提示而不是崩溃/吞掉
+    // 发送到引擎 — 引擎忙(如正在处理上一条消息)时:
+    //   - Telegram 消息 → 排队(不再丢弃),空闲后按 FIFO 自动执行(§十三.2)
+    //   - CLI 输入 → 提示忙(用户在屏幕前,提示符天然互斥)
     if (engine.state.isRunning) {
       const busyMsg = t('tg.busy')
       console.log(busyMsg)
       if (source === 'telegram' && tgListener?.bot) {
-        await sendTelegram(busyMsg, tgChatId || null).catch(() => {})
+        if (tgQueue.length >= TG_QUEUE_MAX) {
+          await sendTelegram(`⚠️ 队列已满(${TG_QUEUE_MAX} 条),请稍后再发`, tgChatId || null).catch(() => {})
+        } else {
+          tgQueue.push({ input, tgChatId, images })
+          await sendTelegram(`⏳ 已排队(第 ${tgQueue.length} 位),当前任务处理完自动执行`, tgChatId || null).catch(() => {})
+        }
       }
       return
     }
@@ -1332,6 +1404,8 @@ export async function main() {
       if (tgListener?.bot && result?.response) {
         await sendTelegram(stripAnsiCodes(result.response), tgChatId || null)
       }
+      // 空闲钩子:消化排队中的 TG 消息 + 唤醒到期的定时任务
+      await drainTgQueue()
     } catch (err) {
       tgThinkingEnd()
       console.error(`\nError: ${err.message}\n`)
@@ -1343,6 +1417,7 @@ export async function main() {
           task: input.slice(0, 80), error: err.message.slice(0, 200),
         }).catch(() => {})
       }
+      await drainTgQueue()
     }
     showPrompt()
   }
@@ -1577,6 +1652,41 @@ export async function main() {
   }
 
   // ============================================================
+  // 定时任务系统(按需闹钟模型,见 SCHEDULER_DESIGN.md)
+  //  - 双文件:~/.cc-node/schedule.json 队列 + schedule.done.json 归档
+  //  - 有任务才启动 30s tick,队列空自动熄火(零空转、零 token)
+  //  - 忙时任务保持 pending 延后重试,不丢失;AI 空闲后自动执行
+  //  - prompt 任务经 runPrompt 走主循环(与 REPL/TG 消息同路径)
+  // ============================================================
+  const scheduleFile = join(SOCK_DIR, 'schedule.json')
+  const scheduler = createScheduler({
+    file: scheduleFile,
+    doneFile: join(SOCK_DIR, 'schedule.done.json'),
+    lockFile: join(SOCK_DIR, 'schedule.lock'),
+    mode: config.get('scheduler')?.mode || 'internal',   // internal | telegram(外部 /tick 心跳驱动)
+    verbose: verbose || cliArgs.debug,
+    tgSend: async (text, chatId) => {
+      if (tgListener?.bot) await sendTelegram(text, chatId)
+      else console.log(`[schedule 通知] ${text}`)          // 无 TG 通道时降级到终端
+    },
+    runPrompt: async (text, task) => {
+      // 任务 prompt 走统一输入入口;TG 渠道任务临时切换回复目标,完事还原
+      const savedSource = currentSource
+      const savedChatId = tgChatId
+      try {
+        if (task?.channel === 'telegram' && task?.chatId) tgChatId = task.chatId
+        await processInputLine(text, task?.channel === 'telegram' ? 'telegram' : 'cli', task?.channel === 'telegram' ? task.chatId : null, [])
+      } finally {
+        currentSource = savedSource
+        tgChatId = savedChatId
+      }
+    },
+    engineBusy: () => engine.state.isRunning,
+  })
+  setGlobalScheduler(scheduler)
+  scheduler.start()   // 启动对账:恢复 timer / 过期分流 / 崩溃残留处理
+
+  // ============================================================
   // --with-notify: 内置频道监听器（替代 cc-notify 守护进程）
   // 当 cc-node 启动时同时启动 Telegram 监听器，
   // 无需外部 bash 脚本，跨平台（Windows/Linux/macOS）都能用。
@@ -1648,7 +1758,7 @@ export async function main() {
 }
 
 // ============================================================
-// 全局退出处理 — 回收 stdin 的 raw mode
+// 全局退出处理 — 回收 stdin 的 raw mode + 停定时任务系统(释放锁)
 // ============================================================
 function cleanupStdin() {
   try {
@@ -1656,15 +1766,21 @@ function cleanupStdin() {
     process.stdin.removeAllListeners('keypress')
   } catch {}
 }
+function cleanupScheduler() {
+  try { getGlobalScheduler()?.dispose() } catch {}
+}
 
 process.on('SIGINT', () => {
+  cleanupScheduler()
   cleanupStdin()
   process.exit(0)
 })
 process.on('SIGTERM', () => {
+  cleanupScheduler()
   cleanupStdin()
   process.exit(0)
 })
 process.on('exit', () => {
+  cleanupScheduler()
   cleanupStdin()
 })

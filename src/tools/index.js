@@ -14,6 +14,8 @@ import { gitTool } from './git-tool.js'
 import { npmPublishTool } from './npm-publish.js'
 // Telegram 工具（替代原 QQ Bot 工具，QQ 通道已放弃）
 import { telegramTools } from './telegram-tools.js'
+// 定时任务工具（按需闹钟模型，见 SCHEDULER_DESIGN.md）
+import { scheduleTools } from './schedule-tools.js'
 
 /**
  * 所有内置工具列表
@@ -30,7 +32,8 @@ export const builtinTools = [
   askUserTool,
   gitTool,
   npmPublishTool,
-  ...telegramTools
+  ...telegramTools,
+  ...scheduleTools
 ]
 
 /**
