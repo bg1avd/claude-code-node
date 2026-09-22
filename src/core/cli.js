@@ -1566,11 +1566,13 @@ export async function main() {
         const promptText = t('tg.toolConfirm.prompt', { tool: toolName, snippet })
         await sendTelegram(promptText, null).catch(() => {})
         return new Promise((resolve) => {
-          // 60 秒内未回复则自动拒绝，避免远程确认永久挂起阻塞对话
+          // 确认超时未决 → 自动拒绝(设计 §17.5.1:放弃而非放行,失败可重试,卡死才致命)
+          // 超时由 config scheduler.confirmTimeoutMs 控制(默认 60s;凌晨无人确认不永久卡死)
+          const timeout = config.get('scheduler')?.confirmTimeoutMs ?? 60000
           const timer = setTimeout(() => {
             if (pendingConfirm === resolve) pendingConfirm = null
             resolve(false)
-          }, 60000)
+          }, timeout)
           pendingConfirm = (val) => {
             clearTimeout(timer)
             resolve(val)
@@ -1663,6 +1665,8 @@ export async function main() {
     file: scheduleFile,
     doneFile: join(SOCK_DIR, 'schedule.done.json'),
     lockFile: join(SOCK_DIR, 'schedule.lock'),
+    execLog: join(SOCK_DIR, 'exec.log'),                  // exec 审计日志(命令/结果/退出码/时间戳)
+    confirmTimeoutMs: config.get('scheduler')?.confirmTimeoutMs,
     mode: config.get('scheduler')?.mode || 'internal',   // internal | telegram(外部 /tick 心跳驱动)
     verbose: verbose || cliArgs.debug,
     tgSend: async (text, chatId) => {

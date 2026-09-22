@@ -7,11 +7,15 @@ import assert from 'node:assert'
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { createScheduler, parseRelativeTime, parseTimeOfDay } from '../core/scheduler.js'
+import { createScheduler, parseRelativeTime, parseTimeOfDay, parseWindow, inWindow } from '../core/scheduler.js'
 
 let dir
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'cc-sched-test-')) })
 afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
+
+// exec 测试用的 TG 收集
+const tgSentArr = []
+beforeEach(() => { tgSentArr.length = 0 })
 
 function make(overrides = {}) {
   const tgSent = []
@@ -336,3 +340,153 @@ test('saveActive 后盘上 JSON 完整可解析', () => {
   assert.equal(data.version, 1)
   s.dispose()
 })
+
+// ============================================================
+// window 时段窗口(设计 §P0-2 / 补充答复#3)
+// ============================================================
+test('parseWindow: 字符串多段 / 数组 / 非法', () => {
+  assert.deepEqual(parseWindow('09:20-11:30,13:00-15:00'), [[560, 690], [780, 900]])
+  assert.deepEqual(parseWindow(['09:20-11:30', '13:00-15:00']), [[560, 690], [780, 900]])
+  assert.deepEqual(parseWindow(''), [])
+  assert.deepEqual(parseWindow(undefined), [])
+  assert.equal(parseWindow('09:20-11:30,abc'), null)     // 整体拒绝
+  assert.equal(parseWindow('11:30-09:20'), null)          // end < start
+  assert.equal(parseWindow('25:00-26:00'), null)
+})
+
+test('inWindow 纯函数:窗口内/外判定', () => {
+  const now = new Date(); now.setHours(10, 30, 0, 0)      // 10:30
+  assert.equal(inWindow([[630, 700]], now.getTime()), true)   // 10:30 ∈ [10:30,11:40)
+  assert.equal(inWindow([[0, 630]], now.getTime()), false)    // 10:30 ∉ [00:00,10:30)
+  assert.equal(inWindow([], now.getTime()), true)             // 空 = 全天
+  assert.equal(inWindow(undefined, now.getTime()), true)
+})
+
+test('window 窗口外 every 不触发,窗口内触发', async () => {
+  // 窗口内:用 once(确定性只跑一次)验证"窗口内可触发"
+  const { s, tgSent } = make()
+  s.start()
+  const d = new Date()
+  const sm = d.getMinutes() - 1
+  const em = d.getMinutes() + 5
+  const pad = n => String(Math.max(0, Math.min(59, n))).padStart(2, '0')
+  const winStr = `${pad(d.getHours())}:${pad(sm)}-${pad(d.getHours())}:${pad(em)}`
+  s.addTask({ kind: 'once', dueAt: Date.now() - 100, text: '窗口内', actionType: 'tg', window: winStr })
+  await sleep(80)
+  assert.equal(tgSent.length, 1)                         // 窗口内 → 触发
+  // 窗口外:every 完全排除当前时刻(明早 2 点),不触发
+  const { s: s2, tgSent: tg2 } = make()
+  s2.start()
+  s2.addTask({ kind: 'every', everyMs: 1000, text: '不触发', actionType: 'tg', window: '02:00-02:30', dueAt: Date.now() - 100 })
+  s2.tickNow()
+  await sleep(80)
+  assert.equal(tg2.length, 0)                            // 窗口外 → 不触发
+  assert.equal(s2.list().length, 1)                      // 任务仍在,等窗口
+  s.dispose(); s2.dispose()
+})
+
+// ============================================================
+// exec 动作轨道(设计 §P0-1 / 补充答复#1/#6)
+// ============================================================
+test('exec 动作执行成功走 runExec,写审计日志,notifyOn=onError 静默', async () => {
+  const execResults = []
+  const s = createScheduler({
+    file: join(dir, 'e1.json'), doneFile: join(dir, 'e1.done.json'), lockFile: join(dir, 'e1.lock'),
+    execLog: join(dir, 'exec.log'),
+    runExec: async (task) => { const r = { ok: true, exitCode: 0, stdout: 'OK', stderr: '', error: '' }; execResults.push(task); return r },
+    tgSend: async (t, c) => tgSentPush(t, c),
+    engineBusy: () => false, verbose: false,
+  })
+  s.start()
+  s.addTask({ kind: 'once', dueAt: Date.now() - 100, actionType: 'exec', cmd: 'echo hi', notifyOn: 'onError', createdBy: 'agent' })
+  await sleep(80)
+  assert.equal(execResults.length, 1)                    // exec 被执行
+  assert.equal(s.history()[0].status, 'done')
+  assert.equal(tgSentArr.length, 0)                      // onError + 成功 → 静默
+  const logRaw = readFileSync(join(dir, 'exec.log'), 'utf-8')
+  assert.match(logRaw, /echo hi/)                        // 审计含命令全文
+  assert.match(logRaw, /createdBy.*agent/)
+  s.dispose()
+})
+
+test('exec 失败 → failed 归档 + onError 告警', async () => {
+  const s = createScheduler({
+    file: join(dir, 'e2.json'), doneFile: join(dir, 'e2.done.json'), lockFile: join(dir, 'e2.lock'),
+    execLog: join(dir, 'e2.log'),
+    runExec: async () => ({ ok: false, exitCode: 1, stdout: '', stderr: 'boom', error: 'exit code 1' }),
+    tgSend: async (t, c) => tgSentPush(t, c),
+    engineBusy: () => false, verbose: false,
+  })
+  s.start()
+  s.addTask({ kind: 'once', dueAt: Date.now() - 100, actionType: 'exec', cmd: 'false', notifyOn: 'onError', channel: 'telegram' })
+  await sleep(80)
+  assert.equal(s.history()[0].status, 'failed')
+  assert.equal(tgSentArr.length, 1)                      // 异常 → 告警
+  assert.match(tgSentArr[0].text, /exec/)
+  s.dispose()
+})
+
+// ============================================================
+// 执行超时(设计 §P0-3)
+// ============================================================
+test('exec 超时 → failed + lastError 含 timeout', async () => {
+  const s = createScheduler({
+    file: join(dir, 't1.json'), doneFile: join(dir, 't1.done.json'), lockFile: join(dir, 't1.lock'),
+    runExec: async () => new Promise(() => {}),          // 永不 resolve
+    tgSend: async () => {}, engineBusy: () => false, verbose: false,
+  })
+  s.start()
+  s.addTask({ kind: 'once', dueAt: Date.now() - 100, actionType: 'exec', cmd: 'hang', timeoutMs: 150 })
+  await sleep(300)
+  assert.equal(s.history()[0].status, 'failed')
+  assert.match(s.history()[0].lastError || '', /timeout/i)
+  s.dispose()
+})
+
+// ============================================================
+// 失败重试(设计 §P1-2 / 补充答复#3:重试限窗口内)
+// ============================================================
+test('maxRetries 失败后延迟重试,耗尽才归档 failed', async () => {
+  let calls = 0
+  const s = createScheduler({
+    file: join(dir, 'r1.json'), doneFile: join(dir, 'r1.done.json'), lockFile: join(dir, 'r1.lock'),
+    tgSend: async () => {},
+    runExec: async () => { calls++; return calls < 3 ? { ok: false, error: 'temporary' } : { ok: true, stdout: 'ok' } },
+    engineBusy: () => false, verbose: false,
+  })
+  s.start()
+  s.addTask({ kind: 'once', dueAt: Date.now() - 100, actionType: 'exec', cmd: 'x', maxRetries: 3, retryDelayMs: 20 })
+  // 轮询驱动直到达到 3 次调用(确定性,容忍异步 execute 时序)
+  const deadline = Date.now() + 1500
+  while (calls < 3 && Date.now() < deadline) {
+    await sleep(30)
+    s.tickNow()
+  }
+  assert.equal(calls, 3)
+  assert.equal(s.history()[0].status, 'done')
+  s.dispose()
+})
+
+test('重试耗尽仍失败 → 归档 failed', async () => {
+  let calls = 0
+  const s = createScheduler({
+    file: join(dir, 'r2.json'), doneFile: join(dir, 'r2.done.json'), lockFile: join(dir, 'r2.lock'),
+    tgSend: async () => {},
+    runExec: async () => { calls++; return { ok: false, error: 'always fail' } },
+    engineBusy: () => false, verbose: false,
+  })
+  s.start()
+  s.addTask({ kind: 'once', dueAt: Date.now() - 100, actionType: 'exec', cmd: 'x', maxRetries: 2, retryDelayMs: 20 })
+  const deadline = Date.now() + 1500
+  while (calls < 3 && Date.now() < deadline) {
+    await sleep(30)
+    s.tickNow()
+  }
+  assert.equal(calls, 3)                                 // 1 次 + 2 次重试
+  assert.equal(s.history()[0].status, 'failed')
+  s.dispose()
+})
+
+// 辅助:exec 测试用的 TG 收集(已在顶部 beforeEach 清空)
+const tgSentPush = (t, c) => tgSentArr.push({ text: t, chatId: c })
+

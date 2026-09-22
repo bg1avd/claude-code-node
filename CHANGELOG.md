@@ -17,6 +17,19 @@
 - 新增 19 项单元测试(状态机/窗口判定/过期分流/防重/归档轮转/多实例锁/热更新/崩溃恢复)
 - 设计文档:SCHEDULER_DESIGN.md(v3)
 
+## v3.3.0 — 定时任务增强(对齐应用方 P0/P1 改进)
+
+- **feat(schedule-window)**: 时段窗口 window(P0-2)——`schedule_add` 支持 `window` 参数,字符串多段或数组;窗口外不执行/不写 lastRun/不算错过,午休/夜间干净跳过
+- **feat(schedule-exec)**: 确定性动作轨道(P0-1)——`actionType: 'exec'` 到点直接 spawn 命令,不经 LLM;创建时确认一次(结构性免确认),执行时零确认;命令可审计
+- **feat(schedule-timeout)**: 执行超时(P0-3)——exec 默认 60s / prompt 默认 10min,`timeoutMs` 可覆盖;超时走统一失败/重试路径
+- **feat(schedule-retry)**: 失败重试(P1-2)——`maxRetries` + `retryDelayMs`;重试复用 window 判定,窗口关闭本轮放弃(次日重置)
+- **feat(schedule-confirm-timeout)**: 确认超时放弃(P1-3)——TG 远程权限确认超时自动拒绝(默认 60s,config 可调),不再无限等待卡死
+- **feat(schedule-sec-precision)**: 秒级精确唤醒(P1-1)——到期前 setTimeout 对齐最近到期时刻(>24.8 天拆链),30s 轮询兜底
+- **feat(schedule-audit)**: exec 审计日志 ~/.cc-node/exec.log(命令全文+stdout/stderr+退出码+时间戳+createdBy),带行数轮转
+- **feat(schedule-notifyon)**: 通知策略 `notifyOn`(always/onError/never)——高频 exec 默认 onError,正常静默、异常告警
+- 新增 8 项单元测试(window 纯函数两格式/窗口内外/exec 成功+审计/exec 失败告警/exec 超时/重试状态机/重试耗尽),单测 27 项全过
+- 设计文档:SCHEDULER_DESIGN.md(v4/v4.1/v4.2)+《定时工具改进_补充答复应用方_20260922.md》
+
 ## v3.1.1
 
 ## v3.1.1 — 终端颜色泄漏修复
