@@ -984,7 +984,11 @@ export async function main() {
             // inputTokens 恒为 0，无法反映真实填充情况。
             const estTokens = engine.tokenBudget.estimateMessages(engine.state.messages)
             const windowTokens = engine.tokenBudget.maxTokens
-            const reserved = engine.tokenBudget.reservedForOutput || 0
+            // 预留取 max(配置预留, 实际输出上限)，与实际请求口径一致
+            const reserved = Math.max(
+              engine.tokenBudget.reservedForOutput || 0,
+              engine._computeMaxOutputTokens?.() || 0
+            )
             const pct = windowTokens > 0
               ? Math.min(100, Math.round((estTokens / (windowTokens - reserved)) * 100))
               : 0
@@ -1258,7 +1262,12 @@ export async function main() {
           if (engine.tokenBudget) {
             // 手动压缩：用实时 token 估算判断是否需要压缩（而非滞后的 usagePercent），
             // 用户主动触发时总能真正压缩。
-            const limit = engine.tokenBudget.maxTokens - engine.tokenBudget.reservedForOutput
+            // 门槛预留取 max(配置预留, 实际输出上限 _computeMaxOutputTokens)，与实际请求口径一致。
+            const reserved = Math.max(
+              engine.tokenBudget.reservedForOutput || 0,
+              engine._computeMaxOutputTokens?.() || 0
+            )
+            const limit = engine.tokenBudget.maxTokens - reserved
             const est = engine.tokenBudget.estimateMessages(engine.state.messages)
             if (est > limit) {
               const messages = compactMessages(engine.state.messages, {

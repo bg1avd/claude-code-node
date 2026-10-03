@@ -7,7 +7,7 @@
  * 对应原版: src/query/compact.ts
  */
 
-import { estimateTokens } from './token-budget.js'
+import { estimateMessages } from './token-budget.js'
 
 /**
  * 压缩策略：保留最近 N 轮完整对话，早期部分压缩为摘要
@@ -35,10 +35,8 @@ export function compactMessages(messages, options = {}) {
     return msg
   })
 
-  // 2. 估算总 token 数
-  const totalTokens = estimateTokens(
-    trimmed.map(m => typeof m.content === 'string' ? m.content : JSON.stringify(m.content)).join('')
-  )
+  // 2. 估算总 token 数(统一口径:含 tool_calls 参数/reasoning/图片,见 estimateMessages)
+  const totalTokens = estimateMessages(trimmed)
 
   if (totalTokens <= maxTokens) {
     return trimmed // 不需要压缩
@@ -429,7 +427,7 @@ export function trimToWindow(messages, options = {}) {
 
   const estimate = (msgs) => budget
     ? budget.estimateMessages(msgs)
-    : estimateTokens(msgs.map(m => typeof m.content === 'string' ? m.content : JSON.stringify(m.content)).join(''))
+    : estimateMessages(msgs)
 
   // 先计算总 token
   let total = estimate(messages)

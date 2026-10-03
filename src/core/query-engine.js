@@ -172,7 +172,14 @@ export class QueryEngine {
     }
 
     const maxTokens = this.tokenBudget.maxTokens
-    const hardLimit = maxTokens - (this.tokenBudget.reservedForOutput || 0)
+    // 输出预留取 max(配置预留, 实际输出上限)。实际输出由 _computeMaxOutputTokens 决定
+    // (默认窗口 1/16,如 1M 窗口 → 62500)。若只按 reservedForOutput(默认 8192) 预留,
+    // 压缩判定门槛会偏松,导致 messages + completion 实际超窗(实测 986k+62.5k > 1048576)。
+    const reservedForOutput = Math.max(
+      this.tokenBudget.reservedForOutput || 0,
+      this._computeMaxOutputTokens()
+    )
+    const hardLimit = maxTokens - reservedForOutput
     // 保守触发阈值：估算到可用窗口的 85% 就开始压缩，避免估算偏差导致实际超窗
     const safetyFactor = this.config.compressSafetyFactor ?? 0.85
     const triggerLimit = Math.max(1, Math.floor(hardLimit * safetyFactor))
@@ -364,10 +371,20 @@ export class QueryEngine {
       if (msg.role === 'user') {
         request.push({ role: 'user', content: this._buildUserContent(msg) })
       } else if (msg.role === 'assistant') {
+        const hasToolCalls = Array.isArray(msg.toolCalls) && msg.toolCalls.length > 0
+        const rawContent = msg.content == null ? '' : msg.content
+        const isEmptyContent = rawContent === '' || (Array.isArray(rawContent) && rawContent.length === 0)
+
+        // API 约束：assistant 消息必须至少含 content 或 tool_calls。
+        // 两者皆空 → 跳过，避免 400 "content or tool_calls must be set"
+        // (来源:模型某轮既无文本、也无工具调用的空回复,或历史里被清空的 assistant)。
+        if (!hasToolCalls && isEmptyContent) continue
+
         // 构建 assistant 消息基础
         const asstMsg = {
           role: 'assistant',
-          content: msg.content || null,
+          // 有 tool_calls 时 content 允许为空(null);无 tool_calls 时必须是有效 content
+          content: hasToolCalls ? (isEmptyContent ? null : rawContent) : rawContent,
         }
 
         // DeepSeek thinking mode: 必须传回 reasoning_content (tool call 场景)
@@ -376,7 +393,7 @@ export class QueryEngine {
         }
 
         // tool_calls
-        if (msg.toolCalls && msg.toolCalls.length > 0) {
+        if (hasToolCalls) {
           asstMsg.tool_calls = msg.toolCalls.map(tc => ({
             id: tc.id,
             type: 'function',
