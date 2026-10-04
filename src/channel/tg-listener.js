@@ -256,7 +256,7 @@ export class TelegramBotClient {
     return results[0]
   }
 
-  /** 编辑消息 */
+  /** 编辑消息（旧接口：HTML） */
   async editMessage(chatId, messageId, text, options = {}) {
     const { parseMode } = options
     const body = {
@@ -271,6 +271,39 @@ export class TelegramBotClient {
     const data = await res.json()
     if (!data.ok && data.error_code !== 400) throw new Error(`TG edit error: ${data.description}`)
     return data.result
+  }
+
+  /** 编辑为富消息（editMessageText + rich_message） */
+  async editRichMessage(chatId, messageId, markdown) {
+    const body = {
+      chat_id: chatId,
+      message_id: messageId,
+      rich_message: { markdown: String(markdown ?? '').slice(0, RICH_MAX_LEN) },
+    }
+    const res = await this._fetch(`${this.apiBase}/editMessageText`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    })
+    const data = await res.json()
+    if (!data.ok) {
+      const err = new Error(`TG editRich error ${data.error_code}: ${(data.description || '').slice(0, 200)}`)
+      err.tgErrorCode = data.error_code
+      throw err
+    }
+    return data.result
+  }
+
+  /** 编辑（富优先，自动降级 HTML） */
+  async editFormatted(chatId, messageId, text, options = {}) {
+    const mode = options.richMode || this.richMode || 'auto'
+    if (mode !== 'off' && !this.richDisabled) {
+      try {
+        return await this.editRichMessage(chatId, messageId, text)
+      } catch (e) {
+        if (e.tgErrorCode === 404 || /not found|unknown method/i.test(e.message)) this.richDisabled = true
+        if (mode === 'on') throw e
+      }
+    }
+    return this.editMessage(chatId, messageId, markdownToTelegramHtml(text), { ...options, parseMode: 'HTML' })
   }
 
   /** 删除消息 */
@@ -790,31 +823,9 @@ export class TelegramListener {
     ].join('\n')
   }
 
-  /** 长消息分段发送 */
+  /** 长消息发送（默认富文本：富 → HTML → 纯文本三级降级 + 自动分片） */
   async _sendLongMessage(chatId, text, options = {}) {
-    const MAX_LEN = 4000
-    if (text.length <= MAX_LEN) {
-      return this.bot.sendMessage(chatId, text, { parseMode: 'Markdown', ...options })
-    }
-
-    // 分段发送
-    const parts = []
-    let current = ''
-    for (const line of text.split('\n')) {
-      if (current.length + line.length + 1 > MAX_LEN) {
-        parts.push(current)
-        current = line
-      } else {
-        current += (current ? '\n' : '') + line
-      }
-    }
-    if (current) parts.push(current)
-
-    for (let i = 0; i < parts.length; i++) {
-      const part = parts[i]
-      const header = i > 0 ? `📎 (${i + 1}/${parts.length})\n` : ''
-      await this.bot.sendMessage(chatId, header + part, { parseMode: 'Markdown' })
-    }
+    return this.bot.sendFormatted(chatId, text, options)
   }
 
   /** 执行 shell 命令 */

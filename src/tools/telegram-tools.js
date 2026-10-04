@@ -15,6 +15,7 @@
 
 import { ToolDef } from '../types/index.js'
 import { TelegramBotClient } from '../channel/tg-listener.js'
+import { markdownToTelegramHtml } from '../utils/markdown.js'
 import { readFileSync, statSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
@@ -120,20 +121,32 @@ function resolveChatId(chatId) {
 // 具体工具函数
 // ============================================================
 
-/** 发送文本消息 */
+/** 发送文本消息（默认走富文本 sendRichMessage；显式 parseMode 时走旧接口） */
 async function sendMessage(args) {
-  const { chatId, text, parseMode, silent, disableWebPreview } = args
+  const { chatId, text, parseMode, silent, richMode, disableWebPreview } = args
   const resolvedChatId = resolveChatId(chatId)
   if (!resolvedChatId) throw new Error('chatId 必填（或设置 CC_NODE_CHANNEL_TELEGRAM_CHAT_ID 作为默认）')
   if (!text) throw new Error('text 必填')
 
   const client = getClient()
-  const result = await client.sendMessage(resolvedChatId, text, {
-    parseMode: parseMode || 'HTML',
+
+  // 显式指定 parseMode → 强制旧接口（sendMessage + HTML/Markdown），做精确控制/兼容
+  if (parseMode) {
+    const result = await client.sendMessage(resolvedChatId, text, {
+      parseMode,
+      silent: silent || false,
+      disableWebPreview: disableWebPreview ?? true,
+    })
+    return { ok: true, messageId: result.message_id, chat: result.chat?.id, mode: `legacy:${parseMode}` }
+  }
+
+  // 默认：富文本优先（sendRichMessage 原生渲染 Markdown：表格/标题/列表/引用/公式/脚注），
+  //       失败自动三级降级（富 → HTML → 纯文本）；与 AI 回复路径保持一致。
+  const result = await client.sendFormatted(resolvedChatId, text, {
     silent: silent || false,
-    disableWebPreview: disableWebPreview ?? true,
+    richMode: richMode || 'auto',
   })
-  return { ok: true, messageId: result.message_id, chat: result.chat?.id }
+  return { ok: true, messageId: result.message_id, chat: result.chat?.id, mode: 'rich' }
 }
 
 /** 发送媒体文件（图片/文档/音频/视频） */
@@ -164,7 +177,11 @@ async function sendMedia(args) {
 
   const form = new FormData()
   form.append('chat_id', String(resolvedChatId))
-  if (caption) form.append('caption', String(caption).slice(0, 1024))
+  // caption 默认富文本：Markdown → Telegram HTML（粗体/斜体/代码/链接/引用等生效）
+  if (caption) {
+    form.append('caption', markdownToTelegramHtml(String(caption).slice(0, 1024)))
+    form.append('parse_mode', 'HTML')
+  }
 
   // 上传文件
   const buf = readFileSync(absPath)
@@ -308,24 +325,27 @@ async function remind(args) {
 export const telegramTools = [
   new ToolDef(
     'telegram_send_message',
-    `发送文本消息到 Telegram 聊天。
+    `发送文本消息到 Telegram 聊天（默认富文本 sendRichMessage）。
 使用方法：
   chatId: 目标聊天 ID（数字或 @username；留空用 CC_NODE_CHANNEL_TELEGRAM_CHAT_ID 默认值）
-  text: 消息内容（Telegram 单条上限 4096 字符，超长自动截断）
-  parseMode: 解析模式（HTML 或 Markdown，默认 HTML）
+  text: 消息内容，支持标准 Markdown(GFM) —— 标题/列表/表格/引用/任务列表/公式/脚注会原生渲染（单条上限 32768）
+  parseMode: 可选，强制旧接口解析模式（HTML/Markdown）；一般不传，传了才走旧接口
+  richMode: 可选，富消息模式 auto|on|off（默认 auto：富失败自动降级 HTML→纯文本）
   silent: 是否静默发送（可选）
-  disableWebPreview: 是否禁用网页预览（可选）
+  disableWebPreview: 是否禁用网页预览（可选，仅 parseMode 旧接口时生效）
 
 示例：
-- 发送文本: { "chatId": "123456789", "text": "任务完成 ✅" }`,
+- 发富文本: { "text": "## 报告\\n\\n| 指标 | 值 |\\n|:--|--:|\\n| 收益 | **3.2%** |" }
+- 发普通文本: { "chatId": "123456789", "text": "任务完成 ✅" }`,
     {
       type: 'object',
       properties: {
         chatId: { type: 'string', description: '目标聊天 ID（数字或 @username，可省略用默认）' },
-        text: { type: 'string', description: '消息内容' },
-        parseMode: { type: 'string', enum: ['HTML', 'Markdown'], description: '解析模式' },
+        text: { type: 'string', description: '消息内容（Markdown；默认富消息原生渲染表格/标题/列表/引用/公式）' },
+        parseMode: { type: 'string', enum: ['HTML', 'Markdown'], description: '强制旧接口解析模式（HTML/Markdown）；留空=富文本发送（推荐）' },
+        richMode: { type: 'string', enum: ['auto', 'on', 'off'], description: '富消息模式：auto(默认,失败自动降级)/on(强制)/off(旧路径)' },
         silent: { type: 'boolean', description: '静默发送' },
-        disableWebPreview: { type: 'boolean', description: '禁用网页预览' }
+        disableWebPreview: { type: 'boolean', description: '禁用网页预览（仅 parseMode 旧接口时生效）' }
       },
       required: ['text']
     },
@@ -338,7 +358,7 @@ export const telegramTools = [
 使用方法：
   chatId: 目标聊天 ID（可省略用默认）
   path: 本地文件绝对路径
-  caption: 附加说明文字（可选）
+  caption: 附加说明文字（可选，支持 Markdown 富格式，最长 1024）
   mediaType: 文件类型 photo|video|audio|document|sticker（可选，自动检测）
 
 示例：
@@ -348,7 +368,7 @@ export const telegramTools = [
       properties: {
         chatId: { type: 'string', description: '目标聊天 ID（可省略用默认）' },
         path: { type: 'string', description: '本地文件绝对路径' },
-        caption: { type: 'string', description: '附加说明文字' },
+        caption: { type: 'string', description: '附加说明文字（支持 Markdown 富格式）' },
         mediaType: { type: 'string', enum: ['photo', 'video', 'audio', 'document', 'sticker'], description: '文件类型' }
       },
       required: ['path']

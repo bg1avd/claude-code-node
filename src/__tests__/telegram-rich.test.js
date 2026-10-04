@@ -114,3 +114,28 @@ test('429 → 自动等待重试', async () => {
   assert.equal(calls[0].method, 'sendRichMessage')
   assert.equal(calls[1].method, 'sendRichMessage')
 })
+
+test('editFormatted：富编辑走 editMessageText + rich_message（markdown 直传）', async () => {
+  const calls = stubFetch()
+  const bot = mkBot()
+  const md = '# 标题\n\n| A | B |\n|--|--|\n| 1 | 2 |'
+  await bot.editFormatted('123', 55, md)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].method, 'editMessageText')
+  assert.equal(calls[0].body.message_id, 55)
+  assert.equal(calls[0].body.rich_message.markdown, md)
+})
+
+test('editFormatted：富编辑 400 → 降级 HTML edit（Markdown 已转换）', async () => {
+  const calls = stubFetch(({ body }) =>
+    body && body.rich_message
+      ? { data: { ok: false, error_code: 400, description: 'x' } }
+      : { data: { ok: true, result: { message_id: 55 } } })
+  const bot = mkBot()
+  await bot.editFormatted('123', 55, '**bold** 与 `code`')
+  assert.equal(calls.length, 2)
+  assert.ok(calls[0].body.rich_message, '先试富编辑')
+  assert.equal(calls[1].body.parse_mode, 'HTML')
+  assert.ok(calls[1].body.text.includes('<b>bold</b>'), '应转成 <b>')
+  assert.ok(calls[1].body.text.includes('<code>code</code>'), '应转成 <code>')
+})

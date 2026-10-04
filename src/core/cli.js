@@ -1517,16 +1517,16 @@ export async function main() {
         tgThinking.lastResetAt = Date.now()
       }
       if (tgThinking.lastMsgId) {
-        await tgListener.bot.editMessage(target, tgThinking.lastMsgId, body, { parseMode: 'HTML' })
+        await tgListener.bot.editFormatted(target, tgThinking.lastMsgId, body)
       } else {
-        const res = await tgListener.bot.sendMessage(target, body, { parseMode: 'HTML' })
+        const res = await tgListener.bot.sendFormatted(target, body)
         tgThinking.lastMsgId = res?.message_id || null
       }
     } catch (e) {
       // 编辑失败（如消息被删）→ 重发一条新的
       tgThinking.lastMsgId = null
       try {
-        const res = await tgListener.bot.sendMessage(target, body, { parseMode: 'HTML' })
+        const res = await tgListener.bot.sendFormatted(target, body)
         tgThinking.lastMsgId = res?.message_id || null
       } catch {}
     } finally {

@@ -418,8 +418,8 @@ function createMessageHandler(config) {
           const { TelegramListener } = await import('./tg-listener.js')
           const tl = new TelegramListener(config)
           if (tl.bot) {
-            const escaped = '```\n' + output.trim().slice(0, 3500) + '\n```'
-            await tl.bot.sendMessage(chatId, `💻 $ ${cmd}\n${escaped}`, { replyTo })
+            const md = `💻 \`$ ${cmd}\`\n\n\`\`\`\n${output.trim().slice(0, 3500)}\n\`\`\``
+            await tl.bot.sendFormatted(chatId, md, { replyTo })
           }
         }
         if (isQQBot) {

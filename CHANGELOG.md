@@ -1,5 +1,15 @@
 # CHANGELOG
 
+## v3.4.1
+
+## v3.4.1 — 富消息覆盖补齐（工具入口 + 编辑路径）
+
+- **fix(tg-rich)**: `telegram_send_message` 工具默认改走 `sendFormatted` 富文本 —— 修复该工具此前直接调 `sendMessage(HTML)` 却**未做 Markdown→HTML 转换**，导致经工具发出的消息 `**粗体**` / `| 表 |` / `## 标题` 原样显示（与 AI 回复路径行为不一致）
+- **feat(tg-edit)**: 新增 `editRichMessage` / `editFormatted` —— 编辑消息也走富消息（`editMessageText` + `rich_message`），失败自动降级 HTML 编辑（含 404 记忆降级）
+- **refactor(tg-send)**: `_sendLongMessage`（shell 命令长输出 / AI 长回复）、CLI thinking 提示编辑、`notify-daemon` 命令回显统一改走 `sendFormatted` —— 所有对外发送/编辑入口富文本化，无遗漏
+- **test**: 新增 `telegram-tools.test.js`（5 项：默认富文本 / 显式 parseMode 走旧接口 / 降级 / richMode=off / 缺参报错），`telegram-rich.test.js` 补 2 项编辑降级用例（合计 14 项全绿）
+
+
 ## v3.4.0 — Telegram 富消息（Markdown 原生渲染 + 真表格）
 
 - **feat(tg-rich)**: 发送端改用 **Bot API 10.1+ 的 `sendRichMessage`** —— 直接把模型输出的 Markdown 交给 Telegram 原生渲染（**表格、标题、列表、引用、脚注、公式、可折叠块**），单条上限从 4096 提升到 **32768** 字符
