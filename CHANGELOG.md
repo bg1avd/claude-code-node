@@ -1,5 +1,17 @@
 # CHANGELOG
 
+## v3.4.0 — Telegram 富消息（Markdown 原生渲染 + 真表格）
+
+- **feat(tg-rich)**: 发送端改用 **Bot API 10.1+ 的 `sendRichMessage`** —— 直接把模型输出的 Markdown 交给 Telegram 原生渲染（**表格、标题、列表、引用、脚注、公式、可折叠块**），单条上限从 4096 提升到 **32768** 字符
+- **fix(tg-render)**: 根治"发出去是未渲染的 Markdown"——此前只设 `parse_mode:'HTML'` 却从不把 Markdown 转成 HTML，导致 `**粗体**`、`| 表 |`、`## 标题` 原样显示；代码块里的 `<...>` 还会触发 400 被降级成纯文本
+- **feat(tg-fallback)**: 三级降级链（保证送达）——`sendRichMessage` → `sendMessage`+Markdown→Telegram HTML → `sendMessage` 纯文本
+- **feat(tg-rich-config)**: 新增 `channels.telegram.richMessages` 开关：`auto`(默认)/`on`/`off`；`auto` 下遇"方法不存在/会话不支持"会记忆降级，避免每条白试
+- **feat(markdown-util)**: 新增零依赖 `src/utils/markdown.js`（`escapeHtml` / `markdownToTelegramHtml` / `splitMarkdown`）：Markdown→HTML 降级转换 + 围栏代码块感知的安全分片
+- **refactor(tg-send)**: 三个发送点统一走 `sendFormatted` 并接管分片：`cli.js:sendTelegram`、`notify-daemon.js` 回复路径、`channel/index.js:TelegramChannel`
+- **fix(tg-429)**: 富消息 429 重试的 `retry_after` 改用 `??`（不再把 0 吞成默认值）
+- 新增 25 项单测：`markdown`(18) + `telegram-rich`(7，含三级降级链/404 记忆/off 模式/超长分片/429)
+- 文档：`Telegram富格式渲染调研_20261004.md`（含官方依据与真机实测）
+
 ## v3.3.1 — Token 估算漏算修复(压缩误判超窗)
 
 - **fix(token-budget)**: 修复 token 估算**严重低估** —— `estimateMessages` 之前只看 `msg.content`，**完全漏算 `tool_calls` 参数(arguments)、`reasoning_content`、非字符串 content、图片**。长对话中工具参数(Write 整个文件内容 / Edit 大段替换 / Bash 长命令)累积数十万 token 却估成 0，压缩判定误判"无需压缩"(实测 308k 估 vs 986k 实际，**3.2 倍低估**)→ API 400 超窗

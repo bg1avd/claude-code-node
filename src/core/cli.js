@@ -1431,28 +1431,14 @@ export async function main() {
     showPrompt()
   }
 
-  // 发送文本到 Telegram（支持分片，>4000 字符自动拆分）
+  // 发送文本到 Telegram（富消息优先，自动降级 + 自动分片）
   async function sendTelegram(text, chatId = null) {
     try {
       const target = chatId || tgChatId
-      if (!target) return
-      const MAX_LEN = 4000
-      if (text.length <= MAX_LEN) {
-        await tgListener.bot.sendMessage(target, text, { parseMode: 'HTML' })
-      } else {
-        const parts = []
-        let cur = ''
-        for (const line of text.split('\n')) {
-          if (cur.length + line.length > 3800) { parts.push(cur); cur = line }
-          else { cur += (cur ? '\n' : '') + line }
-        }
-        if (cur) parts.push(cur)
-        for (let i = 0; i < parts.length; i++) {
-          const header = i > 0 ? `📎 (${i + 1}/${parts.length})\n` : ''
-          await tgListener.bot.sendMessage(target, header + parts[i], { parseMode: 'HTML' })
-          await new Promise(r => setTimeout(r, 300))
-        }
-      }
+      if (!target || !tgListener?.bot) return
+      await tgListener.bot.sendFormatted(target, stripAnsiCodes(text), {
+        richMode: config.get('channels')?.telegram?.richMessages,
+      })
     } catch (e) {
       console.error(`[TG] send failed: ${e.message}`)
     }
@@ -1638,6 +1624,7 @@ export async function main() {
             token: tgToken,
             proxy: process.env.CC_NODE_CHANNEL_TELEGRAM_PROXY || config.get('channels')?.telegram?.proxy || '',
             apiBase: process.env.CC_NODE_CHANNEL_TELEGRAM_API_BASE || config.get('channels')?.telegram?.apiBase || '',
+            richMessages: config.get('channels')?.telegram?.richMessages,
           },
         },
       })

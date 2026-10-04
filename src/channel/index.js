@@ -26,13 +26,15 @@ function escapeMarkdownV2(text) {
   return text.replace(TG_MD_ESCAPE_CHARS, '\\$&')
 }
 
+import { markdownToTelegramHtml, splitMarkdown, RICH_MAX_LEN, CLASSIC_CHUNK } from '../utils/markdown.js'
+
 // ============================================================
 // 通道适配器
 // ============================================================
 
 /** Telegram Bot API 适配器 v2.0 */
 class TelegramChannel {
-  constructor({ token, chatId }) {
+  constructor({ token, chatId, richMessages }) {
     this.token = token
     this.chatId = chatId
     this.proxyAddr = process.env.CC_NODE_CHANNEL_TELEGRAM_PROXY || ''
@@ -40,6 +42,9 @@ class TelegramChannel {
     this.apiBase = customBase || `https://api.telegram.org/bot${token}`
     this.lastCall = 0
     this.callInterval = 50  // 20 calls/sec max
+    // 富消息模式: 'auto'(默认) | 'on' | 'off'
+    this.richMode = richMessages || 'auto'
+    this.richDisabled = false
   }
 
   /** 带代理支持的 fetch */
@@ -59,47 +64,101 @@ class TelegramChannel {
     this.lastCall = Date.now()
   }
 
-  /** 发送消息（自动分段） */
+  /** 发送消息（富消息优先，自动降级 + 自动分片） */
   async send(text, options = {}) {
-    const MAX_LEN = 4000
-    const parts = this._splitMessage(text, MAX_LEN)
+    const richOn = this.richMode !== 'off' && !this.richDisabled
+    const maxLen = richOn ? RICH_MAX_LEN : CLASSIC_CHUNK
+    const parts = splitMarkdown(text, maxLen - 64)
     const results = []
 
     for (let i = 0; i < parts.length; i++) {
-      const part = parts[i]
       const header = i > 0 ? `📎 (${i + 1}/${parts.length})\n` : ''
-      const body = header + part
-
-      await this._rateLimit()
-      const result = await this._sendSingle(body, options)
-      results.push(result)
-
-      // 分段之间稍作延迟
-      if (i < parts.length - 1) {
-        await new Promise(r => setTimeout(r, 200))
-      }
+      results.push(await this._sendOne(header + parts[i], options, richOn))
+      if (i < parts.length - 1) await new Promise(r => setTimeout(r, 200))
     }
     return results[0] || {}
   }
 
-  /** 单条发送 */
+  /** 单条：富 → HTML → 纯文本 */
+  async _sendOne(text, options, richOn) {
+    if (richOn) {
+      try {
+        return await this.sendRichMessage(text, options)
+      } catch (e) {
+        if (e.tgErrorCode === 404 || /not found|unknown method/i.test(e.message)) this.richDisabled = true
+        if (this.richMode === 'on') throw e
+      }
+    }
+    return this._sendClassic(text, options)
+  }
+
+  /** 富消息（Bot API 10.1+）：Markdown 直传，原生渲染表格 */
+  async sendRichMessage(text, options = {}) {
+    const { silent, replyTo, keyboard } = options
+    await this._rateLimit()
+    const body = {
+      chat_id: this.chatId,
+      rich_message: { markdown: String(text ?? '').slice(0, RICH_MAX_LEN) },
+      disable_notification: silent || false,
+    }
+    if (replyTo) body.reply_parameters = { message_id: replyTo }
+    if (keyboard) body.reply_markup = JSON.stringify(keyboard)
+
+    const r = await this._fetch(`${this.apiBase}/sendRichMessage`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    })
+    const data = await r.json().catch(() => ({ ok: false, description: `HTTP ${r.status}` }))
+    if (!data.ok) {
+      if (data.error_code === 429) {
+        await new Promise(res => setTimeout(res, (data.parameters?.retry_after ?? 3) * 1000))
+        return this.sendRichMessage(text, options)
+      }
+      const err = new Error(`Telegram sendRichMessage ${data.error_code || ''}: ${(data.description || 'unknown').slice(0, 200)}`)
+      err.tgErrorCode = data.error_code
+      throw err
+    }
+    return data.result
+  }
+
+  /** 降级路径：Markdown → Telegram HTML，再兜底纯文本 */
+  async _sendClassic(text, options = {}) {
+    const parts = splitMarkdown(text, CLASSIC_CHUNK)
+    const results = []
+    for (let i = 0; i < parts.length; i++) {
+      const header = i > 0 ? `📎 (${i + 1}/${parts.length})\n` : ''
+      const raw = header + parts[i]
+      let out
+      try {
+        out = await this._sendSingle(markdownToTelegramHtml(raw), options)
+      } catch {
+        out = await this._sendSingle(raw, { ...options, parseMode: 'text' })
+      }
+      results.push(out)
+      if (i < parts.length - 1) await new Promise(r => setTimeout(r, 200))
+    }
+    return results[0] || {}
+  }
+
+  /** 单条发送（旧接口，供降级路径使用） */
   async _sendSingle(text, options = {}) {
     const { parseMode, silent, replyTo, disableWebPreview, keyboard } = options
-    const useMarkdown = parseMode === 'Markdown' || parseMode === 'MarkdownV2' || !parseMode
+    const plain = parseMode === 'text' || parseMode === null
 
     const body = {
       chat_id: this.chatId,
       text: text.slice(0, 4096),
-      parse_mode: 'HTML',  // HTML 比 Markdown 更稳定
       disable_notification: silent || false,
       disable_web_page_preview: disableWebPreview ?? true,
     }
 
+    if (!plain) {
+      body.parse_mode = 'HTML'  // HTML 比 Markdown 更稳定
+      // Telegram HTML 安全编码（只保留基本标签）
+      body.text = this._safeHTML(body.text)
+    }
+
     if (replyTo) body.reply_parameters = { message_id: replyTo }
     if (keyboard) body.reply_markup = JSON.stringify(keyboard)
-
-    // Telegram HTML 安全编码（只保留基本标签）
-    body.text = this._safeHTML(body.text)
 
     const r = await this._fetch(`${this.apiBase}/sendMessage`, {
       method: 'POST',
@@ -112,11 +171,11 @@ class TelegramChannel {
       // 429 — 速率限制，自动等待
       if (data.error_code === 429) {
         const retryAfter = data.parameters?.retry_after || 3
-        await new Promise(r => setTimeout(r, retryAfter * 1000))
+        await new Promise(r2 => setTimeout(r2, retryAfter * 1000))
         return this._sendSingle(text, { ...options, parseMode: undefined })
       }
       // 400 格式错 — 降级纯文本
-      if (data.error_code === 400) {
+      if (data.error_code === 400 && !plain) {
         return this._sendSingle(text, { ...options, parseMode: 'text' })
       }
       throw new Error(`Telegram error ${data.error_code}: ${(data.description || '').slice(0, 200)}`)
@@ -141,7 +200,7 @@ class TelegramChannel {
       .replace(/<hr[^>]*>/gi, '\n────────────\n')
       .replace(/<img[^>]*>/gi, '[图片]')
       .replace(/<[^>]+>/g, (tag) => {
-        const allowed = ['<b>', '</b>', '<i>', '</i>', '<u>', '</u>', '<s>', '</s>', '<code>', '</code>', '<pre>', '</pre>']
+        const allowed = ['<b>', '</b>', '<i>', '</i>', '<u>', '</u>', '<s>', '</s>', '<code>', '</code>', '<pre>', '</pre>', '<blockquote>', '</blockquote>']
         if (allowed.includes(tag.toLowerCase())) return tag
         if (tag.toLowerCase().startsWith('<a ')) return tag
         if (tag === '</a>') return tag

@@ -597,12 +597,16 @@ cc-node
     "telegram": {
       "type": "telegram",
       "token": "123456:ABC-DEF",
-      "chatId": "78901234"
+      "chatId": "78901234",
+      "richMessages": "auto"
     }
   },
   "defaultChannel": "telegram"
 }
 ```
+
+> `richMessages`：`auto`（默认，富消息优先，失败自动降级）/ `on`（强制富消息）/ `off`（旧路径）。
+> 富消息走 Bot API 的 `sendRichMessage`，直接把 Markdown 交给 Telegram 原生渲染（**表格、标题、列表、引用、公式**，单条上限 32768 字符）。
 
 ### REPL 命令
 

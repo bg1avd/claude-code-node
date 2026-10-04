@@ -350,7 +350,7 @@ function createMessageHandler(config) {
       if (isTelegram) {
         const { TelegramListener } = await import('./tg-listener.js')
         const tl = new TelegramListener(config)
-        if (tl.bot) await tl.bot.sendMessage(chatId, reply, { replyTo })
+        if (tl.bot) await tl.bot.sendFormatted(chatId, reply, { replyTo })
       }
       if (isQQBot) {
         await sendToChannel(config.channels, 'qqbot', reply)
@@ -373,7 +373,7 @@ function createMessageHandler(config) {
       if (isTelegram) {
         const { TelegramListener } = await import('./tg-listener.js')
         const tl = new TelegramListener(config)
-        if (tl.bot) await tl.bot.sendMessage(chatId, reply, { replyTo })
+        if (tl.bot) await tl.bot.sendFormatted(chatId, reply, { replyTo })
       }
       if (isQQBot) {
         await sendToChannel(config.channels, 'qqbot', reply)
@@ -399,7 +399,7 @@ function createMessageHandler(config) {
       if (isTelegram) {
         const { TelegramListener } = await import('./tg-listener.js')
         const tl = new TelegramListener(config)
-        if (tl.bot) await tl.bot.sendMessage(chatId, reply, { replyTo })
+        if (tl.bot) await tl.bot.sendFormatted(chatId, reply, { replyTo })
       }
       if (isQQBot) {
         await sendToChannel(config.channels, 'qqbot', reply)
@@ -430,7 +430,7 @@ function createMessageHandler(config) {
         if (isTelegram) {
           const { TelegramListener } = await import('./tg-listener.js')
           const tl = new TelegramListener(config)
-          if (tl.bot) await tl.bot.sendMessage(chatId, reply, { replyTo })
+          if (tl.bot) await tl.bot.sendFormatted(chatId, reply, { replyTo })
         }
         if (isQQBot) {
           await sendToChannel(config.channels, 'qqbot', reply)
@@ -448,7 +448,7 @@ function createMessageHandler(config) {
         if (isTelegram) {
           const { TelegramListener } = await import('./tg-listener.js')
           const tl = new TelegramListener(config)
-          if (tl.bot) await tl.bot.sendMessage(chatId, reply, { replyTo })
+          if (tl.bot) await tl.bot.sendFormatted(chatId, reply, { replyTo })
         }
         if (isQQBot) {
           await sendToChannel(config.channels, 'qqbot', reply)
@@ -465,7 +465,7 @@ function createMessageHandler(config) {
       if (isTelegram) {
         const { TelegramListener } = await import('./tg-listener.js')
         const tl = new TelegramListener(config)
-        if (tl.bot) await tl.bot.sendMessage(chatId, reply, { replyTo })
+        if (tl.bot) await tl.bot.sendFormatted(chatId, reply, { replyTo })
       }
       if (isQQBot) {
         await sendToChannel(config.channels, 'qqbot', reply)
@@ -496,24 +496,8 @@ function createMessageHandler(config) {
       if (isTelegram && config.channels.telegram?.token) {
         const { TelegramListener } = await import('./tg-listener.js')
         const tl = new TelegramListener(config)
-        if (tl.bot) {
-          if (reply.length > 4000) {
-            const parts = []
-            let cur = ''
-            for (const line of reply.split('\n')) {
-              if (cur.length + line.length > 3800) { parts.push(cur); cur = line }
-              else { cur += (cur ? '\n' : '') + line }
-            }
-            if (cur) parts.push(cur)
-            for (let i = 0; i < parts.length; i++) {
-              const header = i > 0 ? `📎 (${i + 1}/${parts.length})\n` : ''
-              await tl.bot.sendMessage(chatId, header + parts[i], { replyTo: i === 0 ? replyTo : undefined })
-              await new Promise(r => setTimeout(r, 300))
-            }
-          } else {
-            await tl.bot.sendMessage(chatId, reply, { replyTo })
-          }
-        }
+        // 富消息优先（Markdown 原生渲染，含表格），自动降级 + 自动分片
+        if (tl.bot) await tl.bot.sendFormatted(chatId, reply, { replyTo })
       }
 
       if (isQQBot) {
@@ -531,7 +515,7 @@ function createMessageHandler(config) {
         try {
           const { TelegramListener } = await import('./tg-listener.js')
           const tl = new TelegramListener(config)
-          if (tl.bot) await tl.bot.sendMessage(chatId, errMsg, { replyTo })
+          if (tl.bot) await tl.bot.sendFormatted(chatId, errMsg, { replyTo })
         } catch {}
       }
       if (isQQBot) {

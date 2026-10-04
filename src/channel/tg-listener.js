@@ -21,6 +21,7 @@ import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { join, dirname } from 'path'
 import { t, applyMessageLanguage } from '../core/i18n.js'
+import { markdownToTelegramHtml, splitMarkdown, RICH_MAX_LEN, CLASSIC_CHUNK } from '../utils/markdown.js'
 
 const TG_MD_ESCAPE_CHARS = /[_*[\]()~`>#+\-=|{}.!]/g
 const TG_CODE_ESCAPE_CHARS = /[`\\]/g
@@ -103,6 +104,10 @@ export class TelegramBotClient {
     this.apiBase = opts.apiBase || API_BASE(token)
     this.proxyAddr = opts.proxy || ''  // SOCKS5 代理地址, 如 "127.0.0.1:1080" 或 "socks5://user:pass@host:port"
     this.rateLimiter = new RateLimiter()
+    // 富消息模式: 'auto'(默认,失败自动降级并记忆) | 'on'(强制) | 'off'(回旧路径)
+    this.richMode = opts.richMode || 'auto'
+    // 运行期探测：一旦判定"服务端/会话不支持富消息"就置 true，后续直接走降级，避免每条都白试
+    this.richDisabled = false
   }
 
   /** 带代理支持的 fetch */
@@ -154,6 +159,101 @@ export class TelegramBotClient {
       throw new Error(`Telegram API ${data.error_code}: ${data.description?.slice(0, 200) || 'unknown'}`)
     }
     return data.result
+  }
+
+  /**
+   * 发送富消息（Bot API 10.1+ 的 sendRichMessage）。
+   * 直接传 Markdown(GFM)，Telegram 原生渲染表格/标题/列表/引用/公式等。
+   * 失败抛错（带 tgErrorCode），由 sendFormatted 决定是否降级。
+   */
+  async sendRichMessage(chatId, markdown, options = {}) {
+    const { replyTo, silent, keyboard, messageThreadId } = options
+    await this.rateLimiter.waitForSlot(chatId)
+
+    const body = {
+      chat_id: chatId,
+      rich_message: { markdown: String(markdown ?? '').slice(0, RICH_MAX_LEN) },
+      disable_notification: silent || false,
+    }
+    if (replyTo) body.reply_parameters = { message_id: replyTo }
+    if (keyboard) body.reply_markup = JSON.stringify(keyboard)
+    if (messageThreadId) body.message_thread_id = messageThreadId
+
+    const res = await this._fetch(`${this.apiBase}/sendRichMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+
+    let data
+    try { data = await res.json() } catch { throw new Error(`Telegram sendRichMessage HTTP ${res.status}`) }
+
+    if (!data.ok) {
+      if (data.error_code === 429) {
+        const retryAfter = data.parameters?.retry_after ?? 5
+        await new Promise(r => setTimeout(r, retryAfter * 1000))
+        return this.sendRichMessage(chatId, markdown, options)
+      }
+      const err = new Error(`Telegram sendRichMessage ${data.error_code}: ${(data.description || 'unknown').slice(0, 200)}`)
+      err.tgErrorCode = data.error_code
+      throw err
+    }
+    return data.result
+  }
+
+  /**
+   * 富格式发送入口（三级降级，保证送达）：
+   *   1) sendRichMessage   —— Markdown 原生渲染（含真表格）
+   *   2) sendMessage + Markdown→Telegram HTML —— 粗体/代码/链接可用
+   *   3) sendMessage 纯文本 —— 兜底
+   * 超过单条上限时自动分片（富 32768 / 降级 3500），分片头 "📎 (i/n)"。
+   */
+  async sendFormatted(chatId, text, options = {}) {
+    const mode = options.richMode || this.richMode || 'auto'
+    const richOn = mode !== 'off' && !this.richDisabled
+    const maxLen = richOn ? RICH_MAX_LEN : CLASSIC_CHUNK
+    const parts = splitMarkdown(text, maxLen - 64) // 预留分片头空间
+
+    const results = []
+    for (let i = 0; i < parts.length; i++) {
+      const header = i > 0 ? `📎 (${i + 1}/${parts.length})\n` : ''
+      results.push(await this._sendOneFormatted(chatId, header + parts[i], options, richOn, mode))
+      if (i < parts.length - 1) await new Promise(r => setTimeout(r, 300))
+    }
+    return results[0]
+  }
+
+  /** 单条发送：富 → HTML → 纯文本 */
+  async _sendOneFormatted(chatId, text, options, richOn, mode) {
+    if (richOn) {
+      try {
+        return await this.sendRichMessage(chatId, text, options)
+      } catch (e) {
+        // 方法不存在 / 会话不支持 → 记住并长期降级；其余错误也降级，但下条仍会重试富消息
+        if (e.tgErrorCode === 404 || /not found|unknown method/i.test(e.message)) this.richDisabled = true
+        if (mode === 'on') throw e
+      }
+    }
+    return this._sendClassic(chatId, text, options)
+  }
+
+  /** 降级路径：Markdown → Telegram HTML，再兜底纯文本 */
+  async _sendClassic(chatId, text, options = {}) {
+    const parts = splitMarkdown(text, CLASSIC_CHUNK)
+    const results = []
+    for (let i = 0; i < parts.length; i++) {
+      const header = i > 0 ? `📎 (${i + 1}/${parts.length})\n` : ''
+      const raw = header + parts[i]
+      let r
+      try {
+        r = await this.sendMessage(chatId, markdownToTelegramHtml(raw), { ...options, parseMode: 'HTML' })
+      } catch {
+        r = await this.sendMessage(chatId, raw, { ...options, parseMode: null })
+      }
+      results.push(r)
+      if (i < parts.length - 1) await new Promise(res => setTimeout(res, 300))
+    }
+    return results[0]
   }
 
   /** 编辑消息 */
@@ -287,7 +387,7 @@ export class TelegramListener {
     this.token = ch.token
     this.proxyAddr = ch.proxy || process.env.CC_NODE_CHANNEL_TELEGRAM_PROXY || ''
     this.apiBase = ch.apiBase || ''
-    this.bot = this.token ? new TelegramBotClient(this.token, { proxy: this.proxyAddr, apiBase: this.apiBase }) : null
+    this.bot = this.token ? new TelegramBotClient(this.token, { proxy: this.proxyAddr, apiBase: this.apiBase, richMode: ch.richMessages }) : null
     // 从磁盘恢复持久化的 offset，避免进程重启后重放旧消息（含 /quit 等历史命令）
     this.lastUpdateId = this._loadOffset()
     this.running = false
