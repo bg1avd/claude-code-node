@@ -4,9 +4,12 @@
  */
 import { readFile, writeFile, mkdir, readdir, rm, chmod } from 'fs/promises'
 import { resolve, join } from 'path'
+import { homedir } from 'os'
 import { randomBytes } from 'crypto'
 
-const DEFAULT_SESSIONS_DIR = '.claude-code/sessions'
+// 会话目录默认落在**机器级** ~/.cc-node/sessions（一台机器一个 cc-node，会话集中一处）。
+// 与 src/stdio/server.js 的会话目录一致，也与 config.DEFAULTS.sessionsDir 一致。
+const DEFAULT_SESSIONS_DIR = join(homedir(), '.cc-node', 'sessions')
 
 export class SessionManager {
   constructor(options = {}) {

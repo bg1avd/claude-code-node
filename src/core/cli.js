@@ -396,6 +396,8 @@ Options:
   --small-model-max-turns N Reserved (no-op — tool loop uses maxTurns)
   --with-notify             Start built-in channel listener (Telegram)
                             (replaces cc-notify daemon — no external script needed)
+  --no-continue             Don't auto-resume the last session on startup (config autoContinue)
+  --no-compact              Disable auto context compaction (config autoCompact)
   -h, --help                Show this help
 
 Environment variables:
@@ -520,7 +522,8 @@ export async function main() {
   } else if (!model) {
     model = 'deepseek-flash'  // 无 apiBase 也无 model → DeepSeek 默认
   }
-  const DEFAULT_SYSTEM_PROMPT = `You are cc-node, an AI coding assistant. Configuration files: user-level ~/.claude-code/config.json, project-level .claude-code/config.json (in project root). Runtime files (pid/socket): ~/.cc-node/. Never reference settings.json or .claude.json — those paths do not exist.`
+  const DEFAULT_SYSTEM_PROMPT = `You are cc-node, an AI coding assistant. Configuration files: user-level ~/.claude-code/config.json, project-level .claude-code/config.json (in project root). Runtime files (pid/socket): ~/.cc-node/. Never reference settings.json or .claude.json — those paths do not exist.
+Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-node/tools/<tool-name>/index.js (ESM: export default { name?, description, parameters, permissionLevel?, handler }, plus a README.md); project-specific ones at <project>/.claude-code/tools/<tool-name>/index.js. When asked to create a reusable tool, write it there in that layout (see CUSTOM_TOOLS.md).`
   const verbose = cliArgs.verbose || config.get('verbose')
 
   // TG 提示语言基准：config.language 有中文标识（zh/中文/chinese/cn）→ 中文；
@@ -599,10 +602,49 @@ export async function main() {
     })
   }
 
+  // 自定义工具接线：机器级 ~/.cc-node/tools/ + 项目级 <cwd>/.claude-code/tools/ + config.tools.customDirs。
+  // 目录式约定：<dir>/<工具名>/index.js（+ README.md）。best-effort，单个失败只告警跳过、不阻塞启动。
+  // 冲突优先级：内置/MCP > 项目级 > 机器级（同名自定义工具已在 loader 内按优先级去重）。
+  {
+    const { tools: customTools, errors: customToolErrors } = await loadCustomTools({
+      cwd: process.cwd(),
+      extraDirs: config.get('tools.customDirs') || [],
+      log: (m) => { if (verbose) console.error(m) },
+    })
+    let customRegistered = 0
+    for (const t of customTools) {
+      if (registry.has(t.name)) {
+        console.error(`⚠️  自定义工具 "${t.name}" 与内置/MCP 工具同名，已跳过（保留内置/MCP；来源 ${t._source || 'custom'}）`)
+        continue
+      }
+      registry.register(t)
+      customRegistered++
+    }
+    if (customRegistered > 0) {
+      console.log(`🔧 已加载 ${customRegistered} 个自定义工具（机器级 ~/.cc-node/tools/ + 项目级 .claude-code/tools/）`)
+    }
+    if (customToolErrors.length > 0) {
+      for (const e of customToolErrors) {
+        console.error(`⚠️  自定义工具加载失败：${e.file || e.dir} — ${e.error?.message || e.error}`)
+      }
+    }
+  }
+
   let session
   if (cliArgs.resume) {
     session = await sessionManager.load(cliArgs.resume)
     if (!session) { console.error(`Session not found: ${cliArgs.resume}`); process.exit(1) }
+  } else if (cliArgs.noContinue ? false : config.get('autoContinue') !== false) {
+    // 自动续接「上一次会话」：取会话目录里最新的一条（list 已按 updated 倒序）。
+    // 等价默认 --resume last。用 /clear 或 --no-continue 可改为全新会话。
+    let latest = null
+    try { latest = (await sessionManager.list())[0] || null } catch { /* 目录为空/不可读 → 新建 */ }
+    if (latest) {
+      session = await sessionManager.load(latest.id)
+      console.log(`🔁 已续接上一次会话：${session.title}（${session.messages?.length || 0} 条消息） · 用 /clear 开始新会话`)
+    } else {
+      session = await sessionManager.create()
+    }
   } else {
     session = await sessionManager.create()
   }
@@ -1072,7 +1114,11 @@ export async function main() {
           console.log('Available tools:')
           for (const name of registry.getNames()) {
             const tool = registry.get(name)
-            console.log(`  ${name} — ${tool.description.split('\n')[0]}`)
+            // 标注来源：MCP 服务器 / 自定义工具（machine 机器级 / project 项目级 / config）
+            let tag = ''
+            if (tool._mcpserver) tag = ` [MCP:${tool._mcpserver}]`
+            else if (tool._source) tag = ` [自定义:${tool._source}]`
+            console.log(`  ${name}${tag} — ${tool.description.split('\n')[0]}`)
           }
           break
         case 'session':

@@ -40,6 +40,9 @@ export class QueryEngineConfig {
     this.maxMessages = options.maxMessages || 0
     // 发送前常驻工具结果截断长度（字符），防止超长工具结果堆积（0 表示不截断）
     this.maxToolResultChars = options.maxToolResultChars || 6000
+    // 自动压缩总开关（默认开）：到窗口阈值自动「截断工具结果 + 折叠条数 + 摘要压缩 + 滑窗裁剪」。
+    // 置 false 则整条压缩链关闭（长对话可能触发 API 超窗，仅在你确知窗口足够时关闭）。
+    this.autoCompact = options.autoCompact !== false
     // 小模型适配模式（让弱模型可靠工作）：
     //   - 强化 system prompt（强制工具调用）
     //   - 敷衍输出检测 + 重试
@@ -144,6 +147,8 @@ export class QueryEngine {
    */
   _ensureFitWindow() {
     if (!this.tokenBudget) return
+    // 自动压缩总开关关闭时，整条压缩链（截断/折叠/摘要/裁剪）都不介入。
+    if (this.config.autoCompact === false) return
 
     // ---- 0) 发送前常驻工具结果截断（不依赖超窗）----
     // 避免超长工具结果持续堆积成噪音；阈值宽松（默认 6000），仅在确实过长时截断

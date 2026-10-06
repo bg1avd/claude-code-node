@@ -40,9 +40,15 @@ const DEFAULTS = {
   permissionMode: 'ask',
   verbose: false,
   apiKey: '',
-  sessionsDir: '.claude-code/sessions',
+  // 会话目录：默认**机器级**（~/.cc-node/sessions，与 stdio 入口一致）。
+  // 一台机器只需跑一个 cc-node；所有会话集中一处，便于 /resume 与「退出后续接上次话题」。
+  sessionsDir: join(homedir(), '.cc-node', 'sessions'),
   dreamsDir: '.claude-code/dreams',
   dreamWakeRecent: 3,
+  // 上下文自动压缩：到窗口阈值自动压缩（不卡死、不丢）。默认开；置 false 可关闭。
+  autoCompact: true,
+  // 启动自动续接「上一次会话」：等价默认 --resume last。默认开；置 false 则每次全新会话。
+  autoContinue: true,
   dream: {
     maxRetain: 50,
     minLLMMessages: 8, // 会话达到此消息数才调用本地摘要模型（省成本）
@@ -56,6 +62,9 @@ const DEFAULTS = {
     bash: { timeout: 120, allowed: true },
     fileRead: { maxLines: 2000, maxSizeKB: 256 },
     webFetch: { timeout: 30, maxChars: 100000 },
+    // 额外的自定义工具目录（支持 ~ 展开）。机器级 ~/.cc-node/tools 与项目级
+    // <cwd>/.claude-code/tools 会**自动扫描**，无需在此声明；此处用于挂其它位置的工具集。
+    customDirs: [],
   },
   web: {
     fetch: {

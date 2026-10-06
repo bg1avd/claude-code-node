@@ -1,5 +1,22 @@
 # CHANGELOG
 
+## v3.5.0
+
+## v3.5.0 — 机器级自定义工具 + 自动续接会话
+
+- **feat(custom-tools)**: 新增**目录式自定义工具自动加载** —— 启动时自动扫描 `~/.cc-node/tools/<工具名>/index.js`（**机器级**，所有子目录共享）与 `<项目>/.claude-code/tools/<工具名>/index.js`（项目级），从此**不必再逐个角色指定路径**；也兼容平铺 `<dir>/<名>.js`，以及 `config.tools.customDirs` 额外目录
+  - 导出契约：`export default { name?, description, parameters, permissionLevel?, handler }`，兼容 `export const tool` / `export const tools=[...]` / 默认导出函数 / `.cjs`
+  - 自动补 `package.json {"type":"module"}`（否则目录内 `.js` 会被当 CJS 解析，`export` 直接报错）
+  - best-effort：单个工具 import 失败只告警跳过，**绝不阻塞启动**
+  - 同名优先级：内置 > MCP > 项目级 > 机器级 > `config.tools.customDirs`
+- **feat(cli)**: `/tools` 列表标注来源（`[自定义:machine|project|config]` / `[MCP:<server>]`）；默认系统提示词加入工具目录约定，便于"让 cc-node 自己新建工具"时落到 `~/.cc-node/tools/`
+- **feat(continue)**: 新增 `autoContinue` 开关（**默认开**）—— 启动**自动续接上一次会话**，退出再进接着聊；`--no-continue` 或 `/clear` 可改为全新会话
+- **feat(compact)**: 新增 `autoCompact` 开关（**默认开**）—— 到窗口阈值自动压缩；`--no-compact` 关闭整条压缩链
+- **change(sessions)**: 会话目录默认统一到**机器级** `~/.cc-node/sessions/`（一台机器一个 cc-node，会话集中一处，`/resume` 一览无余；与 stdio 入口一致）。旧位置 `<项目>/.claude-code/sessions/` 的会话不会被删除，可直接搬到新目录
+- **docs**: 新增 `CUSTOM_TOOLS.md`（目录约定 + `index.js` 模板 + 排查）
+- **test**: 新增 `custom-tools.test.js`（12 项：归一化 / 目录扫描 / 优先级 / CJS / 坏文件容错 / 路径）
+
+
 ## v3.4.1
 
 ## v3.4.1 — 富消息覆盖补齐（工具入口 + 编辑路径）
