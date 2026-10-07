@@ -6,6 +6,11 @@
  */
 import * as readline from 'readline'
 import { createMultilineInput } from './multiline-input.js'
+import { describeKeyEvent } from './keymap.js'
+import {
+  probeTerminalCapabilities, enableKittyKeyboard, disableKittyKeyboard,
+  enableModifyOtherKeys, disableModifyOtherKeys, disableBracketedPaste,
+} from './terminal-caps.js'
 import { createScheduler, setGlobalScheduler, getGlobalScheduler } from './scheduler.js'
 import { createServer as createNetServer } from 'net'
 import { writeFileSync, unlinkSync, existsSync, mkdirSync, readFileSync, chmodSync } from 'fs'
@@ -264,6 +269,7 @@ Commands:
   /api-key KEY   — Switch API key at runtime (local session only)
   /api           — Show current API base/key/model
   /tools         — List available tools
+  /keys [watch]  — 显示按键绑定 / 终端能力；watch 进入实时按键诊断
   /session       — Show session info
   /sessions      — List all sessions
   /clear         — Clear conversation
@@ -801,10 +807,39 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
   //   - ↑/↓ 历史、Ctrl+C 清空/退出
   //   - 非 TTY（管道/重定向）回退到 readline line 事件
   // ============================================================
+  // ---- 终端能力探测（趁启动、用户还没打字）：Kitty 键盘协议 / modifyOtherKeys ----
+  // 先进入 raw mode 才能及时收到终端回应；有回应才启用（避免在屏幕上留乱码）。
+  if (process.stdout.isTTY && process.stdin.isTTY) {
+    try { process.stdin.setRawMode(true) } catch {}
+    try {
+      const caps = await probeTerminalCapabilities({
+        stdin: process.stdin, stdout: process.stdout, timeoutMs: 250,
+      })
+      if (caps.kitty) {
+        _kittyKeyboardOn = enableKittyKeyboard(process.stdout, 1)  // flag 1 = 仅“消歧”，最保守
+      } else if (caps.modifyOtherKeys) {
+        _modifyOtherKeysOn = enableModifyOtherKeys(process.stdout, 2)
+      }
+      if (verbose) {
+        console.log(`[caps] kitty=${caps.kitty} modifyOtherKeys=${caps.modifyOtherKeys}`)
+      }
+    } catch { /* 探测失败不影响启动 */ }
+  }
+
+  // 按键诊断开关（/keys watch）
+  let keyWatch = false
+
   const inputCtrl = createMultilineInput({
     prompt: '> ',
     onSubmit: (text) => { processInputLine(text) },
     onExit: () => { process.exit(0) },
+    keybindings: config.get('keybindings'),
+    onKeyEvent: (ev) => {
+      if (!keyWatch) return
+      // 起新行打印，避免与当前输入行混在一起
+      process.stdout.write('\n')
+      console.log(`  ${describeKeyEvent(ev)}   raw=${JSON.stringify(ev.raw ?? '')}`)
+    },
   })
 
   // 显示提示符
@@ -981,6 +1016,29 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
             console.log(HELP_TEXT)
           }
           break
+        case 'keys': {
+          const sub = (rest[0] || '').toLowerCase()
+          if (sub === 'watch') {
+            keyWatch = !keyWatch
+            console.log(keyWatch
+              ? '按键诊断：已开启 —— 按任意键都会即时显示其解析结果（再输入 /keys watch 关闭）。'
+              : '按键诊断：已关闭。')
+            break
+          }
+          console.log('按键绑定（虚拟动作 → 键）：')
+          for (const [action, keys] of Object.entries(inputCtrl.bindings.all())) {
+            console.log(`  ${action.padEnd(20)} ${keys.join(', ') || '(未绑定)'}`)
+          }
+          console.log('')
+          console.log(`终端能力：Kitty 键盘协议=${_kittyKeyboardOn ? '已启用' : '未启用'} · modifyOtherKeys=${_modifyOtherKeysOn ? '已启用' : '未启用'}`)
+          console.log('')
+          console.log('想知道你的终端把某个键发成什么？先 `/keys watch`，再按那个键即可看到其解析结果。')
+          console.log('说明：Enter 在终端协议层对所有修饰键都发同一字节，Shift+Enter / Ctrl+Enter')
+          console.log('      通常无法区分（终端为兼容 reset 而故意保留）。若 /keys watch 里它们都显示')
+          console.log('      `key enter`，则需在终端侧把 Shift+Enter 映射为独立序列（如 ESC CR 或 CSI 13;2u），')
+          console.log('      之后 keymap 会自动把它识别为 shift+enter。')
+          break
+        }
         case 'model':
           // /model <名字或编号> — 支持用 /models 列表里的编号切换
           if (rest[0]) {
@@ -1857,10 +1915,16 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
 // ============================================================
 // 全局退出处理 — 回收 stdin 的 raw mode + 停定时任务系统(释放锁)
 // ============================================================
+// 终端键盘协议开关状态（供退出时还原）
+let _kittyKeyboardOn = false
+let _modifyOtherKeysOn = false
+
 function cleanupStdin() {
   try {
-    // 关闭 bracketed paste mode，避免退出后终端残留（\x1b[?2004l）
-    if (process.stdout.isTTY) process.stdout.write('\x1b[?2004l')
+    // 还原终端键盘模式，避免退出后残留
+    if (_kittyKeyboardOn) { disableKittyKeyboard(process.stdout); _kittyKeyboardOn = false }
+    if (_modifyOtherKeysOn) { disableModifyOtherKeys(process.stdout); _modifyOtherKeysOn = false }
+    if (process.stdout.isTTY) disableBracketedPaste(process.stdout)
     if (process.stdin.isTTY) process.stdin.setRawMode(false)
     process.stdin.removeAllListeners('keypress')
   } catch {}

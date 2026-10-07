@@ -1,5 +1,28 @@
 # CHANGELOG
 
+## v3.6.7
+
+## 3.6.7
+
+### 终端按键：自研 keymap 解析器 + 可配置 keybindings（零依赖）
+
+- **新增 `src/core/keymap.js`**：自研「序列表 + 有状态解析器」取代 Node 内置 `emitKeypressEvents`。
+  - 一份表管所有 **Node 版本 / 终端**，不再受 Node 版本绑定影响（旧版 Node 不认 `\x1b[200~` 的问题一并消除）。
+  - 支持 Node 原生不认识的序列：**Kitty CSI-u**（`\x1b[13;2u`）、**xterm modifyOtherKeys**（`\x1b[27;2;13~`）、**SGR 鼠标**（预留）。
+  - 覆盖控制字符 / SS3 / CSI / CSI 修饰键 / 括号粘贴 / OSC 等；未识别序列安全吞掉，不污染输入。
+- **新增 `src/core/keybindings.js`**：逻辑键 → 虚拟动作 的绑定层，**可在 config.json 重映射**：
+  `{ "keybindings": { "newline": ["shift+enter","ctrl+j"], "clear-or-exit": null } }`
+  （数组=替换该动作绑定；`null`/`[]`=解绑；也可新增自定义动作）
+- **新增 `src/core/terminal-caps.js`**：启动探测并（支持才）启用 Kitty 键盘协议 / modifyOtherKeys，退出统一还原。
+- **新增 `/keys [watch]`**：显示当前绑定 + 终端能力；`watch` 进入实时按键诊断（显示解析结果与原始字节）。
+- `multiline-input.js` 改为消费解析器事件、按**虚拟动作**分发；行为与 3.6.6 完全一致（30 个既有输入用例全绿）。
+- 单测 371 → 400（新增 keymap / keybindings / terminal-caps）。
+
+> 诚实说明：`Shift+Enter` / `Ctrl+Enter` 在终端协议层与 `Enter` 发**同一个字节**（终端为兼容 `reset` 而故意保留），
+> 应用层无法区分。用 `/keys watch` 可确认你的终端行为；若需要，请在**终端侧**把 `Shift+Enter` 映射为独立序列
+> （如 `ESC CR` 或 CSI `13;2u`），keymap 会自动识别为 `shift+enter`。
+
+
 ## v3.6.6
 
 ## 3.6.6

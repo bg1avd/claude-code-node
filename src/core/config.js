@@ -49,6 +49,10 @@ const DEFAULTS = {
   autoCompact: true,
   // 启动自动续接「上一次会话」：等价默认 --resume last。默认开；置 false 则每次全新会话。
   autoContinue: true,
+  // 终端按键绑定（动作 → 键列表），见 keybindings.js。
+  // 数组 = 替换该动作的默认绑定；null / [] = 解绑；也可新增自定义动作。
+  // 例：{ "newline": ["shift+enter", "ctrl+j"], "clear-or-exit": null }
+  keybindings: {},
   dream: {
     maxRetain: 50,
     minLLMMessages: 8, // 会话达到此消息数才调用本地摘要模型（省成本）
