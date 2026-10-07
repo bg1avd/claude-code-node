@@ -6,6 +6,7 @@ import { writeFile, mkdir } from 'fs/promises'
 import { resolve, isAbsolute, dirname } from 'path'
 import { ToolDef } from '../types/index.js'
 import { checkWritePathSafety } from '../security/path-guard.js'
+import { withFileLock } from '../utils/file-lock.js'
 
 export const fileWriteTool = new ToolDef(
   'Write',
@@ -44,7 +45,9 @@ Usage:
     try {
       // 自动创建父目录
       await mkdir(dirname(filePath), { recursive: true })
-      await writeFile(filePath, input.content, 'utf-8')
+      // 串行化对「同一文件」的写入：防止同一轮里并行的 Edit/Write 互相踩踏
+      // （并行 writeFile 会让 `open('w')` 截断与分批 write 交错，产生残片/丢改动，见 utils/file-lock.js）
+      await withFileLock(filePath, () => writeFile(filePath, input.content, 'utf-8'))
 
       const lines = input.content.split('\n').length
       const size = Buffer.byteLength(input.content, 'utf-8')
