@@ -51,8 +51,12 @@ const DEFAULTS = {
   autoContinue: true,
   // 终端按键绑定（动作 → 键列表），见 keybindings.js。
   // 数组 = 替换该动作的默认绑定；null / [] = 解绑；也可新增自定义动作。
-  // 例：{ "newline": ["shift+enter", "ctrl+j"], "clear-or-exit": null }
+  // 默认：Enter = 折行；发送 = Ctrl+S（避免误发）。想恢复「Enter 发送」：
+  //   { "submit": ["enter"], "newline": ["ctrl+j","alt+enter"] }
   keybindings: {},
+  // 输入区下方的「软键行」提示：true=默认集；数组=指定动作；false=关闭。
+  // 内容由当前绑定实时生成（改键即同步显示）。
+  softkeys: true,
   dream: {
     maxRetain: 50,
     minLLMMessages: 8, // 会话达到此消息数才调用本地摘要模型（省成本）

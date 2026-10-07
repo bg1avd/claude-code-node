@@ -10,8 +10,8 @@
 //    （见 keymap.js / keybindings.js）
 //
 //    默认动作（可在 config.json 的 keybindings 段重映射）：
-//      submit          Enter(.enter)           提交整段输入
-//      newline         Ctrl+J / Alt+Enter / …  折行（多行输入）
+//      submit          Ctrl+S                  发送（提交整段输入）
+//      newline         Enter / Ctrl+J / Alt+Enter  折行（多行输入）
 //      cursor-left/right                       光标左右
 //      cursor-word-left/right                 按词移动（Ctrl+←/→、Alt+B/F）
 //      line-start/end                         行首/行尾（Home/End、Ctrl+A/E）
@@ -20,6 +20,11 @@
 //      kill-line-end/start                    删至行尾/行首（Ctrl+K / Ctrl+U）
 //      history-prev/next                      历史（↑/↓）
 //      clear-or-exit                          清空 / 退出（Ctrl+C）
+//
+//  ⚠️ v3.6.9 起：**Enter = 折行，不再发送**；发送用显式外部键 Ctrl+S。
+//    本模块在输入区下方渲染一行**软键行**（如「^S 发送 │ ⏎ 折行 │ …」），
+//    内容由当前生效绑定实时生成（bindings.hintFor）→ 改键即同步。
+//    用 config.softkeys 控制：true=默认集 / 数组=指定动作 / false=关闭。
 //
 //  粘贴：开启 bracketed paste（\x1b[?2004h）；终端用 \x1b[200~ … \x1b[201~
 //  包裹粘贴内容，故粘贴里的换行一律当「字面换行」插入，绝不误判为提交。
@@ -51,9 +56,12 @@ const PASTE_MARKER_SRC = '\\[paste #(\\d+) (?:\\+\\d+ lines|\\d+ chars)\\]'
 const PASTE_MARKER_RE = new RegExp(PASTE_MARKER_SRC, 'g')
 // 解析器残留冲刷延迟（毫秒）：数据静默这么久后，把孤立 ESC / 半截序列冲掉
 const FLUSH_MS = 10
+// 软键行默认展示的动作（按顺序）；可用 config.softkeys 覆盖
+const DEFAULT_SOFTKEY_ACTIONS = ['submit', 'newline', 'history-prev', 'clear-or-exit']
 
 export function createMultilineInput({
   prompt = '> ', onSubmit, onExit, stdin, stdout, keybindings: userBindings, onKeyEvent,
+  softkeys = true,
 } = {}) {
   const input = stdin || process.stdin
   const output = stdout || process.stdout
@@ -87,6 +95,13 @@ export function createMultilineInput({
   let chunkHasBracket = false   // 当前数据块是否含括号粘贴标记
 
   const bindings = createKeybindings(userBindings)
+
+  // 软键行要展示的动作：false/'off'/0 → 关闭；数组 → 自定义；其它 → 默认集
+  const softkeyActions = (() => {
+    if (softkeys === false || softkeys === 'off' || softkeys === 0) return []
+    if (Array.isArray(softkeys)) return softkeys.map(String)
+    return DEFAULT_SOFTKEY_ACTIONS.slice()
+  })()
 
   // ============================================================
   // 非 TTY 模式：回退到 readline line 事件（管道/重定向）
@@ -217,6 +232,37 @@ export function createMultilineInput({
     return PROMPT + text().replace(/\n/g, '\n' + ' '.repeat(PROMPT.length))
   }
 
+  // ---- 软键行（输入区下方的底部提示）----
+  // 内容由**当前生效绑定**实时生成 → 用户改键，提示自动跟随。
+  function softkeyBarPlain() {
+    if (softkeyActions.length === 0) return ''
+    const parts = []
+    for (const a of softkeyActions) {
+      const h = bindings.hintFor(a, { all: false })   // 软键行只显示主键，保持紧凑
+      if (h) parts.push(h)
+    }
+    return parts.length ? '  ' + parts.join(' │ ') : ''
+  }
+
+  function truncatePlain(text, max) {
+    if (max <= 0) return ''
+    let w = 0
+    let out = ''
+    for (const ch of text) {
+      const cw = charWidth(ch)
+      if (w + cw > max) return out + '…'
+      out += ch
+      w += cw
+    }
+    return out
+  }
+
+  // 本次渲染的完整可见内容（含软键行），用于行数 / 末行定位
+  function fullPlain() {
+    const bar = softkeyBarPlain()
+    return bar ? displayText() + '\n' + bar : displayText()
+  }
+
   // 光标在输入区内的视觉 (行, 列)
   function cursorRowCol() {
     const c = cols()
@@ -242,7 +288,7 @@ export function createMultilineInput({
 
   function endRowCol() {
     const c = cols()
-    const segs = displayText().split('\n')
+    const segs = fullPlain().split('\n')
     const w = visibleWidth(segs[segs.length - 1])
     return { row: Math.max(0, displayedRows - 1), col: w % c }
   }
@@ -254,12 +300,18 @@ export function createMultilineInput({
 
     let out = SEQ.syncOn
     if (displayedRows > 1) out += `\x1b[${displayedRows - 1}A`
-    out += '\r'
-    out += '\x1b[J'
+    out += '\r\x1b[J\x1b[0m'
 
     const rendered = displayText()
     out += rendered
     displayedRows = renderedRows(rendered)
+
+    // 软键行（输入区下方一行）：显示「发送 / 折行 / …」的键位提示
+    const bar = softkeyBarPlain()
+    if (bar) {
+      out += '\n' + '\x1b[2m' + truncatePlain(bar, cols() - 1) + '\x1b[0m'
+      displayedRows += 1
+    }
 
     const at = cursorRowCol()
     const end = endRowCol()
@@ -273,11 +325,10 @@ export function createMultilineInput({
   }
 
   function showPrompt() {
-    if (output.isTTY) output.write('\x1b[0m')
-    output.write(PROMPT)
-    displayedRows = 1
     buffer = []
     cursor = 0
+    displayedRows = 0
+    render()   // 统一走 render：自动带上软键行
   }
 
   function submit() {
@@ -300,9 +351,7 @@ export function createMultilineInput({
     if (buffer.length > 0) {
       buffer = []
       cursor = 0
-      displayedRows = 0
-      output.write('\n')
-      showPrompt()
+      render()   // 擦除旧区域（含软键行）并重画干净提示符
     } else {
       output.write('\nGoodbye!\n')
       if (onExit) onExit()
@@ -402,7 +451,7 @@ export function createMultilineInput({
       if (r) r('')
       return
     }
-    if (spec === 'enter' || spec === 'ctrl+j') {
+    if (spec === 'enter' || spec === 'ctrl+j' || bindings.actionFor(spec) === 'submit') {
       output.write('\n')
       const ans = questionBuf; questionBuf = ''
       const r = questionResolve; questionResolve = null; questioning = false

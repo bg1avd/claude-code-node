@@ -11,7 +11,8 @@ test('normalizeSpec 归一化（小写 + 修饰键固定顺序）', () => {
 
 test('默认绑定：常用键 → 动作', () => {
   const kb = createKeybindings()
-  assert.strictEqual(kb.actionFor('enter'), 'submit')
+  assert.strictEqual(kb.actionFor('ctrl+s'), 'submit')   // v3.6.9：发送改用 Ctrl+S
+  assert.strictEqual(kb.actionFor('enter'), 'newline')   // Enter 现在是折行
   assert.strictEqual(kb.actionFor('ctrl+j'), 'newline')
   assert.strictEqual(kb.actionFor('alt+enter'), 'newline')
   assert.strictEqual(kb.actionFor('ctrl+left'), 'cursor-word-left')
@@ -35,8 +36,9 @@ test('用户配置：数组 = 替换该动作的绑定', () => {
   assert.strictEqual(kb.actionFor('ctrl+enter'), 'newline')
   // 原默认键不再绑到 newline
   assert.strictEqual(kb.actionFor('alt+enter'), null)
-  // 其他动作不受影响
-  assert.strictEqual(kb.actionFor('enter'), 'submit')
+  assert.strictEqual(kb.actionFor('enter'), null)
+  // 其他动作不受影响（发送键仍是 Ctrl+S）
+  assert.strictEqual(kb.actionFor('ctrl+s'), 'submit')
 })
 
 test('用户配置：null / [] = 解绑', () => {
@@ -61,7 +63,8 @@ test('默认表覆盖关键动作', () => {
 
 test('用户配置非对象时不崩', () => {
   const kb = createKeybindings(null)
-  assert.strictEqual(kb.actionFor('enter'), 'submit')
+  assert.strictEqual(kb.actionFor('enter'), 'newline')
+  assert.strictEqual(kb.actionFor('ctrl+s'), 'submit')
 })
 
 // ============================================================
@@ -113,4 +116,14 @@ test('conflicts()：同一键绑到两个动作 → 检出', () => {
 test('conflicts()：自定义动作撞默认键 → 检出', () => {
   const kb = createKeybindings({ 'my-action': ['ctrl+j'] })
   assert.ok(kb.conflicts().map((x) => x.spec).includes('ctrl+j'))
+})
+
+test('hintFor：opts.all=false 只显示主键（软键行紧凑模式）', () => {
+  const kb = createKeybindings()
+  const full = kb.hintFor('newline')
+  const compact = kb.hintFor('newline', { all: false })
+  assert.strictEqual(compact, '⏎ 折行')
+  assert.ok(full.length > compact.length, '完整模式应含更多键')
+  // 兼容旧签名：第二参为布尔
+  assert.strictEqual(kb.hintFor('newline', false), '⏎/^J/⌥⏎/⇧⏎/^⏎/f3')
 })

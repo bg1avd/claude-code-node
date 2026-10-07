@@ -295,9 +295,11 @@ Commands:
 Input (line editor):
   ←/→ 移动光标 · Home/End 行首/行尾 · Ctrl+A / Ctrl+E 行首/行尾
   Backspace/Delete 删除 · Ctrl+K / Ctrl+U 删至行尾/行首 · Ctrl+W 删一个词
-  Ctrl+← / Ctrl+→ 按词移动 · ↑/↓ 浏览历史 · Enter 提交
-  Alt+Enter 或 Ctrl+J：折行（多行输入）
-  Paste：多行粘贴按字面插入，不再被拆成多次提交（bracketed paste）
+  Ctrl+← / Ctrl+→ 按词移动 · ↑/↓ 浏览历史
+  Enter 折行（多行输入，不再发送）· Ctrl+S 发送
+  Alt+Enter / Ctrl+J 也可折行
+  输入区下方的「软键行」会显示当前发送键；改键后提示自动跟随（见 /keys）
+  Paste：多行粘贴按字面插入；超大粘贴折叠成 [paste #n …]（提交时展开）
 
   Use "/help <cmd>" for detailed help on a specific command.
 `
@@ -800,10 +802,12 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
   // 不再用 readline 的 line 事件（它遇到 \n 就提交当前行，导致
   // 多行文本被断句，后续行在引擎忙时被丢弃）。
   // 改用 keypress + raw mode 自己管理输入缓冲（见 multiline-input.js）：
-  //   - Enter（\r）→ 提交整段输入（含内嵌换行）
-  //   - Ctrl+Enter / Alt+Enter / Ctrl+J → 折行，多行输入（不提交）
+  //   - Enter（\r）→ **折行**（多行输入，不再发送）
+  //   - Ctrl+S → 发送整段输入（显式外部键，避免误发）
+  //   - Alt+Enter / Ctrl+J → 折行
+  //   - 输入区下方渲染「软键行」，由当前绑定实时生成（hintFor）
   //   - 光标行编辑：←/→、Home/End、Delete、Ctrl+A/E/K/U/W、Ctrl+←/→
-  //   - bracketed paste：多行粘贴一律当字面换行插入，不再被拆成多次提交
+  //   - bracketed paste：多行粘贴按字面插入；超大粘贴折叠成 [paste #n …]
   //   - ↑/↓ 历史、Ctrl+C 清空/退出
   //   - 非 TTY（管道/重定向）回退到 readline line 事件
   // ============================================================
@@ -834,6 +838,7 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
     onSubmit: (text) => { processInputLine(text) },
     onExit: () => { process.exit(0) },
     keybindings: config.get('keybindings'),
+    softkeys: config.get('softkeys'),
     onKeyEvent: (ev) => {
       if (!keyWatch) return
       // 起新行打印，避免与当前输入行混在一起

@@ -26,7 +26,7 @@ const MOD_ORDER = ['ctrl', 'alt', 'shift', 'meta', 'super', 'hyper']
 
 /** 动作 → 人类可读说明（供键位提示行 / 帮助渲染）。 */
 export const ACTION_DESCRIPTIONS = {
-  submit: '提交',
+  submit: '发送',
   newline: '折行',
   'cursor-left': '左移',
   'cursor-right': '右移',
@@ -88,17 +88,23 @@ export function normalizeSpec(spec) {
 /**
  * 默认绑定：虚拟动作 → 键列表。
  *
+ * ⚠️ v3.6.9 起语义变更：**Enter = 折行，不再用于发送**。
+ *   发送改用**显式外部键 Ctrl+S**（softkey 行会显示它）。
+ *   目的：终端无法区分 Shift+Enter，干脆反过来 —— 高频的「换行」用 Enter，
+ *   低频且需要确认的「发送」用独立键，避免误发。
+ *   想恢复「Enter 发送」：config.json 里
+ *     { "keybindings": { "submit": ["enter"], "newline": ["ctrl+j","alt+enter"] } }
+ *
  * 说明（终端事实）：
  *  - Enter(CR) 在**所有修饰组合下终端都发同一个字节**，故 Shift+Enter /
  *    Ctrl+Enter 在协议层无法区分；这里虽列出，但能否触发取决于终端是否
  *    被配置成发送独立序列（可用 /keys 诊断，见 cli.js）。
- *  - 真正跨终端可靠的多行键是 **Alt+Enter**（ESC CR）与 **Ctrl+J**（LF）。
- *  - "f3"（CSI 13~）被部分终端用作 Ctrl/Alt+Enter，沿用旧行为保留。
+ *  - 真正跨终端可靠的多行键是 **Ctrl+J**（LF）与 **Alt+Enter**（ESC CR）。
  */
 export const DEFAULT_KEYBINDINGS = {
   // 提交 / 换行
-  submit: ['enter'],
-  newline: ['ctrl+j', 'alt+enter', 'shift+enter', 'ctrl+enter', 'f3'],
+  submit: ['ctrl+s'],
+  newline: ['enter', 'ctrl+j', 'alt+enter', 'shift+enter', 'ctrl+enter', 'f3'],
 
   // 光标移动
   'cursor-left': ['left'],
@@ -169,13 +175,22 @@ export function createKeybindings(userConfig = {}) {
     return out
   }
 
-  /** 某动作的键位提示：'^J/⌥⏎ 折行'（无绑定返回 ''）。 */
-  function hintFor(action, withDescription = true) {
+  /**
+   * 某动作的键位提示。
+   *   hintFor('newline')                      → '⏎/^J/⌥⏎ 折行'（全部键）
+   *   hintFor('newline', { all: false })      → '⏎ 折行'（只显示主键，适合软键行）
+   *   hintFor('newline', false)               → '⏎/^J/⌥⏎'（不带说明，兼容旧签名）
+   * 无绑定返回 ''。
+   */
+  function hintFor(action, opts = {}) {
     const keys = bindings[action] || []
     if (keys.length === 0) return ''
-    const labels = keys.map(formatKeyLabel).join('/')
+    const withDesc = (typeof opts === 'boolean') ? opts : (opts.description !== false)
+    const all = (typeof opts === 'object' && opts && opts.all === false) ? false : true
+    const list = all ? keys : keys.slice(0, 1)
+    const labels = list.map(formatKeyLabel).join('/')
     const desc = ACTION_DESCRIPTIONS[action]
-    return (withDescription && desc) ? `${labels} ${desc}` : labels
+    return (withDesc && desc) ? `${labels} ${desc}` : labels
   }
 
   return {
@@ -184,7 +199,7 @@ export function createKeybindings(userConfig = {}) {
     actionFor: (spec) => (spec && specToAction.get(spec)) || null,
     /** 动作 → 键列表 */
     keysFor: (action) => bindings[action] || [],
-    /** 动作 → 键位提示文本（提示行 / 帮助用） */
+    /** 动作 → 键位提示文本（提示行 / 帮助用；opts.all=false 只取主键） */
     hintFor,
     /** 冲突检测 */
     conflicts,

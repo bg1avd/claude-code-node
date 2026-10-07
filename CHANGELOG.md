@@ -1,5 +1,27 @@
 # CHANGELOG
 
+## 3.6.9
+
+### 输入语义变更：Enter = 折行，Ctrl+S = 发送 + 输入区软键行
+
+**⚠️ 行为变更（可一行配置还原）**：终端协议层无法区分 `Shift+Enter` 与 `Enter`
+（Kitty 规范 C0 表：Enter 在所有修饰组合下都发 `0xd`）。既然高频的「换行」拿不到独立键，
+干脆反过来 —— **Enter 折行、发送改用独立的显式外部键**，避免误发、强制「先确认再发送」。
+
+- **默认绑定变更**：`Enter` → 折行；**`Ctrl+S` → 发送**（原 `Enter` 发送）。
+  还原旧行为：`config.json` 里
+  `{ "keybindings": { "submit": ["enter"], "newline": ["ctrl+j","alt+enter"] } }`
+- **输入区软键行**：在输入框下方渲染一行键位提示，如
+  `  ^S 发送 │ ⏎ 折行 │ ↑ 上一条 │ ^C 清空/退出`。
+  - 内容由**当前生效绑定**实时生成（`bindings.hintFor`）→ **改键后提示自动跟随**。
+  - 配置 `softkeys`：`true`（默认集）/ `["submit","newline",…]`（指定动作）/ `false`（关闭）。
+  - 只显示主键，保持紧凑；超宽自动截断。
+- **`hintFor` 增强**：`hintFor(action, { all: false })` 只取主键（软键行用）；
+  `hintFor(action, false)` 保留旧签名（不带说明）。
+- **问题式提问（权限确认等）仍用 Enter 确认**（单行场景，不需多行）。
+- 单测 417 → 422；真实 PTY 冒烟：软键行渲染正确、**Enter 不发送**、**Ctrl+S 发送**、
+  退出清理正常。
+
 ## 3.6.8
 
 ### 终端输入体验：5 项改进（参考 pi-tui / openclaw / pi harness 的做法）
