@@ -2,11 +2,12 @@
  * FileWrite 工具 — 写入/创建文件
  * 对应原版: src/tools/FileWriteTool/
  */
-import { writeFile, mkdir } from 'fs/promises'
+import { mkdir } from 'fs/promises'
 import { resolve, isAbsolute, dirname } from 'path'
 import { ToolDef } from '../types/index.js'
 import { checkWritePathSafety } from '../security/path-guard.js'
 import { withFileLock } from '../utils/file-lock.js'
+import { atomicWriteFile } from '../utils/atomic-write.js'
 
 export const fileWriteTool = new ToolDef(
   'Write',
@@ -45,9 +46,9 @@ Usage:
     try {
       // 自动创建父目录
       await mkdir(dirname(filePath), { recursive: true })
-      // 串行化对「同一文件」的写入：防止同一轮里并行的 Edit/Write 互相踩踏
-      // （并行 writeFile 会让 `open('w')` 截断与分批 write 交错，产生残片/丢改动，见 utils/file-lock.js）
-      await withFileLock(filePath, () => writeFile(filePath, input.content, 'utf-8'))
+      // 串行化对「同一文件」的写入：防止同一轮里并行的 Edit/Write 互相踩踏（见 utils/file-lock.js）
+      // 原子写（tmp+rename）：进程被强杀/断电也不会留下"截断的文件"（见 utils/atomic-write.js）
+      await withFileLock(filePath, () => atomicWriteFile(filePath, input.content))
 
       const lines = input.content.split('\n').length
       const size = Buffer.byteLength(input.content, 'utf-8')

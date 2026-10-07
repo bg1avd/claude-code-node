@@ -2,11 +2,12 @@
  * FileEdit 工具 — 精确文本替换编辑文件
  * 对应原版: src/tools/FileEditTool/
  */
-import { readFile, writeFile } from 'fs/promises'
+import { readFile } from 'fs/promises'
 import { resolve, isAbsolute } from 'path'
 import { ToolDef } from '../types/index.js'
 import { checkWritePathSafety } from '../security/path-guard.js'
 import { withFileLock } from '../utils/file-lock.js'
+import { atomicWriteFile } from '../utils/atomic-write.js'
 
 export const fileEditTool = new ToolDef(
   'Edit',
@@ -97,7 +98,8 @@ Usage:
           newContent = content.slice(0, idx) + new_string + content.slice(idx + old_string.length)
         }
 
-        await writeFile(filePath, newContent, 'utf-8')
+        // 原子写（tmp+rename）：既避免"写一半被强杀留下截断文件"，也让并发读者永远读到完整内容
+        await atomicWriteFile(filePath, newContent)
 
         // 计算变更行数
         const oldLines = old_string.split('\n').length
