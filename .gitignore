@@ -11,9 +11,33 @@ PROJECT_MEMORY.md
 !README.md
 !CHANGELOG.md
 !src/**/*.md
-# 内部发布手册：仅供本机 AI 参考，绝不入库/发布
+
+# ──────────────────────────────────────────────────────────────
+#  私有讨论 / 内部手册（不是 cc-node 源码，永不入库、永不发布）
+#  *.md 通配已覆盖；此处显式列出，防止将来白名单扩张时误入
+# ──────────────────────────────────────────────────────────────
 CI_NPM_RELEASE_GUIDE.md
+NPM_STAGED_PUBLISH_GUIDE.md
+START_GUIDE.md
+TERMINAL_RESEARCH.md
+SCHEDULER_DESIGN.md
+SCHEDULING_RESEARCH.md
+CUSTOM_TOOLS.md
+KNOWN_ISSUES.md
+CHANGES-UPSTREAM.md
+DEPLOY_LOG_*.md
+DREAMS.md
+*_2026*.md
+定时*.md
+*研究*.md
+*调研*.md
+*方案*.md
+
+# 打包 / 备份产物
 *.tgz
+cc-local-backup-*.tar.gz
+
+# 本地工具与示例
 config-examples/
 examples/
 check-gittool.js
@@ -21,9 +45,6 @@ test-*.mjs
 
 # 备份的敏感文件（本地临时，勿提交）
 .claude-code-safe-trash/
-
-# 本地备份包（含敏感配置，勿提交）
-cc-local-backup-*.tar.gz
 
 # QQ Bot 密钥（永不提交）
 qqbot.json
