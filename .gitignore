@@ -11,6 +11,8 @@ PROJECT_MEMORY.md
 !README.md
 !CHANGELOG.md
 !src/**/*.md
+# 内部发布手册：仅供本机 AI 参考，绝不入库/发布
+CI_NPM_RELEASE_GUIDE.md
 *.tgz
 config-examples/
 examples/

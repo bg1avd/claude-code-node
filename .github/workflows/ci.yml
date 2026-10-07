@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test / node ${{ matrix.node }}   # ⚠️ 此 name 会被分支保护/ruleset 当作 required check 名
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # package-lock.json 为 lockfileVersion 3，需 npm 9+（Node 18+）。
+        # engines 声明 >=18，但测试用到 node:test 的 mock API，CI 从 20 起最稳。
+        node: ['20', '22', '24']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node ${{ matrix.node }}
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Unit tests
+        shell: bash
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee /tmp/test.log
+
+      # 把失败用例暴露成 annotation：workflow 日志需 admin 权限才能下载，
+      # 而 annotation 可通过公开 API 匿名读取 → 无 token 也能定位失败点
+      - name: Surface test failures
+        if: failure()
+        shell: bash
+        run: |
+          test -f /tmp/test.log || exit 0
+          {
+            echo "### 测试失败摘要 (node ${{ matrix.node }})"
+            echo '```'
+            grep -A 6 -E "^(not ok |✖ )" /tmp/test.log | head -60
+            echo '```'
+          } >> $GITHUB_STEP_SUMMARY
+          grep -E "^(not ok |✖ )" /tmp/test.log | head -24 | tr -d '\r' | while IFS= read -r line; do
+            echo "::error::$(printf '%s' "$line" | sed 's/%/%25/g')"
+          done
+
+      # 守门人：包名一致性 / 依赖口径 / npm pack 产物白名单
+      # （发布时由 prepublishOnly 触发，这里在每次 push/PR 上提前拦下）
+      - name: Pre-publish consistency check
+        run: npm run prepublish-check

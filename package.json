@@ -12,7 +12,9 @@
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
     "test": "node --test src/__tests__/*.js",
-    "repl": "node src/index.js"
+    "repl": "node src/index.js",
+    "prepublish-check": "node scripts/prepublish-check.js",
+    "prepublishOnly": "node scripts/prepublish-check.js"
   },
   "keywords": [
     "claude",

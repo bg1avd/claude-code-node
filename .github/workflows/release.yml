@@ -1,0 +1,101 @@
+name: Release
+
+# 语义：**打 tag 即发布**。tag 必须是 v<package.json version>（如 v3.6.11）。
+# 流程：tag/版本一致性 → NPM_TOKEN 就绪 → 单测 → prepublish-check
+#       → npm publish --provenance（附 SLSA 来源证明）→ 创建 GitHub Release。
+#
+# 本地零凭据：npm token 只存在于仓库 secret（NPM_TOKEN）里。
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '只校验不发布（用于确认 NPM_TOKEN 是否配好）'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write   # 创建 GitHub Release
+  id-token: write   # npm provenance（OIDC）
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false   # 发布是幂等边界，取消可能留半成品
+
+jobs:
+  publish:
+    name: publish to npm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+          cache: npm
+          registry-url: https://registry.npmjs.org   # 必须，否则 npm publish 找不到 registry
+
+      - name: Install dependencies
+        run: npm ci
+
+      # ① 第一道闸门：tag 与 package.json 版本必须一致（不一致则后续全部 skipped）
+      - name: Verify tag matches package.json version
+        if: github.ref_type == 'tag'
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} 与 package.json ${PKG} 不一致（先 bump 版本再打 tag）"
+            exit 1
+          fi
+          echo "tag ${GITHUB_REF_NAME} ✅ 与 package.json ${PKG} 一致"
+
+      # ② 第二道闸门：secret 必须存在（dry run 时也能验证）
+      - name: Require NPM_TOKEN secret
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NPM_TOKEN" ]; then
+            echo "::error::仓库未配置 NPM_TOKEN secret：Settings → Secrets and variables → Actions → New repository secret（值为 npm granular token，需 Read and write + Bypass 2FA）"
+            exit 1
+          fi
+          echo "NPM_TOKEN 已配置 ✅"
+
+      # ③ 发布前全部验证
+      - name: Unit tests
+        run: npm test
+
+      - name: Pre-publish consistency check
+        run: npm run prepublish-check
+
+      # ④ 真正发布（--provenance 生成 SLSA 来源证明）
+      - name: Publish to npm (with provenance)
+        if: github.ref_type == 'tag' && inputs.dry_run != true
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # ⑤ 建 GitHub Release
+      - name: Create GitHub Release
+        if: github.ref_type == 'tag' && inputs.dry_run != true
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Summary (dry run)
+        if: inputs.dry_run == true || github.ref_type != 'tag'
+        run: |
+          {
+            echo "### dry run 通过 ✅"
+            echo "NPM_TOKEN 已就绪、单测与发布前校验通过，可以正式发版："
+            echo '```bash'
+            echo 'npm version patch --no-git-tag-version'
+            echo 'git commit -am "release: vX.Y.Z"'
+            echo 'git tag vX.Y.Z && git push origin vX.Y.Z'
+            echo '```'
+          } >> $GITHUB_STEP_SUMMARY
