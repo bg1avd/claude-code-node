@@ -453,12 +453,22 @@ export class QueryEngine {
       approved.push({ tc, tool })
     }
 
-    // 阶段2：并行执行已批准的工具
-    const execPromises = approved.map(async (item) => {
+    // 阶段2：**按顺序串行**执行已批准的工具
+    //
+    // 为什么不用并行（历史教训，2026-10-06）：同一批工具调用之间常有**隐式依赖**——
+    // 先 Write 再 Bash 跑它、先 git add 再 git commit、对同一文件先读后写……
+    // 并行会打乱顺序，并让同一文件被并发读写：
+    //   - 各自 readFile 到同一份旧内容 → 后写覆盖先写 → **编辑被静默丢弃**（实测 20 并发 Edit 只生效 1 个）
+    //   - 两个 writeFile 并发（open('w') 截断 + 分批 write）交错 → **文件尾部残片 / 内容损坏**
+    // 串行把"模型给出的顺序"原样落实，用极小的延迟代价换取正确性。
+    // （Write/Edit 另带文件级串行锁 utils/file-lock.js 作为纵深防御。）
+    const results = []
+    for (const item of approved) {
       if (item.error) {
         const r = new ToolResult(item.tc.id, item.error, true)
         r.toolName = item.tc.name
-        return r
+        results.push(r)
+        continue
       }
       const { tc, tool } = item
       tc.status = 'running'
@@ -467,16 +477,14 @@ export class QueryEngine {
         tc.status = 'done'
         const r = new ToolResult(tc.id, typeof content === 'string' ? content : JSON.stringify(content), false)
         r.toolName = tc.name
-        return r
+        results.push(r)
       } catch (err) {
         tc.status = 'error'
         const r = new ToolResult(tc.id, `工具执行错误: ${err.message}`, true)
         r.toolName = tc.name
-        return r
+        results.push(r)
       }
-    })
-
-    const results = await Promise.all(execPromises)
+    }
     return results
   }
 
