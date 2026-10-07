@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## v3.6.4
+
+### 3.6.4 (2026-10-07)
+- 🚨 **紧急修复**：修复 v3.5.0 引入的致命启动错误 `Fatal error: loadCustomTools is not defined`（`src/core/cli.js:633` 调用了 `loadCustomTools` 但文件顶部缺少对应 `import`）。
+- **影响范围**：3.5.0 / 3.6.0 / 3.6.1 / 3.6.2 / 3.6.3 **均无法启动**，本版为修复版，建议所有用户升级。
+
+
 ## v3.6.3
 
 ## v3.6.3 — Write/Edit 改为原子写（tmp + rename）
