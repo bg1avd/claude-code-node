@@ -241,3 +241,335 @@ test('CSI 序列 \\x1b[13~（部分终端的 Ctrl/Alt+Enter）折行', async () 
   await tick()
   assert.deepStrictEqual(submitted, ['第一行\n第二行'])
 })
+
+// ============================================================
+//  粘贴：bracketed paste（\x1b[200~ … \x1b[201~）
+// ============================================================
+
+test('括号粘贴多行内容不被断句，只在最后 Enter 提交一次', async () => {
+  const { input, output } = makeEnv()
+  const submitted = []
+  const ctrl = createMultilineInput({
+    stdin: input, stdout: output, prompt: '> ',
+    onSubmit: (t) => submitted.push(t),
+  })
+  ctrl.start()
+
+  input.write('\x1b[200~line1\r\nline2\r\nline3\x1b[201~')
+  input.write('\r')
+
+  await tick()
+  assert.deepStrictEqual(submitted, ['line1\nline2\nline3'])
+})
+
+test('括号粘贴后未按 Enter 不提交', async () => {
+  const { input, output } = makeEnv()
+  const submitted = []
+  const ctrl = createMultilineInput({
+    stdin: input, stdout: output, prompt: '> ',
+    onSubmit: (t) => submitted.push(t),
+  })
+  ctrl.start()
+
+  input.write('\x1b[200~a\nb\nc\x1b[201~')
+  await tick()
+  assert.deepStrictEqual(submitted, [])
+
+  // 再按 Enter 才整段提交
+  input.write('\r')
+  await tick()
+  assert.deepStrictEqual(submitted, ['a\nb\nc'])
+})
+
+test('括号粘贴内的 CR 单独出现也当字面换行', async () => {
+  const { input, output } = makeEnv()
+  const submitted = []
+  const ctrl = createMultilineInput({
+    stdin: input, stdout: output, prompt: '> ',
+    onSubmit: (t) => submitted.push(t),
+  })
+  ctrl.start()
+
+  input.write('\x1b[200~甲\r乙\x1b[201~') // 老式 Mac 用 \r 作换行
+  input.write('\r')
+
+  await tick()
+  assert.deepStrictEqual(submitted, ['甲\n乙'])
+})
+
+// ============================================================
+//  粘贴：无括号终端的突发识别（兜底）
+// ============================================================
+
+test('无括号终端：突发粘贴（含 CRLF）不被误当多次提交', async () => {
+  const { input, output } = makeEnv()
+  const submitted = []
+  const ctrl = createMultilineInput({
+    stdin: input, stdout: output, prompt: '> ',
+    onSubmit: (t) => submitted.push(t),
+  })
+  ctrl.start()
+
+  input.write('line1\r\nline2') // 同一数据块（模拟一次粘贴）
+  await tick()
+  assert.deepStrictEqual(submitted, [], '粘贴中的 CRLF 不应触发提交')
+
+  input.write('\r') // 用户真正按 Enter
+  await tick()
+  assert.deepStrictEqual(submitted, ['line1\nline2'])
+})
+
+test('单按 Enter 的裸 \\r 数据块仍正常提交（不误判为粘贴）', async () => {
+  const { input, output } = makeEnv()
+  const submitted = []
+  const ctrl = createMultilineInput({
+    stdin: input, stdout: output, prompt: '> ',
+    onSubmit: (t) => submitted.push(t),
+  })
+  ctrl.start()
+
+  input.write('abc')
+  input.write('\r') // 单独一块
+  await tick()
+  assert.deepStrictEqual(submitted, ['abc'])
+})
+
+// ============================================================
+//  光标行编辑
+// ============================================================
+
+test('← 左移后在中间插入：helo → hello', async () => {
+  const { input, output } = makeEnv()
+  const submitted = []
+  const ctrl = createMultilineInput({
+    stdin: input, stdout: output, prompt: '> ',
+    onSubmit: (t) => submitted.push(t),
+  })
+  ctrl.start()
+
+  input.write('helo')
+  input.write('\x1b[D') // ←（光标移到 o 前）
+  input.write('l')
+  input.write('\r')
+
+  await tick()
+  assert.deepStrictEqual(submitted, ['hello'])
+})
+
+test('Home 跳到行首插入：world → hello world', async () => {
+  const { input, output } = makeEnv()
+  const submitted = []
+  const ctrl = createMultilineInput({
+    stdin: input, stdout: output, prompt: '> ',
+    onSubmit: (t) => submitted.push(t),
+  })
+  ctrl.start()
+
+  input.write('world')
+  input.write('\x1b[H') // Home
+  input.write('hello ')
+  input.write('\r')
+
+  await tick()
+  assert.deepStrictEqual(submitted, ['hello world'])
+})
+
+test('Ctrl+A / Ctrl+E 跳到行首 / 行尾', async () => {
+  const { input, output } = makeEnv()
+  const submitted = []
+  const ctrl = createMultilineInput({
+    stdin: input, stdout: output, prompt: '> ',
+    onSubmit: (t) => submitted.push(t),
+  })
+  ctrl.start()
+
+  input.write('abc')
+  input.write('\x01') // Ctrl+A → 行首
+  input.write('X')
+  input.write('\x1b[F') // End（光标到行尾）
+  input.write('Y')
+  input.write('\x05') // Ctrl+E（已在行尾）
+  input.write('Z')
+  input.write('\r')
+
+  await tick()
+  assert.deepStrictEqual(submitted, ['XabcYZ'])
+})
+
+test('Delete 删除光标处字符', async () => {
+  const { input, output } = makeEnv()
+  const submitted = []
+  const ctrl = createMultilineInput({
+    stdin: input, stdout: output, prompt: '> ',
+    onSubmit: (t) => submitted.push(t),
+  })
+  ctrl.start()
+
+  input.write('abcd')
+  input.write('\x1b[D') // ←（光标到 d 前）
+  input.write('\x1b[3~') // Delete → 删除 d
+  input.write('\r')
+
+  await tick()
+  assert.deepStrictEqual(submitted, ['abc'])
+})
+
+test('Backspace 删除光标前字符（中间位置）', async () => {
+  const { input, output } = makeEnv()
+  const submitted = []
+  const ctrl = createMultilineInput({
+    stdin: input, stdout: output, prompt: '> ',
+    onSubmit: (t) => submitted.push(t),
+  })
+  ctrl.start()
+
+  input.write('abcd')
+  input.write('\x1b[D')  // ←（光标到 d 前）
+  input.write('\x7f')    // Backspace → 删除 c
+  input.write('\r')
+
+  await tick()
+  assert.deepStrictEqual(submitted, ['abd'])
+})
+
+test('Ctrl+W 向前删除一个词', async () => {
+  const { input, output } = makeEnv()
+  const submitted = []
+  const ctrl = createMultilineInput({
+    stdin: input, stdout: output, prompt: '> ',
+    onSubmit: (t) => submitted.push(t),
+  })
+  ctrl.start()
+
+  input.write('foo bar')
+  input.write('\x17') // Ctrl+W → 删掉 bar
+  input.write('\r')
+
+  await tick()
+  assert.deepStrictEqual(submitted, ['foo '])
+})
+
+test('Ctrl+U 删到行首 / Ctrl+K 删到行尾', async () => {
+  const { input, output } = makeEnv()
+  const submitted = []
+  const ctrl = createMultilineInput({
+    stdin: input, stdout: output, prompt: '> ',
+    onSubmit: (t) => submitted.push(t),
+  })
+  ctrl.start()
+
+  input.write('hello')
+  input.write('\x01')  // Ctrl+A → 行首
+  input.write('\x0b')  // Ctrl+K → 删到行尾
+  input.write('X')
+  input.write('\r')
+  await tick()
+  assert.deepStrictEqual(submitted, ['X'])
+})
+
+test('Ctrl+U 删到行首', async () => {
+  const { input, output } = makeEnv()
+  const submitted = []
+  const ctrl = createMultilineInput({
+    stdin: input, stdout: output, prompt: '> ',
+    onSubmit: (t) => submitted.push(t),
+  })
+  ctrl.start()
+
+  input.write('hello')
+  input.write('\x15')  // Ctrl+U → 删到行首（全清）
+  input.write('X')
+  input.write('\r')
+  await tick()
+  assert.deepStrictEqual(submitted, ['X'])
+})
+
+// ============================================================
+//  bracketed paste mode 的开关
+// ============================================================
+
+test('TTY 输出：start() 开启 bracketed paste，dispose() 关闭', () => {
+  const input = new PassThrough()
+  input.isTTY = true
+  input.setRawMode = () => {}
+  const output = new Writable({ write(c, _e, cb) { this.buf += c.toString(); cb() } })
+  output.buf = ''
+  output.isTTY = true
+  output.columns = 80
+
+  const ctrl = createMultilineInput({ stdin: input, stdout: output, prompt: '> ', onSubmit: () => {} })
+  ctrl.start()
+  assert.ok(output.buf.includes('\x1b[?2004h'), 'start() 应开启 bracketed paste')
+
+  ctrl.dispose()
+  assert.ok(output.buf.includes('\x1b[?2004l'), 'dispose() 应关闭 bracketed paste')
+})
+
+test('光标移动后重绘会把光标移回编辑位置（输出含回移序列）', async () => {
+  const { input, output } = makeEnv()
+  output.columns = 80
+  const ctrl = createMultilineInput({ stdin: input, stdout: output, prompt: '> ', onSubmit: () => {} })
+  ctrl.start()
+
+  input.write('abcdef')
+  const before = output.buf.length
+  input.write('\x1b[D') // ←
+  input.write('\x1b[D') // ←
+  await tick()
+
+  const delta = output.buf.slice(before)
+  // 光标回移到中间时会发出 \r 后紧跟水平右移序列
+  assert.ok(/\r\x1b\[\d+C/.test(delta), `重绘应把光标移回中部，实际: ${JSON.stringify(delta)}`)
+})
+
+test('同一数据块内「括号粘贴 + 紧随的真 Enter」→ 只提交一次（不被突发兜底误判）', async () => {
+  const { input, output } = makeEnv()
+  const submitted = []
+  const ctrl = createMultilineInput({
+    stdin: input, stdout: output, prompt: '> ',
+    onSubmit: (t) => submitted.push(t),
+  })
+  ctrl.start()
+
+  // 粘贴与用户随后的 Enter 被终端合并进同一数据块
+  input.write('\x1b[200~line1\nline2\x1b[201~\r')
+  await tick()
+  assert.deepStrictEqual(submitted, ['line1\nline2'])
+
+  // 再输入 /exit 类命令仍能正常提交
+  input.write('next')
+  input.write('\r')
+  await tick()
+  assert.deepStrictEqual(submitted, ['line1\nline2', 'next'])
+})
+
+test('含括号标记的数据块：突发兜底不生效，普通 Enter 仍提交', async () => {
+  const { input, output } = makeEnv()
+  const submitted = []
+  const ctrl = createMultilineInput({
+    stdin: input, stdout: output, prompt: '> ',
+    onSubmit: (t) => submitted.push(t),
+  })
+  ctrl.start()
+
+  input.write('hello')            // 普通单行
+  input.write('\x1b[200~p\x1b[201~\r') // 含标记的块（此处无换行）
+  await tick()
+  assert.deepStrictEqual(submitted, ['hellop'])
+})
+
+test('数据块 \\r/cmd\\r 不被突发兜底误判（换行前无内容）', async () => {
+  const { input, output } = makeEnv()
+  const submitted = []
+  const ctrl = createMultilineInput({
+    stdin: input, stdout: output, prompt: '> ',
+    onSubmit: (t) => submitted.push(t),
+  })
+  ctrl.start()
+
+  // 回车 + 命令 + 回车：两个回车各自都应「提交」，而非被当成粘贴插入换行
+  input.write('\r')
+  input.write('/help\r')
+  await tick()
+  assert.deepStrictEqual(submitted, ['', '/help'])
+})

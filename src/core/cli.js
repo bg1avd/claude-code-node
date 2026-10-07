@@ -286,6 +286,13 @@ Commands:
   /exit          — Exit (also Ctrl+C)
   /quit          — Same as /exit
 
+Input (line editor):
+  ←/→ 移动光标 · Home/End 行首/行尾 · Ctrl+A / Ctrl+E 行首/行尾
+  Backspace/Delete 删除 · Ctrl+K / Ctrl+U 删至行尾/行首 · Ctrl+W 删一个词
+  Ctrl+← / Ctrl+→ 按词移动 · ↑/↓ 浏览历史 · Enter 提交
+  Alt+Enter 或 Ctrl+J：折行（多行输入）
+  Paste：多行粘贴按字面插入，不再被拆成多次提交（bracketed paste）
+
   Use "/help <cmd>" for detailed help on a specific command.
 `
 
@@ -789,7 +796,9 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
   // 改用 keypress + raw mode 自己管理输入缓冲（见 multiline-input.js）：
   //   - Enter（\r）→ 提交整段输入（含内嵌换行）
   //   - Ctrl+Enter / Alt+Enter / Ctrl+J → 折行，多行输入（不提交）
-  //   - 可打印字符回显、退格、上下方向键历史、Ctrl+C
+  //   - 光标行编辑：←/→、Home/End、Delete、Ctrl+A/E/K/U/W、Ctrl+←/→
+  //   - bracketed paste：多行粘贴一律当字面换行插入，不再被拆成多次提交
+  //   - ↑/↓ 历史、Ctrl+C 清空/退出
   //   - 非 TTY（管道/重定向）回退到 readline line 事件
   // ============================================================
   const inputCtrl = createMultilineInput({
@@ -1850,6 +1859,8 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
 // ============================================================
 function cleanupStdin() {
   try {
+    // 关闭 bracketed paste mode，避免退出后终端残留（\x1b[?2004l）
+    if (process.stdout.isTTY) process.stdout.write('\x1b[?2004l')
     if (process.stdin.isTTY) process.stdin.setRawMode(false)
     process.stdin.removeAllListeners('keypress')
   } catch {}
