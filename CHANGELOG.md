@@ -1,5 +1,14 @@
 # CHANGELOG
 
+## v3.6.5
+
+### 3.6.5 (2026-10-07)
+- 🐛 **fix(git-tool)**：修复 GitTool 集成测试长期失败（mock 只提供低层 `request`，而 GitTool 调用的是高层 `listPRs/getPR/...`；且 `check-mergeable` 缺 `mergePolicy` 注入）。
+- 🐛 **fix(git-tool)**：`_readConfig` 在 ESM 环境下使用了未定义的 `require('fs')`，改用顶部 `readFileSync`。
+- ✨ **feat(git-tool)**：`execute` 分派前统一校验枚举入参（`state`/`method`/`commentThreshold`/`checks`），非法值抛 `Invalid enum value`。
+- ✅ 测试：全量 **353 通过 / 0 失败**（此前 4 失败）。
+
+
 ## v3.6.4
 
 ### 3.6.4 (2026-10-07)
