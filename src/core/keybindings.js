@@ -28,6 +28,7 @@ const MOD_ORDER = ['ctrl', 'alt', 'shift', 'meta', 'super', 'hyper']
 export const ACTION_DESCRIPTIONS = {
   submit: '发送',
   newline: '折行',
+  'softkeys-toggle': '软键区',
   'cursor-left': '左移',
   'cursor-right': '右移',
   'cursor-word-left': '左移一词',
@@ -105,6 +106,9 @@ export const DEFAULT_KEYBINDINGS = {
   // 提交 / 换行
   submit: ['ctrl+s'],
   newline: ['enter', 'ctrl+j', 'alt+enter', 'shift+enter', 'ctrl+enter', 'f3'],
+
+  // 模式切换：输入区 ↔ 虚拟按键区（软键行）
+  'softkeys-toggle': ['f2'],
 
   // 光标移动
   'cursor-left': ['left'],

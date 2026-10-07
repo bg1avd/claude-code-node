@@ -26,6 +26,13 @@
 //    内容由当前生效绑定实时生成（bindings.hintFor）→ 改键即同步。
 //    用 config.softkeys 控制：true=默认集 / 数组=指定动作 / false=关闭。
 //
+//  焦点模式（TUI 式切换）：
+//    F2  → 焦点从「输入区」切到「虚拟按键区」（硬件光标隐藏，当前项反显高亮）
+//    ←/→ 或 ↑/↓ → 在虚拟按键间移动高亮（Home/End 到首/末）
+//    Enter → 激活高亮的按键（产生同一个虚拟动作），随后自动回到输入模式
+//    Esc 或 F2 → 直接回到输入模式；直接打字也会自动切回并插入
+//    这样「停下打字 → 移到按键 → 激活」构成一次显式的**行为模式切换**。
+//
 //  粘贴：开启 bracketed paste（\x1b[?2004h）；终端用 \x1b[200~ … \x1b[201~
 //  包裹粘贴内容，故粘贴里的换行一律当「字面换行」插入，绝不误判为提交。
 //    · 大批粘贴折叠：>10 行或 >1000 字符 → 记为原子的 [paste #n +N lines]，
@@ -58,6 +65,9 @@ const PASTE_MARKER_RE = new RegExp(PASTE_MARKER_SRC, 'g')
 const FLUSH_MS = 10
 // 软键行默认展示的动作（按顺序）；可用 config.softkeys 覆盖
 const DEFAULT_SOFTKEY_ACTIONS = ['submit', 'newline', 'history-prev', 'clear-or-exit']
+// 硬件光标显隐
+const HIDE_CURSOR = '\x1b[?25l'
+const SHOW_CURSOR = '\x1b[?25h'
 
 export function createMultilineInput({
   prompt = '> ', onSubmit, onExit, stdin, stdout, keybindings: userBindings, onKeyEvent,
@@ -102,6 +112,12 @@ export function createMultilineInput({
     if (Array.isArray(softkeys)) return softkeys.map(String)
     return DEFAULT_SOFTKEY_ACTIONS.slice()
   })()
+
+  // 焦点模式：'input' = 编辑文本；'softkeys' = 焦点移到虚拟按键区（TUI 选择器）
+  // 用 softkeys-toggle（默认 F2）在两者间切换；Esc 也回到输入模式。
+  let mode = 'input'
+  let softkeyIndex = 0      // 软键模式下高亮的按键索引
+  let cursorHidden = false  // 软键模式下隐藏硬件光标（高亮由反显表示）
 
   // ============================================================
   // 非 TTY 模式：回退到 readline line 事件（管道/重定向）
@@ -232,35 +248,106 @@ export function createMultilineInput({
     return PROMPT + text().replace(/\n/g, '\n' + ' '.repeat(PROMPT.length))
   }
 
-  // ---- 软键行（输入区下方的底部提示）----
-  // 内容由**当前生效绑定**实时生成 → 用户改键，提示自动跟随。
-  function softkeyBarPlain() {
-    if (softkeyActions.length === 0) return ''
-    const parts = []
+  // ---- 软键行（输入区下方的虚拟按键）----
+  // 键位提示由**当前生效绑定**实时生成 → 用户改键，提示自动跟随。
+  function softkeyItems() {
+    if (softkeyActions.length === 0) return []
+    const items = []
     for (const a of softkeyActions) {
-      const h = bindings.hintFor(a, { all: false })   // 软键行只显示主键，保持紧凑
-      if (h) parts.push(h)
+      const label = bindings.hintFor(a, { all: false })   // 只显示主键，保持紧凑
+      if (label) items.push({ action: a, label })
     }
-    return parts.length ? '  ' + parts.join(' │ ') : ''
+    return items
   }
 
-  function truncatePlain(text, max) {
+  // 按终端宽度截断「带 ANSI 的字符串」：ANSI 零宽，超出宽度的部分截掉并加省略号。
+  function truncateStyled(styled, max) {
     if (max <= 0) return ''
     let w = 0
     let out = ''
-    for (const ch of text) {
+    let i = 0
+    while (i < styled.length) {
+      if (styled[i] === '\x1b') {
+        const m = /^\x1b\[[0-9;?]*[A-Za-z]/.exec(styled.slice(i))
+        if (m) { out += m[0]; i += m[0].length; continue }
+      }
+      const ch = String.fromCodePoint(styled.codePointAt(i))
       const cw = charWidth(ch)
-      if (w + cw > max) return out + '…'
+      if (w + cw > max) return out + '\x1b[0m…'
       out += ch
       w += cw
+      i += ch.length
     }
     return out
   }
 
+  // 软键行：返回 { plain, styled }。styled 只多 ANSI，可见字符与 plain 一一对应。
+  // 输入模式：整行暗色（提示）；软键模式：高亮项反显、其余暗色（TUI 选择器）。
+  function softkeyBar() {
+    const items = softkeyItems()
+    if (items.length === 0) return { plain: '', styled: '' }
+    const focused = mode === 'softkeys'
+    const sep = ' │ '
+    const dim = (s) => (focused ? `\x1b[2m${s}\x1b[0m` : s)
+    let plain = '  '
+    let styled = '  '
+    items.forEach((it, i) => {
+      if (i > 0) {
+        plain += sep
+        styled += focused ? `\x1b[2m${sep}\x1b[0m` : sep
+      }
+      if (focused && i === softkeyIndex) {
+        const t = `▸${it.label}◂`
+        plain += t
+        styled += `\x1b[7m\x1b[1m${t}\x1b[0m`      // 反显 + 加粗 = 当前高亮项
+      } else {
+        plain += it.label
+        styled += dim(it.label)
+      }
+    })
+    const hint = focused ? '   ←/→ 选择 · Enter 激活 · Esc 返回' : '   F2 软键'
+    plain += hint
+    styled += dim(hint)
+    return { plain, styled: focused ? styled : `\x1b[2m${styled}\x1b[0m` }
+  }
+
   // 本次渲染的完整可见内容（含软键行），用于行数 / 末行定位
   function fullPlain() {
-    const bar = softkeyBarPlain()
+    const bar = softkeyBar().plain
     return bar ? displayText() + '\n' + bar : displayText()
+  }
+
+  // ---- 焦点模式：输入区 ↔ 虚拟按键区 ----
+  function restoreCursor() {
+    if (cursorHidden) { try { output.write(SHOW_CURSOR) } catch { /* ignore */ } ; cursorHidden = false }
+  }
+
+  function setMode(m) {
+    if (m === 'softkeys' && softkeyItems().length === 0) return   // 无按键可切
+    mode = m
+    if (m === 'softkeys') {
+      const n = softkeyItems().length
+      if (softkeyIndex >= n) softkeyIndex = n - 1
+      if (softkeyIndex < 0) softkeyIndex = 0
+    }
+    render()
+  }
+
+  function moveFocus(d) {
+    const n = softkeyItems().length
+    if (n === 0) return
+    softkeyIndex = (softkeyIndex + d + n) % n
+    render()
+  }
+
+  // 激活当前高亮的虚拟按键 → 产生对应的「虚拟动作」，随后自动回到输入模式
+  function activateSoftkey() {
+    const items = softkeyItems()
+    if (items.length === 0) return
+    const action = items[softkeyIndex].action
+    mode = 'input'
+    restoreCursor()          // submit 等动作不重绘，这里先把光标恢复
+    runAction(action)
   }
 
   // 光标在输入区内的视觉 (行, 列)
@@ -302,23 +389,32 @@ export function createMultilineInput({
     if (displayedRows > 1) out += `\x1b[${displayedRows - 1}A`
     out += '\r\x1b[J\x1b[0m'
 
+    // 软键模式隐藏硬件光标（高亮由反显表示）；输入模式恢复
+    if (mode === 'softkeys') {
+      if (!cursorHidden) { out += HIDE_CURSOR; cursorHidden = true }
+    } else if (cursorHidden) {
+      out += SHOW_CURSOR; cursorHidden = false
+    }
+
     const rendered = displayText()
     out += rendered
     displayedRows = renderedRows(rendered)
 
-    // 软键行（输入区下方一行）：显示「发送 / 折行 / …」的键位提示
-    const bar = softkeyBarPlain()
-    if (bar) {
-      out += '\n' + '\x1b[2m' + truncatePlain(bar, cols() - 1) + '\x1b[0m'
+    // 软键行（输入区下方一行）：输入模式=提示；软键模式=可高亮选择的虚拟按键
+    const bar = softkeyBar()
+    if (bar.plain) {
+      out += '\n' + truncateStyled(bar.styled, cols() - 1)
       displayedRows += 1
     }
 
-    const at = cursorRowCol()
-    const end = endRowCol()
-    if (at.row !== end.row || at.col !== end.col) {
-      if (end.row > at.row) out += `\x1b[${end.row - at.row}A`
-      out += '\r'
-      if (at.col > 0) out += `\x1b[${at.col}C`
+    if (mode === 'input') {
+      const at = cursorRowCol()
+      const end = endRowCol()
+      if (at.row !== end.row || at.col !== end.col) {
+        if (end.row > at.row) out += `\x1b[${end.row - at.row}A`
+        out += '\r'
+        if (at.col > 0) out += `\x1b[${at.col}C`
+      }
     }
     out += SEQ.syncOff
     output.write(out)
@@ -432,6 +528,7 @@ export function createMultilineInput({
       case 'history-prev': loadHistory(-1); return
       case 'history-next': loadHistory(1); return
       case 'clear-or-exit': clearOrExit(); return
+      case 'softkeys-toggle': setMode('softkeys'); return
       default: return
     }
   }
@@ -468,6 +565,9 @@ export function createMultilineInput({
     if (onKeyEvent) { try { onKeyEvent(ev) } catch { /* 诊断回调不得影响输入 */ } }
     if (questioning) { handleQuestion(ev); return }
 
+    // 软键模式下粘贴 → 落回输入模式，继续走正常粘贴流程
+    if (mode === 'softkeys' && ev.type === 'paste-start') mode = 'input'
+
     // 括号粘贴边界
     if (ev.type === 'paste-start') { pasteActive = true; pasteCRPending = false; pasteContent = ''; return }
     if (ev.type === 'paste-end') {
@@ -480,6 +580,27 @@ export function createMultilineInput({
       return
     }
     if (ev.type === 'unknown' || ev.type === 'mouse') return
+
+    // ---- 软键模式：焦点在虚拟按键上（TUI 选择器）----
+    if (mode === 'softkeys') {
+      if (ev.type === 'char') {
+        // 直接打字 → 自动切回输入模式并插入（不设死胡同）
+        mode = 'input'
+        insert(ev.text)
+        render()
+        return
+      }
+      if (ev.type !== 'key') return
+      const spec = keyEventToSpec(ev)
+      const action = bindings.actionFor(spec)
+      if (action === 'softkeys-toggle' || spec === 'escape') { setMode('input'); return }
+      if (spec === 'left' || spec === 'up' || spec === 'shift+tab') { moveFocus(-1); return }
+      if (spec === 'right' || spec === 'down' || spec === 'tab') { moveFocus(1); return }
+      if (spec === 'home') { softkeyIndex = 0; render(); return }
+      if (spec === 'end') { softkeyIndex = softkeyItems().length - 1; render(); return }
+      if (spec === 'enter' || spec === 'ctrl+j' || action === 'submit') { activateSoftkey(); return }
+      return
+    }
 
     // 括号粘贴区间内：只累积内容、不逐字重绘（paste-end 一次性提交/重绘）
     if (pasteActive) {
@@ -542,6 +663,7 @@ export function createMultilineInput({
 
   function dispose() {
     if (flushTimer) { clearTimeout(flushTimer); flushTimer = null }
+    restoreCursor()   // 若停在软键模式，恢复光标
     if (pasteModeEnabled) {
       try { output.write(SEQ.pasteOff) } catch {}
       pasteModeEnabled = false

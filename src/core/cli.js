@@ -298,7 +298,7 @@ Input (line editor):
   Ctrl+← / Ctrl+→ 按词移动 · ↑/↓ 浏览历史
   Enter 折行（多行输入，不再发送）· Ctrl+S 发送
   Alt+Enter / Ctrl+J 也可折行
-  输入区下方的「软键行」会显示当前发送键；改键后提示自动跟随（见 /keys）
+  F2 → 切到「虚拟按键区」：←/→ 移动高亮、Enter 激活、Esc/F2 返回（软键行在输入区下方）
   Paste：多行粘贴按字面插入；超大粘贴折叠成 [paste #n …]（提交时展开）
 
   Use "/help <cmd>" for detailed help on a specific command.

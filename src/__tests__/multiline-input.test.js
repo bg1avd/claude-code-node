@@ -762,3 +762,133 @@ test('softkeys 数组：只显示指定动作', async () => {
   assert.ok(raw.includes('发送'), '应显示发送')
   assert.ok(!raw.includes('折行'), '未指定折行则不应显示')
 })
+
+// ============================================================
+//  焦点模式：输入区 ↔ 虚拟按键区（F2 切换）—— TUI 式选择器
+// ============================================================
+
+const F2 = '\x1bOQ'
+const ARROW_R = '\x1b[C'
+
+test('F2 切到虚拟按键区：隐藏硬件光标并高亮首项', async () => {
+  const { input, output } = makeEnv()
+  output.columns = 80
+  const ctrl = createMultilineInput({ stdin: input, stdout: output, prompt: '> ', onSubmit: () => {} })
+  ctrl.start()
+  input.write('abc')
+  await tick()
+  output.buf = ''
+  input.write(F2)
+  await tick()
+  const raw = output.buf
+  assert.ok(raw.includes('\x1b[?25l'), '应隐藏硬件光标')
+  assert.ok(raw.includes('▸^S 发送◂'), `应高亮首项「发送」，实际: ${JSON.stringify(raw.slice(-160))}`)
+})
+
+test('软键模式下 ←/→ 移动高亮', async () => {
+  const { input, output } = makeEnv()
+  output.columns = 80
+  const ctrl = createMultilineInput({ stdin: input, stdout: output, prompt: '> ', onSubmit: () => {} })
+  ctrl.start()
+  input.write(F2)
+  await tick()
+  output.buf = ''
+  input.write(ARROW_R)
+  await tick()
+  assert.ok(output.buf.includes('▸⏎ 折行◂'), `→ 应把高亮移到「折行」，实际: ${JSON.stringify(output.buf.slice(-160))}`)
+})
+
+test('软键模式下 Enter 激活高亮按键（发送）', async () => {
+  const { input, output } = makeEnv()
+  output.columns = 80
+  const submitted = []
+  const ctrl = createMultilineInput({
+    stdin: input, stdout: output, prompt: '> ',
+    onSubmit: (t) => submitted.push(t),
+  })
+  ctrl.start()
+  input.write('hello')
+  input.write(F2)      // 焦点移入虚拟按键区（默认停在「发送」）
+  await tick()
+  assert.deepStrictEqual(submitted, [], '切到软键模式不应发送')
+  input.write(ENTER)   // Enter 现在是「激活」而非折行
+  await tick()
+  assert.deepStrictEqual(submitted, ['hello'])
+})
+
+test('F2 可来回切换；回到输入模式后恢复光标且高亮消失', async () => {
+  const { input, output } = makeEnv()
+  output.columns = 80
+  const ctrl = createMultilineInput({ stdin: input, stdout: output, prompt: '> ', onSubmit: () => {} })
+  ctrl.start()
+  input.write(F2)
+  await tick()
+  output.buf = ''
+  input.write(F2)      // 再按一次 → 回输入模式
+  await tick()
+  const raw = output.buf
+  assert.ok(raw.includes('\x1b[?25h'), '应恢复硬件光标')
+  assert.ok(!raw.includes('▸'), '不应再有高亮')
+})
+
+test('软键模式下 Esc 回到输入模式', async () => {
+  const { input, output } = makeEnv()
+  output.columns = 80
+  const ctrl = createMultilineInput({ stdin: input, stdout: output, prompt: '> ', onSubmit: () => {} })
+  ctrl.start()
+  input.write(F2)
+  await tick()
+  output.buf = ''
+  input.write('\x1b')   // 单独 Esc → 10ms 后被 flush 成 escape 键
+  await tick()
+  assert.ok(output.buf.includes('\x1b[?25h'), 'Esc 应回到输入模式并恢复光标')
+})
+
+test('软键模式下直接打字 → 自动切回输入模式并插入该字符', async () => {
+  const { input, output } = makeEnv()
+  output.columns = 80
+  const submitted = []
+  const ctrl = createMultilineInput({
+    stdin: input, stdout: output, prompt: '> ',
+    onSubmit: (t) => submitted.push(t),
+  })
+  ctrl.start()
+  input.write('ab')
+  input.write(F2)
+  await tick()
+  input.write('c')     // 打字 → 自动回输入模式并插入
+  await tick()
+  input.write(SUBMIT)
+  await tick()
+  assert.deepStrictEqual(submitted, ['abc'])
+})
+
+test('softkeys-toggle 可重映射（F2 解绑、改用 Ctrl+G）', async () => {
+  const { input, output } = makeEnv()
+  output.columns = 80
+  const ctrl = createMultilineInput({
+    stdin: input, stdout: output, prompt: '> ', onSubmit: () => {},
+    keybindings: { 'softkeys-toggle': ['ctrl+g'] },
+  })
+  ctrl.start()
+  output.buf = ''
+  input.write(F2)
+  await tick()
+  assert.ok(!output.buf.includes('\x1b[?25l'), 'F2 已解绑，不应切换')
+  input.write('\x07')  // Ctrl+G
+  await tick()
+  assert.ok(output.buf.includes('\x1b[?25l'), 'Ctrl+G 应切换')
+})
+
+test('softkeys:false 时 F2 不生效（没有可切换的按键）', async () => {
+  const { input, output } = makeEnv()
+  output.columns = 80
+  const ctrl = createMultilineInput({
+    stdin: input, stdout: output, prompt: '> ', onSubmit: () => {}, softkeys: false,
+  })
+  ctrl.start()
+  output.buf = ''
+  input.write(F2)
+  await tick()
+  assert.ok(!output.buf.includes('\x1b[?25l'), '无软键行时不应进入软键模式')
+})
