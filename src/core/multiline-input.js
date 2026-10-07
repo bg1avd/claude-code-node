@@ -118,6 +118,10 @@ export function createMultilineInput({
   let mode = 'input'
   let softkeyIndex = 0      // 软键模式下高亮的按键索引
   let cursorHidden = false  // 软键模式下隐藏硬件光标（高亮由反显表示）
+  // 光标当前停留在「输入区」内的相对行（0 = 区域顶行）。
+  // 重绘必须先回到区域顶行，位移量就是这个值 —— 不能用 displayedRows-1，
+  // 那会假设光标停在区域底部；加了软键行后会导致多上移一行、擦掉区域上方内容。
+  let cursorRowRel = 0
 
   // ============================================================
   // 非 TTY 模式：回退到 readline line 事件（管道/重定向）
@@ -260,7 +264,22 @@ export function createMultilineInput({
     return items
   }
 
+  // 按终端宽度截断「纯文本」（用于测量）
+  function truncatePlain(text, max) {
+    if (max <= 0) return ''
+    let w = 0
+    let out = ''
+    for (const ch of text) {
+      const cw = charWidth(ch)
+      if (w + cw > max) return out + '…'
+      out += ch
+      w += cw
+    }
+    return out
+  }
+
   // 按终端宽度截断「带 ANSI 的字符串」：ANSI 零宽，超出宽度的部分截掉并加省略号。
+  // 与 truncatePlain 使用同一可见内容，故两者截断点一致（宽度对齐）。
   function truncateStyled(styled, max) {
     if (max <= 0) return ''
     let w = 0
@@ -308,7 +327,10 @@ export function createMultilineInput({
     const hint = focused ? '   ←/→ 选择 · Enter 激活 · Esc 返回' : '   F2 软键'
     plain += hint
     styled += dim(hint)
-    return { plain, styled: focused ? styled : `\x1b[2m${styled}\x1b[0m` }
+    const wrapped = focused ? styled : `\x1b[2m${styled}\x1b[0m`
+    // 用同一宽度截断 plain 与 styled，保证「测量宽度」与「实际绘制」一致
+    const max = cols() - 1
+    return { plain: truncatePlain(plain, max), styled: truncateStyled(wrapped, max) }
   }
 
   // 本次渲染的完整可见内容（含软键行），用于行数 / 末行定位
@@ -386,7 +408,8 @@ export function createMultilineInput({
     if (pasteActive) return   // 粘贴期间不重绘，paste-end 统一重绘
 
     let out = SEQ.syncOn
-    if (displayedRows > 1) out += `\x1b[${displayedRows - 1}A`
+    // 先回到「输入区」顶行：光标停在上一帧算出的 cursorRowRel 行，故上移这么多行。
+    if (cursorRowRel > 0) out += `\x1b[${cursorRowRel}A`
     out += '\r\x1b[J\x1b[0m'
 
     // 软键模式隐藏硬件光标（高亮由反显表示）；输入模式恢复
@@ -401,9 +424,10 @@ export function createMultilineInput({
     displayedRows = renderedRows(rendered)
 
     // 软键行（输入区下方一行）：输入模式=提示；软键模式=可高亮选择的虚拟按键
+    // 用显式 \r\n（不依赖终端 ONLCR），否则某些环境下面板会写在错误的列上
     const bar = softkeyBar()
     if (bar.plain) {
-      out += '\n' + truncateStyled(bar.styled, cols() - 1)
+      out += '\r\n' + bar.styled
       displayedRows += 1
     }
 
@@ -415,6 +439,9 @@ export function createMultilineInput({
         out += '\r'
         if (at.col > 0) out += `\x1b[${at.col}C`
       }
+      cursorRowRel = at.row
+    } else {
+      cursorRowRel = displayedRows - 1   // 软键模式：光标停在末行（软键行）
     }
     out += SEQ.syncOff
     output.write(out)
@@ -424,7 +451,8 @@ export function createMultilineInput({
     buffer = []
     cursor = 0
     displayedRows = 0
-    render()   // 统一走 render：自动带上软键行
+    cursorRowRel = 0          // 新提示符画在当前位置，无需回退
+    render()                  // 统一走 render：自动带上软键行
   }
 
   function submit() {
@@ -434,6 +462,7 @@ export function createMultilineInput({
     cursor = 0
     suppressNextLF = true
     displayedRows = 0
+    cursorRowRel = 0          // 提交后新内容从下一行开始，不再回退
     output.write('\n')
     if (shown.trim()) {
       inputHistory.push(shown)              // 历史存显示文本，↑ 调出时不撑爆屏幕
@@ -648,6 +677,7 @@ export function createMultilineInput({
   function ask(q) {
     return new Promise((resolve) => {
       output.write('\n' + q + ' ')
+      cursorRowRel = 0        // 光标已移到新的一行
       questioning = true
       questionResolve = resolve
       questionBuf = ''

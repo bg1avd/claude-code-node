@@ -892,3 +892,56 @@ test('softkeys:false 时 F2 不生效（没有可切换的按键）', async () =
   await tick()
   assert.ok(!output.buf.includes('\x1b[?25l'), '无软键行时不应进入软键模式')
 })
+
+// ============================================================
+//  回归：重绘必须从「光标实际所在行」回退，而不是 displayedRows-1
+//  （曾经的 bug：加了软键行后每次敲键多上移一行 → 擦掉上方内容 → 敲几下清屏）
+// ============================================================
+
+test('回归：软键行存在时，单行输入重绘不得上移（区域顶行=光标行）', async () => {
+  const { input, output } = makeEnv()
+  output.columns = 80
+  const ctrl = createMultilineInput({ stdin: input, stdout: output, prompt: '> ', onSubmit: () => {} })
+  ctrl.start()
+  input.write('a')
+  await tick()
+  const mark = output.buf.length
+  input.write('b')
+  await tick()
+  input.write('c')
+  await tick()
+  const delta = output.buf.slice(mark)
+  // 同步输出开始后应立刻 \r + 清屏（回到本行），绝不能先 \x1b[1A 上移
+  assert.ok(delta.includes('\x1b[?2026h\r\x1b[J'), `重绘应从本行开始，实际: ${JSON.stringify(delta)}`)
+  assert.ok(!delta.includes('\x1b[?2026h\x1b[1A'), `重绘不应先上移，实际: ${JSON.stringify(delta)}`)
+  assert.ok(!delta.includes('\x1b[?2026h\x1b[2A'), '重绘不应上移 2 行')
+})
+
+test('回归：多行（2 行文本 + 软键行）时上移量应为 1 而不是 2', async () => {
+  const { input, output } = makeEnv()
+  output.columns = 80
+  const ctrl = createMultilineInput({ stdin: input, stdout: output, prompt: '> ', onSubmit: () => {} })
+  ctrl.start()
+  input.write('第一行')
+  input.write(ENTER)   // 折行 → 光标到第 2 行（区域第 1 行）
+  await tick()
+  const mark = output.buf.length
+  input.write('x')
+  await tick()
+  const delta = output.buf.slice(mark)
+  assert.ok(delta.includes('\x1b[?2026h\x1b[1A\r\x1b[J'), `应回退 1 行，实际: ${JSON.stringify(delta)}`)
+  assert.ok(!delta.includes('\x1b[?2026h\x1b[2A'), `不应回退 2 行，实际: ${JSON.stringify(delta)}`)
+})
+
+test('回归：回退后再输入，光标行数保持稳定（不会逐键上漂）', async () => {
+  const { input, output } = makeEnv()
+  output.columns = 80
+  const ctrl = createMultilineInput({ stdin: input, stdout: output, prompt: '> ', onSubmit: () => {} })
+  ctrl.start()
+  input.write('abcdefghij')
+  await tick()
+  const renders = output.buf.split('\x1b[?2026h').length - 1
+  const upMoves = output.buf.split('\x1b[?2026h\x1b[1A').length - 1
+  // 单行场景：除了「从软键行回到文本行」的重定位（在帧尾），帧首不得上移
+  assert.strictEqual(upMoves, 0, `帧首上移次数应为 0，实际 ${upMoves}（共 ${renders} 帧）`)
+})
