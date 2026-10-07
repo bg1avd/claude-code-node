@@ -8,7 +8,8 @@
  *      `claude-code-node`，用户会装到**别人的包**上。
  *   2) 依赖口径一致性 —— package.json 描述「Zero dependencies」，则 dependencies 必须为空。
  *   3) 发布内容白名单 —— `npm pack` 产物不得包含 .claude-code/（内含会话与 token）、
- *      .npmrc、内部文档、log/、*.tgz 等；必须包含 LICENSE / README / src/index.js。
+ *      .npmrc、内部文档、log/、*.tgz、src/__tests__/（测试不进产物）等；
+ *      必须包含 LICENSE / README / src/index.js。
  *   4) 版本与 CHANGELOG —— 便于追溯（warning，不阻断救火发布）。
  *
  * 用法:
@@ -130,7 +131,10 @@ if (packedFiles) {
   }
   const testCount = packedFiles.filter((f) => f.startsWith('src/__tests__/')).length
   if (testCount > 0) {
-    warnings.push(`发布产物含 ${testCount} 个测试文件（files 白名单为 src/；如需排除请调整 files）`)
+    errors.push(`发布产物含 ${testCount} 个测试文件 —— files 白名单必须排除 src/__tests__/（当前 files=${JSON.stringify(pkg.files)}）`)
+  }
+  if (!Array.isArray(pkg.files) || !pkg.files.includes('!src/__tests__/')) {
+    errors.push('package.json files 缺少 "!src/__tests__/"（测试文件不得进入发布产物）')
   }
 }
 
