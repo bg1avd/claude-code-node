@@ -3,6 +3,7 @@
  * 符合 ToolDef 接口规范
  */
 
+import { readFileSync } from 'fs'
 import { GitHubAPI, createGitHubAPI } from '../git/github-api.js'
 import { PRReviewer } from '../git/pr-reviewer.js'
 import { PRMergePolicy } from '../git/pr-merge-policy.js'
@@ -69,6 +70,31 @@ const TOOL_PARAMETERS = {
 }
 
 /**
+ * 入参枚举校验：在 execute 分派前统一拦截非法枚举值。
+ * 仅校验「已知枚举字段」，不校验 action 本身（未知 action 交由 switch 兜底报 Unknown action）。
+ */
+const ENUM_PARAMS = {
+  state: ['open', 'closed', 'all'],
+  method: ['merge', 'squash', 'rebase'],
+  commentThreshold: ['INFO', 'WARNING', 'ERROR'],
+}
+const CHECK_ENUM = ['code-quality', 'security', 'tests', 'docs', 'complexity', 'duplication']
+
+function validateEnumParams(params = {}) {
+  for (const [key, allowed] of Object.entries(ENUM_PARAMS)) {
+    const v = params[key]
+    if (v !== undefined && !allowed.includes(v)) {
+      throw new Error(`Invalid enum value for "${key}": ${JSON.stringify(v)} (expected one of ${allowed.join(', ')})`)
+    }
+  }
+  if (params.checks !== undefined) {
+    if (!Array.isArray(params.checks) || params.checks.some(c => !CHECK_ENUM.includes(c))) {
+      throw new Error(`Invalid enum value in "checks": ${JSON.stringify(params.checks)} (expected array of ${CHECK_ENUM.join(', ')})`)
+    }
+  }
+}
+
+/**
  * 内部 GitTool 类（无状态）
  */
 class GitTool {
@@ -104,8 +130,9 @@ class GitTool {
     this.mergePolicy = new PRMergePolicy(this.github, policyConfig)
   }
 
-  async execute(params) {
+  async execute(params = {}) {
     const { action } = params
+    validateEnumParams(params)
     switch (action) {
       case 'list-prs': return this.listPRs(params)
       case 'get-pr': return this.getPR(params)
@@ -284,7 +311,7 @@ class GitTool {
   _readConfig(path) {
     try {
       const configPath = `${process.env.HOME}/.claude-code/config.json`
-      const data = require('fs').readFileSync(configPath, 'utf-8')
+      const data = readFileSync(configPath, 'utf-8')
       const config = JSON.parse(data)
       return path.split('.').reduce((obj, key) => obj?.[key], config)
     } catch { return null }

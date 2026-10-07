@@ -6,34 +6,43 @@
 import { test, describe, beforeEach } from 'node:test'
 import assert from 'node:assert'
 
-// 模拟 GitHub API 响应
+// 模拟 GitHub API 客户端
+// 注意：GitTool 内部调用的是「高层方法」（listPRs/getPR/getPRFiles/...），
+// 而非低层 request()，因此 mock 必须提供这些方法，否则报 is not a function。
 function mockGitHubAPI() {
+  const pr = {
+    number: 1,
+    title: 'Test PR',
+    body: 'Test',
+    state: 'open',
+    user: { login: 'tester' },
+    head: { ref: 'feature', sha: 'abc123' },
+    base: { ref: 'main' },
+    mergeable: true,
+    changed_files: 1,
+    additions: 1,
+    deletions: 0,
+    labels: [],
+    comments: 0,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-02T00:00:00Z'
+  }
   return {
     token: 'mock-token',
     owner: 'test-owner',
     repo: 'test-repo',
     baseUrl: 'https://api.github.com',
-    request: async (endpoint, options = {}) => {
-      if (endpoint.includes('/pulls')) {
-        return [{ number: 1, title: 'Test PR', state: 'open', user: { login: 'tester' } }]
-      }
-      if (endpoint.includes('/pulls/1')) {
-        return {
-          number: 1,
-          title: 'Test PR',
-          body: 'Test',
-          user: { login: 'tester' },
-          head: { ref: 'feature', sha: 'abc123' },
-          base: { ref: 'main' },
-          mergeable: true,
-          changed_files: 1,
-          additions: 1,
-          deletions: 0,
-          labels: []
-        }
-      }
-      return {}
-    }
+    request: async () => ({}),
+    listPRs: async () => [pr],
+    getPR: async () => pr,
+    getPRFiles: async () => [{ filename: 'src/a.js', additions: 1, deletions: 0 }],
+    getPRDiff: async () => '',
+    listReviews: async () => [{ user: { login: 'tester' }, state: 'APPROVED' }],
+    isMergeable: async () => true,
+    createReview: async () => ({ id: 1 }),
+    createComment: async () => ({ id: 1 }),
+    approvePR: async () => ({ id: 1 }),
+    requestChanges: async () => ({ id: 1 })
   }
 }
 
@@ -50,8 +59,20 @@ describe('GitTool Integration', () => {
       repo: 'test-repo',
       token: 'mock-token'
     })
-    // 注入 mock 的 GitHub API
+    // 注入 mock 的 GitHub API + 合并策略/审查器
+    // （ensureGitHubClient 见到 this.github 已存在会提前 return，不会自行构造它们的依赖）
     tool.github = mockGitHubAPI()
+    tool.mergePolicy = {
+      checkMergeable: async (prNumber) => ({
+        prNumber,
+        mergeable: true,
+        checks: {},
+        violations: [],
+        warnings: [],
+        metadata: {}
+      })
+    }
+    tool.reviewer = { reviewPR: async () => ({ findings: [], comments: [] }) }
   })
 
   test('should list PRs', async () => {
