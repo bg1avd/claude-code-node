@@ -279,7 +279,7 @@ Commands:
   /allow reset — reset to ask mode
   /allow <tool> — allow specific tool (e.g. Bash)
   /resume <session-id> — Resume a saved conversation
-  /dream [方向]       — 检索过往会话记忆（梦境）。无参列出全部，带方向按方向检索
+  /dream [方向|save|clear] — 梦境：无参列出 · 带方向检索 · save 立即沉淀本次会话 · clear 清空
   /schedule [list|history|remove <id>|tick] — 定时任务管理
   /tick          — 手动触发一次定时任务到期检查
   /exit          — Exit (also Ctrl+C)
@@ -323,6 +323,8 @@ const DETAILED_HELP = {
   cost:    "/cost\n  Show API cost report.\n  Displays total tokens used and estimated cost in USD.\n  Supports pricing for: DeepSeek, OpenAI, Qwen, GLM, Kimi.",
 
   compact: "/compact\n  Manually trigger context compression.\n  Compresses the conversation history to fit within the token budget.\n  Keeps recent turns intact, compresses older ones.\n\n  Typically triggered automatically at 80% budget usage.",
+
+  dream:   "/dream [方向|save|clear]\n  梦境（跨会话长期记忆）。\n  (no arg)   — 列出全部梦境\n  <方向>     — 检索该方向的记忆（如 /dream http 客户端）\n  save       — 立即把「当前会话」沉淀为一条梦境（不必等退出）\n  clear      — 清空所有梦境\n\n  梦境在启动时自动注入系统提示（想起上次做到哪）；退出时也会自动沉淀一次。",
 
   cd:      "/cd <path>\n  Change the working directory of cc-node.\n  Affects all subsequent tool executions (Bash, Read, Write, etc.).\n\n  Without path: show the current working directory.\n\n  Example: /cd /home/yourname/projects\n  Example: /cd ..",
 
@@ -558,11 +560,28 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
     dreamContext = (await dreamManager.wake(wakeRecent)) || ''
   } catch { /* 梦境读取失败不阻塞启动 */ }
 
+  // 身份（Identity）—— 首次从「无项目配置的目录」启动时，生成带自说明的模板。
+  // 只在**启动**路径建；运行时 /cd 不建（关联项目不换角色、也不落文件）。
+  try {
+    if (await config.ensureProjectTemplate(process.cwd(), { language: config.get('language') })) {
+      console.log(`🪪 已生成本目录配置模板：${join(process.cwd(), '.claude-code', 'config.json')}`)
+    }
+  } catch { /* 生成失败不阻塞启动 */ }
+
   // 系统提示词优先级：CLI -s 参数 > config.json 顶层 systemPrompt > 内置默认
   let systemPrompt = cliArgs.systemPrompt || config.get('systemPrompt') || DEFAULT_SYSTEM_PROMPT
-  if (dreamContext) {
-    systemPrompt = `${systemPrompt}\n\n${dreamContext}`
+
+  // 身份（Identity）：机器级基线 + 目录级角色，**叠加**（非覆盖）。
+  // 必须分层从原始配置读（getRaw）——get() 是"高层覆盖低层"，拿不到两层。
+  const _idStr = (v) => (typeof v === 'string' ? v.trim() : '')
+  const _identities = [
+    _idStr(config.getRaw && config.getRaw('user', 'identity')),
+    _idStr(config.getRaw && config.getRaw('project', 'identity')),
+  ].filter(Boolean)
+  if (_identities.length) {
+    systemPrompt += `\n\n[身份 / Identity]\n${_identities.join('\n\n')}`
   }
+
   // config.json 的 preferences.* 全量注入为补充系统提示（个人偏好，不改核心操作规则）。
   // 例: "preferences": { "thinking_language": "中文", "note": "所有思维链用中文输出" }
   // 每个字符串键值变成一行 "- key: value"，空对象/无字符串值时零影响。
@@ -574,6 +593,10 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
     if (_prefLines.length > 0) {
       systemPrompt += `\n\n[用户偏好 / User preferences — 必须遵守]\n${_prefLines.join('\n')}`
     }
+  }
+  // 梦境放最后（身份层级：内置默认 → 机器级 identity → 目录级 identity → preferences → 梦境）
+  if (dreamContext) {
+    systemPrompt = `${systemPrompt}\n\n${dreamContext}`
   }
   const permissionMode = cliArgs.permissionMode || config.get('permissionMode')
   const maxTurns = cliArgs.maxTurns || config.get('maxTurns')
@@ -1167,8 +1190,26 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
           break
         }
         case 'dream': {
-          // 梦境 — 按方向检索过往记忆。/dream 无参 → 列出全部；/dream <方向> → 检索；/dream clear → 清空
+          // 梦境 — /dream 无参 → 列出全部；/dream <方向> → 检索；/dream save → 立即沉淀本次会话；/dream clear → 清空
           try {
+            if (rest.length > 0 && rest[0] === 'save') {
+              // 立即把「当前会话」沉淀为一条梦境（不必等退出时自动沉淀）
+              const dream = await dreamManager.sleep(
+                session?.messages || engine.state?.messages || [],
+                { title: session?.title, turnCount: engine.state?.turnCount },
+                { mainSummarizer: buildMainSummarizer(engine, apiKey) },
+              )
+              if (dream) {
+                const dirs = dream.directions?.length
+                  ? '（' + dream.directions.map((x) => `「${x.name}」`).join(' ') + '）'
+                  : (dream.main_goal ? `（「${dream.main_goal.slice(0, 20)}」）` : '')
+                const unfinished = dream.has_unfinished ? '，含未完成任务' : ''
+                console.log(`💭 已生成梦境 ${dream.id}${dirs}${unfinished}`)
+              } else {
+                console.log('💭 未生成：会话太短或内容不足（至少需 3 条消息且含实质目标/结果）。')
+              }
+              break
+            }
             if (rest.length > 0 && rest[0] === 'clear') {
               const n = await dreamManager.clear()
               console.log(n > 0 ? `🗑️  已清空 ${n} 条梦境记录。` : '💭 当前没有梦境记录可清空。')
@@ -1190,7 +1231,7 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
                   const merged = d.merge_count > 1 ? ` (合并×${d.merge_count})` : ''
                   console.log(`  · ${date}${proj}${flag}${merged}\n    ${dirs}`)
                 }
-                console.log('\n  提示：/dream <方向> 检索该方向的记忆（如 /dream http 客户端）· /dream clear 清空')
+                console.log('\n  提示：/dream <方向> 检索 · /dream save 立即沉淀本次会话 · /dream clear 清空')
               }
             } else {
               const query = rest.join(' ')

@@ -108,6 +108,8 @@ export class Config {
     this._userPath = USER_CONFIG_FILE
     // 顶层键来源追踪: 'user' | 'project' — 用于诊断"配置值到底来自哪个文件"
     this._keySources = {}
+    // 每一层的**原始**解析结果（未合并）。供"分层叠加"型字段使用（如 identity）。
+    this._raw = {}
   }
 
   /** 从项目目录加载配置 */
@@ -130,6 +132,23 @@ export class Config {
   /** 查询顶层键来自哪个配置源: 'user' | 'project' | null(内置默认) */
   keySource(key) {
     return this._keySources[key.split('.')[0]] || null
+  }
+
+  /**
+   * 读取某个配置源(level: 'user' | 'project')的**原始**值（不参与合并）。
+   * 用于需要"分层叠加"而非"高层覆盖低层"的字段——典型是 identity：
+   * 机器级基线 + 目录级角色要**同时生效**，而 get() 只会返回覆盖后的单一值。
+   */
+  getRaw(level, key) {
+    const d = this._raw?.[level]
+    if (!d) return undefined
+    if (!key) return d
+    let cur = d
+    for (const p of key.split('.')) {
+      if (cur == null) return undefined
+      cur = cur[p]
+    }
+    return cur
   }
 
   /**
@@ -167,10 +186,58 @@ export class Config {
       const data = JSON.parse(raw)
       if (level && data && typeof data === 'object' && !Array.isArray(data)) {
         for (const k of Object.keys(data)) this._keySources[k] = level
+        this._raw[level] = data // 保留该层原始值（供 getRaw 分层读取）
       }
       this.data = this._deepMerge(this.data, data)
     } catch {
       // 文件不存在或不合法 — 使用默认值
+    }
+  }
+
+  /**
+   * 首次从「无项目配置的目录」启动时，生成一个带 `description` 自说明的配置模板。
+   *
+   * - 只在**启动**路径调用；运行时 /cd 不调用（关联项目不换角色、也不落文件）。
+   * - 文件已存在则**不动**（返回 false）。
+   * - 说明文案语言跟随机器级 `language`（含 zh/中文 → 中文，否则英文）。
+   * - `description` 是纯文档，加载器忽略；真正生效的是同级的 `identity` / `systemPrompt` 等。
+   *
+   * @param {string} projectDir
+   * @param {{language?: string}} [opts]
+   * @returns {Promise<boolean>} 是否新建了文件
+   */
+  async ensureProjectTemplate(projectDir, { language = '' } = {}) {
+    if (!projectDir) return false
+    const dir = join(projectDir, '.claude-code')
+    const filePath = join(dir, 'config.json')
+    try {
+      await readFile(filePath, 'utf-8')
+      return false // 已存在 → 不动
+    } catch { /* 不存在 → 生成 */ }
+
+    const zh = /zh|中文|chinese|\bcn\b/i.test(String(language || ''))
+    const template = zh
+      ? {
+          description: {
+            identity: '可选。本目录 AI 扮演的角色与行为准则（自由文本，可多段，用 ## 分节）。留空 = 只用机器级基线（~/.claude-code/config.json 的 identity）。',
+            systemPrompt: '可选。填了 = 整体替换内置默认提示词（一般别动）。',
+          },
+          identity: '',
+        }
+      : {
+          description: {
+            identity: 'Optional. The role & behavior rules the AI plays in this directory (free text; may use "## " sections). Empty = use only the machine-level baseline (~/.claude-code/config.json "identity").',
+            systemPrompt: 'Optional. If set, fully replaces the built-in default system prompt (usually leave untouched).',
+          },
+          identity: '',
+        }
+
+    try {
+      await mkdir(dir, { recursive: true })
+      await atomicWriteFile(filePath, JSON.stringify(template, null, 2) + '\n')
+      return true
+    } catch {
+      return false
     }
   }
 

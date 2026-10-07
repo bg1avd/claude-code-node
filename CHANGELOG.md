@@ -1,5 +1,18 @@
 # CHANGELOG
 
+## v3.6.0
+
+## v3.6.0 — 身份（Identity）+ /dream save
+
+- **feat(identity)**: 新增**身份（Identity）**机制 —— 目录角色写在该目录 `.claude-code/config.json` 的 `identity` 键（自由文本），与**机器级基线**（`~/.claude-code/config.json` 的 `identity`）**叠加**注入系统提示词。层级：内置默认 → 机器级 identity → 目录级 identity → preferences → 梦境
+  - 是 openclaw 那堆 `SOUL.md` / `AGENTS.md` / `IDENTITY.md` 的**单键替代**：人格/规则/工作流都写在一段自由文本里
+  - 新增 `Config.getRaw(level, key)`：分层读取原始配置值（`get()` 是"高层覆盖低层"，拿不到两层，而 identity 需要叠加）
+- **feat(identity-template)**: 首次从「无项目配置的目录」启动 cc-node 时，自动生成带 `description` **自说明**的 `<dir>/.claude-code/config.json` 模板；说明语言跟随机器级 `language`（中文 / 英文）；**只在启动路径**生成，运行时 `/cd` 不生成、不换角色
+- **feat(dream)**: 新增 **`/dream save`** —— 立即把「当前会话」沉淀为一条梦境（不必等退出时自动沉淀）；并补充 `/help dream` 说明
+- **change(prompt-order)**: 梦境注入移至 `preferences` 之后（与身份层级一致）
+- **test**: 新增 `identity.test.js`（5 项：分层读取 / 模板生成 / 语言跟随 / 不覆盖 / 空目录）
+
+
 ## v3.5.0
 
 ## v3.5.0 — 机器级自定义工具 + 自动续接会话
