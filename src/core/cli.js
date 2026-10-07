@@ -1029,6 +1029,14 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
           for (const [action, keys] of Object.entries(inputCtrl.bindings.all())) {
             console.log(`  ${action.padEnd(20)} ${keys.join(', ') || '(未绑定)'}`)
           }
+          {
+            const conflicts = inputCtrl.bindings.conflicts()
+            if (conflicts.length) {
+              console.log('')
+              console.log('⚠️  键位冲突（同一键绑定了多个动作，先注册者生效）：')
+              for (const c of conflicts) console.log(`  ${c.spec}  ←  ${c.actions.join(' / ')}`)
+            }
+          }
           console.log('')
           console.log(`终端能力：Kitty 键盘协议=${_kittyKeyboardOn ? '已启用' : '未启用'} · modifyOtherKeys=${_modifyOtherKeysOn ? '已启用' : '未启用'}`)
           console.log('')

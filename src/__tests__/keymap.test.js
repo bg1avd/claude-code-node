@@ -140,3 +140,47 @@ test('每个事件都带 raw 原始字节（供 /keys 诊断）', () => {
   assert.strictEqual(parse('\x1bb')[0].raw, '\x1bb')
   assert.strictEqual(parse('\x1b[200~')[0].raw, '\x1b[200~')
 })
+
+// ============================================================
+//  flush()：数据静默后冲刷残留（孤立 ESC / 半截序列）
+// ============================================================
+
+test('flush()：孤立 ESC → escape 键', () => {
+  const p = createKeyParser()
+  assert.deepStrictEqual(p.feed('\x1b'), [], '单独 ESC 先挂起')
+  assert.strictEqual(p.pending(), '\x1b')
+  const evs = p.flush()
+  assert.strictEqual(evs.length, 1)
+  assert.strictEqual(evs[0].type, 'key')
+  assert.strictEqual(evs[0].name, 'escape')
+  assert.strictEqual(p.pending(), '', '冲刷后缓冲应清空')
+})
+
+test('flush()：半截 CSI 序列 → unknown（安全丢弃，不污染输入）', () => {
+  const p = createKeyParser()
+  assert.deepStrictEqual(p.feed('\x1b[1;5'), [], '未终结的 CSI 挂起')
+  const evs = p.flush()
+  assert.strictEqual(evs.length, 1)
+  assert.strictEqual(evs[0].type, 'unknown')
+})
+
+test('flush()：无残留时返回空数组', () => {
+  const p = createKeyParser()
+  p.feed('a')
+  assert.deepStrictEqual(p.flush(), [])
+})
+
+test('flush()：冲刷后仍可正常解析后续完整序列', () => {
+  const p = createKeyParser()
+  p.feed('\x1b')
+  p.flush()
+  assert.deepStrictEqual(strip(p.feed('\x1b[D')), [{ type: 'key', name: 'left' }])
+})
+
+test('flush()：ESC 后继字符在冲刷前到达 → 仍合为 Alt+X（冲刷不抢跑）', () => {
+  const p = createKeyParser()
+  p.feed('\x1b')
+  const evs = p.feed('b')          // 同一批数据，未 flush
+  assert.deepStrictEqual(strip(evs), [{ type: 'key', name: 'b', alt: true }])
+  assert.deepStrictEqual(p.flush(), [], '已消化，无残留')
+})

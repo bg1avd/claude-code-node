@@ -19,6 +19,10 @@
 export const SEQ = {
   pasteOn: '\x1b[?2004h',
   pasteOff: '\x1b[?2004l',
+  // 同步输出（CSI 2026）：把一帧重绘包在 begin/end 之间，终端原子提交，
+  // 消除「擦除—重画」之间的撕裂/闪屏。不支持的终端会忽略未知私有模式，安全。
+  syncOn: '\x1b[?2026h',
+  syncOff: '\x1b[?2026l',
   kittyQuery: '\x1b[?u',            // 查询当前 flags → 终端回 CSI ? <flags> u
   kittyPush: (flags = 1) => `\x1b[>${flags}u`,  // 1 = 仅“消歧”，最保守
   kittyPop: '\x1b[<u',

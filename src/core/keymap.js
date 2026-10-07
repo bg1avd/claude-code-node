@@ -25,9 +25,12 @@
 //  用法：
 //    const p = createKeyParser()
 //    input.on('data', c => { for (const ev of p.feed(decoder.write(c))) handle(ev) })
+//    // 数据静默一小段时间后，冲刷残留（孤立 ESC / 半截序列）：
+//    if (p.pending()) setTimeout(() => { for (const ev of p.flush()) handle(ev) }, 10)
 //
 //  注意：解析器**有状态**，必须跨 feed 复用（序列可跨数据块）。
-//        ESC 单独出现时挂起，待后续字符补齐为 Alt+X（与 Node 行为一致）。
+//        ESC 单独出现时挂起，待后续字符补齐为 Alt+X（与 Node 行为一致）；
+//        若一直没有后续字符，调用方应用 flush() 把孤立 ESC 当作 escape 键。
 // ============================================================
 
 const ESC = '\x1b'
@@ -231,8 +234,23 @@ export function createKeyParser() {
     return out
   }
 
+  /**
+   * 冲刷未终结的缓冲（供调用方在「一段时间没新数据」后调用）：
+   *   - 单个 ESC → escape 键（用户真的按了 Esc）
+   *   - 其余残片 → unknown（安全丢弃，不污染输入）
+   * 这样「单独按 Esc」不会永久挂起等下一个字符。
+   */
+  function flush() {
+    if (!buf) return []
+    const raw = buf
+    buf = ''
+    if (raw === ESC) return [{ type: 'key', name: 'escape', raw }]
+    return [{ type: 'unknown', raw }]
+  }
+
   return {
     feed,
+    flush,
     pending: () => buf,
     reset: () => { buf = '' },
   }

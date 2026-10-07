@@ -573,3 +573,123 @@ test('数据块 \\r/cmd\\r 不被突发兜底误判（换行前无内容）', as
   await tick()
   assert.deepStrictEqual(submitted, ['', '/help'])
 })
+
+// ============================================================
+//  大批粘贴折叠（[paste #n …]）+ 同步输出 + 残留冲刷
+// ============================================================
+
+test('大批粘贴（>10 行）折叠成 [paste #n …] 标记，提交时展开为完整原文', async () => {
+  const { input, output } = makeEnv()
+  output.columns = 80
+  const submitted = []
+  const ctrl = createMultilineInput({
+    stdin: input, stdout: output, prompt: '> ',
+    onSubmit: (t) => submitted.push(t),
+  })
+  ctrl.start()
+
+  const big = Array.from({ length: 50 }, (_, i) => `line${i}`).join('\n')
+  input.write('\x1b[200~' + big + '\x1b[201~')
+  await tick()
+
+  // 输入区回显的是折叠标记，而不是 50 行原文
+  assert.ok(/\[paste #1 \+\d+ lines\]/.test(output.buf),
+    `应折叠成标记，实际尾部: ${JSON.stringify(output.buf.slice(-160))}`)
+  assert.ok(!output.buf.includes('line49'), '原文不应直接铺满输入区')
+
+  input.write('\r')
+  await tick()
+  assert.deepStrictEqual(submitted, [big], '提交时应展开为完整原文')
+})
+
+test('大批粘贴（>1000 字符，行数少）折叠成 chars 标记', async () => {
+  const { input, output } = makeEnv()
+  output.columns = 80
+  const submitted = []
+  const ctrl = createMultilineInput({
+    stdin: input, stdout: output, prompt: '> ',
+    onSubmit: (t) => submitted.push(t),
+  })
+  ctrl.start()
+
+  const big = 'x'.repeat(1500)
+  input.write('\x1b[200~' + big + '\x1b[201~')
+  await tick()
+  assert.ok(/\[paste #1 \d+ chars\]/.test(output.buf),
+    `应折叠成 chars 标记，实际: ${JSON.stringify(output.buf.slice(-120))}`)
+
+  input.write('\r')
+  await tick()
+  assert.deepStrictEqual(submitted, [big])
+})
+
+test('小批量粘贴（≤10 行且 ≤1000 字符）不折叠，原样保留', async () => {
+  const { input, output } = makeEnv()
+  output.columns = 80
+  const submitted = []
+  const ctrl = createMultilineInput({
+    stdin: input, stdout: output, prompt: '> ',
+    onSubmit: (t) => submitted.push(t),
+  })
+  ctrl.start()
+
+  input.write('\x1b[200~a\nb\nc\x1b[201~')
+  await tick()
+  assert.ok(!output.buf.includes('[paste #'), '小粘贴不应折叠')
+
+  input.write('\r')
+  await tick()
+  assert.deepStrictEqual(submitted, ['a\nb\nc'])
+})
+
+test('折叠标记是原子单元：退格一次删掉整个标记', async () => {
+  const { input, output } = makeEnv()
+  output.columns = 80
+  const submitted = []
+  const ctrl = createMultilineInput({
+    stdin: input, stdout: output, prompt: '> ',
+    onSubmit: (t) => submitted.push(t),
+  })
+  ctrl.start()
+
+  const big = Array.from({ length: 20 }, (_, i) => `L${i}`).join('\n')
+  input.write('\x1b[200~' + big + '\x1b[201~')
+  await tick()
+  input.write('\x7f')     // 一次退格
+  await tick()
+  input.write('ok\r')
+  await tick()
+  assert.deepStrictEqual(submitted, ['ok'], '退格应整块删掉标记')
+})
+
+test('重绘使用同步输出（CSI 2026）包裹', async () => {
+  const { input, output } = makeEnv()
+  output.columns = 80
+  const ctrl = createMultilineInput({ stdin: input, stdout: output, prompt: '> ', onSubmit: () => {} })
+  ctrl.start()
+  output.buf = ''          // 清掉 start() 的输出
+  input.write('abc')
+  await tick()
+  assert.ok(output.buf.includes('\x1b[?2026h'), '应有同步输出开始序列')
+  assert.ok(output.buf.includes('\x1b[?2026l'), '应有同步输出结束序列')
+})
+
+test('孤立 ESC：静默后按 escape 冲刷，后续 Enter 仍为普通提交（不被当 Alt+Enter）', async () => {
+  const { input, output } = makeEnv()
+  const submitted = []
+  const ctrl = createMultilineInput({
+    stdin: input, stdout: output, prompt: '> ',
+    onSubmit: (t) => submitted.push(t),
+  })
+  ctrl.start()
+
+  input.write('abc')
+  input.write('\x1b')   // 单独 ESC，之后没有字符
+  await tick()          // 30ms > 10ms，flush 应已触发
+  input.write('\r')     // 若 ESC 未冲刷，\x1b\r 会被当 Alt+Enter 折行
+  input.write('X')
+  input.write('\r')
+  await tick()
+
+  assert.deepStrictEqual(submitted, ['abc', 'X'])
+})

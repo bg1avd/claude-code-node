@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert'
-import { createKeybindings, normalizeSpec, DEFAULT_KEYBINDINGS } from '../core/keybindings.js'
+import { createKeybindings, normalizeSpec, DEFAULT_KEYBINDINGS, ACTION_DESCRIPTIONS, formatKeyLabel } from '../core/keybindings.js'
 
 test('normalizeSpec 归一化（小写 + 修饰键固定顺序）', () => {
   assert.strictEqual(normalizeSpec('Shift+Enter'), 'shift+enter')
@@ -62,4 +62,55 @@ test('默认表覆盖关键动作', () => {
 test('用户配置非对象时不崩', () => {
   const kb = createKeybindings(null)
   assert.strictEqual(kb.actionFor('enter'), 'submit')
+})
+
+// ============================================================
+//  说明文本 / 键位标签 / 冲突检测（屏幕软键条与键位提示的地基）
+// ============================================================
+
+test('每个默认动作都有中文说明', () => {
+  for (const action of Object.keys(DEFAULT_KEYBINDINGS)) {
+    assert.ok(ACTION_DESCRIPTIONS[action], `${action} 应有说明`)
+  }
+})
+
+test('formatKeyLabel：键规格 → 紧凑显示标签', () => {
+  assert.strictEqual(formatKeyLabel('enter'), '⏎')
+  assert.strictEqual(formatKeyLabel('ctrl+j'), '^J')
+  assert.strictEqual(formatKeyLabel('alt+enter'), '⌥⏎')
+  assert.strictEqual(formatKeyLabel('shift+enter'), '⇧⏎')
+  assert.strictEqual(formatKeyLabel('ctrl+left'), '^←')
+  assert.strictEqual(formatKeyLabel('up'), '↑')
+  assert.strictEqual(formatKeyLabel('backspace'), '⌫')
+  assert.strictEqual(formatKeyLabel(''), '')
+})
+
+test('hintFor：动作 → 键位提示文本，且随用户改键自动跟随', () => {
+  const kb = createKeybindings()
+  const hint = kb.hintFor('newline')
+  assert.ok(hint.includes('折行'), `应含说明，实际: ${hint}`)
+  assert.ok(hint.includes('^J'), `应含键标签，实际: ${hint}`)
+  assert.strictEqual(kb.hintFor('no-such-action'), '')
+
+  const kb2 = createKeybindings({ newline: ['ctrl+enter'] })
+  assert.ok(kb2.hintFor('newline').includes('^⏎'), kb2.hintFor('newline'))
+  assert.ok(!kb2.hintFor('newline').includes('^J'), '改键后旧的键标签应消失')
+})
+
+test('conflicts()：默认绑定无冲突', () => {
+  const kb = createKeybindings()
+  assert.deepStrictEqual(kb.conflicts(), [])
+})
+
+test('conflicts()：同一键绑到两个动作 → 检出', () => {
+  const kb = createKeybindings({ 'cursor-left': ['ctrl+g'], 'cursor-right': ['ctrl+g'] })
+  const c = kb.conflicts()
+  assert.strictEqual(c.length, 1)
+  assert.strictEqual(c[0].spec, 'ctrl+g')
+  assert.deepStrictEqual([...c[0].actions].sort(), ['cursor-left', 'cursor-right'])
+})
+
+test('conflicts()：自定义动作撞默认键 → 检出', () => {
+  const kb = createKeybindings({ 'my-action': ['ctrl+j'] })
+  assert.ok(kb.conflicts().map((x) => x.spec).includes('ctrl+j'))
 })

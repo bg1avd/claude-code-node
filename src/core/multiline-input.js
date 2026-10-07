@@ -23,7 +23,12 @@
 //
 //  粘贴：开启 bracketed paste（\x1b[?2004h）；终端用 \x1b[200~ … \x1b[201~
 //  包裹粘贴内容，故粘贴里的换行一律当「字面换行」插入，绝不误判为提交。
-//  对不支持括号粘贴的终端，用「同一数据块内换行两侧都有内容」的启发式兜底。
+//    · 大批粘贴折叠：>10 行或 >1000 字符 → 记为原子的 [paste #n +N lines]，
+//      提交时展开回原文（避免几百行糊满屏幕、且光标按整块移动/删除）。
+//    · 对不支持括号粘贴的终端，用「同一数据块内换行两侧都有内容」的启发式兜底。
+//
+//  渲染：每次重绘包在「同步输出」（CSI 2026）里，终端原子提交、不闪屏。
+//  解析：数据静默 10ms 后用 parser.flush() 冲掉残留（孤立 ESC → escape 键）。
 //
 //  非 TTY（管道/重定向）→ 回退到 readline line 事件
 //
@@ -38,6 +43,15 @@ import { createKeyParser, keyEventToSpec } from './keymap.js'
 import { createKeybindings } from './keybindings.js'
 import { SEQ } from './terminal-caps.js'
 
+// 大批粘贴折叠阈值（参考 pi-tui）：超过任一阈值就把内容折叠成原子标记，
+// 避免 500 行粘贴把输入区撑爆；提交时再把标记展开回原文。
+const PASTE_MAX_LINES = 10
+const PASTE_MAX_CHARS = 1000
+const PASTE_MARKER_SRC = '\\[paste #(\\d+) (?:\\+\\d+ lines|\\d+ chars)\\]'
+const PASTE_MARKER_RE = new RegExp(PASTE_MARKER_SRC, 'g')
+// 解析器残留冲刷延迟（毫秒）：数据静默这么久后，把孤立 ESC / 半截序列冲掉
+const FLUSH_MS = 10
+
 export function createMultilineInput({
   prompt = '> ', onSubmit, onExit, stdin, stdout, keybindings: userBindings, onKeyEvent,
 } = {}) {
@@ -51,6 +65,12 @@ export function createMultilineInput({
   let questioning = false   // 是否正在收集单行问题（权限确认等）
   let questionResolve = null
   let questionBuf = ''
+
+  // 大批粘贴折叠
+  const pastes = new Map()      // id → 原始内容
+  let pasteCounter = 0
+  let pasteContent = ''         // bracketed paste 期间累积的内容
+  let flushTimer = null         // 解析器残留冲刷定时器
 
   const PROMPT = prompt
   let displayedRows = 0     // 当前输入区在终端实际占用的屏幕行数
@@ -94,9 +114,18 @@ export function createMultilineInput({
   const onData = (chunk) => {
     const text = typeof chunk === 'string' ? chunk : decoder.write(chunk)
     if (!text) return
+    if (flushTimer) { clearTimeout(flushTimer); flushTimer = null }
     lastChunk = text
     chunkHasBracket = text.includes('\x1b[200~') || text.includes('\x1b[201~')
     for (const ev of parser.feed(text)) handleEvent(ev)
+    // 若还剩未终结的序列（孤立 ESC / 半截 CSI），一小段静默后冲刷，
+    // 避免「单独按 Esc」永久挂起、或半个序列卡住后续输入。
+    if (parser.pending()) {
+      flushTimer = setTimeout(() => {
+        flushTimer = null
+        for (const ev of parser.flush()) handleEvent(ev)
+      }, FLUSH_MS)
+    }
   }
   input.on('data', onData)
 
@@ -141,6 +170,49 @@ export function createMultilineInput({
 
   function text() { return buffer.join('') }
 
+  // 判断单元格是否为空白（粘贴标记是复合单元，不算空白）
+  function isWsCell(cell) {
+    return cell.length === 1 && /\s/.test(cell)
+  }
+
+  // 把字符串切成「单元格」：粘贴标记（[paste #n …]）整体算一个单元（原子），
+  // 其余按码点。于是光标移动/退格/删词都把整个标记当作一个字符处理。
+  function splitCells(str) {
+    const cells = []
+    let last = 0
+    PASTE_MARKER_RE.lastIndex = 0
+    let m
+    while ((m = PASTE_MARKER_RE.exec(str)) !== null) {
+      for (const ch of str.slice(last, m.index)) cells.push(ch)
+      cells.push(m[0])
+      last = m.index + m[0].length
+    }
+    for (const ch of str.slice(last)) cells.push(ch)
+    return cells
+  }
+
+  // 提交时把 [paste #n …] 标记展开回原始内容
+  function expandPastes(str) {
+    return str.replace(PASTE_MARKER_RE, (whole, id) => {
+      const content = pastes.get(Number(id))
+      return content === undefined ? whole : content
+    })
+  }
+
+  // 提交一段粘贴内容：小则原样插入，大则折叠成原子标记（参考 pi-tui）
+  function commitPaste(raw) {
+    if (!raw) return
+    const lines = raw.split('\n')
+    if (lines.length > PASTE_MAX_LINES || raw.length > PASTE_MAX_CHARS) {
+      const id = ++pasteCounter
+      pastes.set(id, raw)
+      const label = lines.length > PASTE_MAX_LINES ? `+${lines.length} lines` : `${raw.length} chars`
+      insertCell(`[paste #${id} ${label}]`)
+    } else {
+      insert(raw)
+    }
+  }
+
   function displayText() {
     return PROMPT + text().replace(/\n/g, '\n' + ' '.repeat(PROMPT.length))
   }
@@ -176,24 +248,28 @@ export function createMultilineInput({
   }
 
   // 清空并重绘整个输入区，并把光标移回编辑位置
+  // 整帧包在「同步输出」（CSI 2026）里：终端原子提交，消除擦除—重画之间的撕裂/闪屏。
   function render() {
     if (pasteActive) return   // 粘贴期间不重绘，paste-end 统一重绘
 
-    if (displayedRows > 1) output.write(`\x1b[${displayedRows - 1}A`)
-    output.write('\r')
-    output.write('\x1b[J')
+    let out = SEQ.syncOn
+    if (displayedRows > 1) out += `\x1b[${displayedRows - 1}A`
+    out += '\r'
+    out += '\x1b[J'
 
     const rendered = displayText()
-    output.write(rendered)
+    out += rendered
     displayedRows = renderedRows(rendered)
 
     const at = cursorRowCol()
     const end = endRowCol()
     if (at.row !== end.row || at.col !== end.col) {
-      if (end.row > at.row) output.write(`\x1b[${end.row - at.row}A`)
-      output.write('\r')
-      if (at.col > 0) output.write(`\x1b[${at.col}C`)
+      if (end.row > at.row) out += `\x1b[${end.row - at.row}A`
+      out += '\r'
+      if (at.col > 0) out += `\x1b[${at.col}C`
     }
+    out += SEQ.syncOff
+    output.write(out)
   }
 
   function showPrompt() {
@@ -205,14 +281,15 @@ export function createMultilineInput({
   }
 
   function submit() {
-    const inputText = text()
+    const shown = text()                    // 显示文本（含 [paste #n …] 标记）
+    const inputText = expandPastes(shown)   // 实际提交内容（标记展开回原文）
     buffer = []
     cursor = 0
     suppressNextLF = true
     displayedRows = 0
     output.write('\n')
-    if (inputText.trim()) {
-      inputHistory.push(inputText)
+    if (shown.trim()) {
+      inputHistory.push(shown)              // 历史存显示文本，↑ 调出时不撑爆屏幕
       historyIndex = inputHistory.length
     }
     if (onSubmit) onSubmit(inputText)
@@ -233,7 +310,7 @@ export function createMultilineInput({
   }
 
   function setBuffer(str) {
-    buffer = Array.from(str)
+    buffer = splitCells(str)
     cursor = buffer.length
     render()
   }
@@ -257,20 +334,26 @@ export function createMultilineInput({
     buffer.splice(cursor, 0, ...cps)
     cursor += cps.length
   }
+  // 以「单个单元格」插入（粘贴标记保持原子性）
+  function insertCell(cell) {
+    if (!cell) return
+    buffer.splice(cursor, 0, cell)
+    cursor++
+  }
   function backspace() { if (cursor > 0) { buffer.splice(cursor - 1, 1); cursor-- } }
   function delForward() { if (cursor < buffer.length) buffer.splice(cursor, 1) }
   function lineStart() { let i = cursor; while (i > 0 && buffer[i - 1] !== '\n') i--; return i }
   function lineEnd() { let i = cursor; while (i < buffer.length && buffer[i] !== '\n') i++; return i }
   function prevWord() {
     let i = cursor
-    while (i > 0 && /\s/.test(buffer[i - 1])) i--
-    while (i > 0 && !/\s/.test(buffer[i - 1])) i--
+    while (i > 0 && isWsCell(buffer[i - 1])) i--
+    while (i > 0 && !isWsCell(buffer[i - 1])) i--
     return i
   }
   function nextWord() {
     let i = cursor
-    while (i < buffer.length && !/\s/.test(buffer[i])) i++
-    while (i < buffer.length && /\s/.test(buffer[i])) i++
+    while (i < buffer.length && !isWsCell(buffer[i])) i++
+    while (i < buffer.length && isWsCell(buffer[i])) i++
     return i
   }
 
@@ -337,24 +420,35 @@ export function createMultilineInput({
     if (questioning) { handleQuestion(ev); return }
 
     // 括号粘贴边界
-    if (ev.type === 'paste-start') { pasteActive = true; pasteCRPending = false; return }
+    if (ev.type === 'paste-start') { pasteActive = true; pasteCRPending = false; pasteContent = ''; return }
     if (ev.type === 'paste-end') {
       pasteActive = false
       pasteCRPending = false
+      const content = pasteContent
+      pasteContent = ''
+      commitPaste(content)   // 小粘贴原样插入；大粘贴折叠成 [paste #n …] 标记
       render()
       return
     }
     if (ev.type === 'unknown' || ev.type === 'mouse') return
 
-    const inPaste = pasteActive || isPasteBurst()
-
-    // 粘贴期间：换行一律当字面插入（CRLF 合并），其余按键不触发动作
-    if (inPaste) {
-      if (ev.type === 'char') {
-        pasteCRPending = false
-        insert(ev.text)
-        return
+    // 括号粘贴区间内：只累积内容、不逐字重绘（paste-end 一次性提交/重绘）
+    if (pasteActive) {
+      if (ev.type === 'char') { pasteCRPending = false; pasteContent += ev.text; return }
+      if (ev.type === 'key') {
+        const spec = keyEventToSpec(ev)
+        if (spec === 'enter') { pasteCRPending = true; pasteContent += '\n'; return }
+        if (spec === 'ctrl+j') {
+          if (pasteCRPending) { pasteCRPending = false; return }  // CRLF 的 LF
+          pasteContent += '\n'; return
+        }
       }
+      return
+    }
+
+    // 无括号终端的突发粘贴兜底：保持逐字插入（不折叠、不提交）
+    if (isPasteBurst()) {
+      if (ev.type === 'char') { pasteCRPending = false; insert(ev.text); return }
       if (ev.type === 'key') {
         const spec = keyEventToSpec(ev)
         if (spec === 'enter') { pasteCRPending = true; insert('\n'); return }
@@ -398,6 +492,7 @@ export function createMultilineInput({
   }
 
   function dispose() {
+    if (flushTimer) { clearTimeout(flushTimer); flushTimer = null }
     if (pasteModeEnabled) {
       try { output.write(SEQ.pasteOff) } catch {}
       pasteModeEnabled = false
