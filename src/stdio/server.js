@@ -40,7 +40,7 @@ export class StdioServer {
       apiKey: this.cliArgs.apiKey || process.env.LLM_API_KEY || '',
       model: this.cliArgs.model || '',
       systemPrompt: this.cliArgs.systemPrompt || DEFAULT_SYSTEM_PROMPT,
-      maxTurns: this.cliArgs.maxTurns || 50,
+      maxTurns: this.cliArgs.maxTurns != null ? this.cliArgs.maxTurns : 0,   // 0 = 不限制
     }
     this.initialized = false
     this.running = false

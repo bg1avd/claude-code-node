@@ -34,12 +34,16 @@ function makeLoopEngine({ maxTurns = 3, responses = [], tools = [], turnCount = 
     _buildRequest: (msgs) => [{ role: 'system', content: 'BASE_SYS' }, ...msgs.map(m => ({ role: m.role, content: m.content }))],
     _callLLM: async (msgs) => {
       engine.requests.push(JSON.parse(JSON.stringify(msgs)))
-      return responses[Math.min(i++, responses.length - 1)]
+      const idx = i++
+      if (typeof responses === 'function') return responses(idx)
+      if (Array.isArray(responses)) return responses[Math.min(idx, responses.length - 1)]
+      return responses          // 固定对象：每轮都返回同一个
     },
   }
   engine._executeToolCalls = QueryEngine.prototype._executeToolCalls.bind(engine)
   engine._isAbortError = QueryEngine.prototype._isAbortError.bind(engine)
   engine._wrapUpAt = QueryEngine.prototype._wrapUpAt.bind(engine)
+  engine._turnLimit = QueryEngine.prototype._turnLimit.bind(engine)
   return engine
 }
 
@@ -61,7 +65,7 @@ test('工具循环：跑满上限 → 给出强制停止提示（回归：不再
     responses: [{ content: '', toolCalls: [new ToolCall('t', 'Noop', {})] }],
   })
   const r = await run(engine)
-  assert.match(r.response, /工具循环已达上限 3 轮/, '应给出上限提示而不是空响应')
+  assert.match(r.response, /本轮工具调用已达 3 轮上限/, '应给出上限提示而不是空响应')
   assert.notEqual(r.response, '', '绝不能返回空字符串')
   assert.equal(r.aborted, false)
 })
@@ -74,7 +78,7 @@ test('工具循环：会话累计请求数很大也不误判为「中断」', as
     responses: [{ content: '', toolCalls: [new ToolCall('t', 'Noop', {})] }],
   })
   const r = await run(engine)
-  assert.match(r.response, /工具循环已达上限/)
+  assert.match(r.response, /已达 3 轮上限|本轮工具调用已达/)
   assert.equal(r.aborted, false)
 })
 
@@ -162,8 +166,9 @@ test('工具循环：中断后 state.messages 中 assistant.tool_calls 均配有
 test('收尾引导：到达 maxTurns 的 wrapUpRatio 后，请求里注入「停止调工具」的 system 指令', async () => {
   const engine = makeLoopEngine({
     maxTurns: 10, wrapUpRatio: 0.5,      // → 第 6 轮（index 5）起注入
-    tools: [{ name: 'Noop', handler: async () => 'ok' }],
-    responses: [{ content: '', toolCalls: [new ToolCall('t', 'Noop', {})] }],
+    // 每轮参数不同 + 每轮结果不同 → 完全不触发「无进展检测」，专测收尾引导
+    tools: [{ name: 'Noop', handler: async (input) => 'ok:' + JSON.stringify(input) }],
+    responses: (i) => ({ content: '', toolCalls: [new ToolCall('t' + i, 'Noop', { i })] }),
   })
   await run(engine)
 
@@ -215,8 +220,8 @@ test('空回复：模型返回空内容且无工具调用 → 报「空回复」
     responses: [{ content: '', toolCalls: [] }],        // ← 空回复（第 1 轮就发生）
   })
   const r = await run(engine)
-  assert.doesNotMatch(r.response, /达到最大回合数限制|已达上限/, '绝不能误报成达到上限')
-  assert.match(r.response, /空回复/, '应明确告知是空回复')
+  assert.doesNotMatch(r.response, /达到最大回合数限制|轮上限/, '绝不能误报成达到上限')
+  assert.match(r.response, /没有返回任何内容/, '应明确告知模型没返回内容')
   assert.match(r.response, /共 1 轮/, '应报告真实轮数（1 轮），而不是 100')
   assert.equal(r.aborted, false)
 })
@@ -227,8 +232,8 @@ test('空回复：content 为 null 同样不该误报上限', async () => {
     responses: [{ content: null, toolCalls: [] }],
   })
   const r = await run(engine)
-  assert.doesNotMatch(r.response, /达到最大回合数限制|已达上限/)
-  assert.match(r.response, /空回复/)
+  assert.doesNotMatch(r.response, /达到最大回合数限制|轮上限/)
+  assert.match(r.response, /没有返回任何内容/)
 })
 
 test('回归对照：真的跑满上限时，仍应报「已达上限」', async () => {
@@ -238,11 +243,80 @@ test('回归对照：真的跑满上限时，仍应报「已达上限」', async
     responses: [{ content: '', toolCalls: [new ToolCall('t', 'Noop', {})] }],
   })
   const r = await run(engine)
-  assert.match(r.response, /工具循环已达上限 3 轮/)
+  assert.match(r.response, /本轮工具调用已达 3 轮上限/)
 })
 
 test('回归对照：正常有内容的答复，原样返回（不追加任何提示）', async () => {
   const engine = makeLoopEngine({ maxTurns: 100, turnCount: 999, responses: [{ content: '正常答复', toolCalls: [] }] })
   const r = await run(engine)
   assert.equal(r.response, '正常答复')
+})
+
+// ---------- 无进展检测（v3.6.16）：替代"拍脑袋的固定轮数上限" ----------
+
+test('无进展：连续重复同样的调用且结果不变 → 先提醒，再停止（不靠轮数上限）', async () => {
+  const engine = makeLoopEngine({
+    maxTurns: 0,                                 // ← 不限制轮数（默认）
+    tools: [{ name: 'Stuck', handler: async () => 'always same' }],
+    responses: { content: '', toolCalls: [new ToolCall('t', 'Stuck', { p: 1 })] },
+  })
+  const r = await run(engine)
+
+  assert.match(r.response, /已停止/, '应停止而不是无限跑')
+  assert.match(r.response, /重复/, '应说明原因是重复操作')
+  assert.match(r.response, /Stuck/, '应指出是哪个工具')
+  // 先礼后兵：第 3 轮提醒（第 4 轮请求里带提示）→ 第 5 轮才停
+  assert.equal(engine.requests.length, 5, `应在第 5 轮停下，实际 ${engine.requests.length} 轮`)
+  const warned = engine.requests.some(q => q.some(m => m.role === 'system' && String(m.content).includes('重复检测')))
+  assert.ok(warned, '停止之前应先注入过一次「重复检测」提醒')
+})
+
+test('无进展：结果不同（在推进）→ 不误判，可跑很多轮', async () => {
+  let n = 0
+  const engine = makeLoopEngine({
+    maxTurns: 0,
+    tools: [{ name: 'Work', handler: async (input) => 'step ' + (++n) + ' arg ' + input.i }],
+    // 每轮参数不同（真的在换着法子推进）→ 不该被判为无进展
+    responses: (i) => ({ content: '', toolCalls: [new ToolCall('t' + i, 'Work', { i })] }),
+  })
+  // 手动在若干轮后让它收尾，避免真跑 1000 轮
+  let calls = 0
+  const orig = engine._callLLM
+  engine._callLLM = async (msgs) => {
+    if (++calls > 12) return { content: '完成', toolCalls: [] }
+    return orig(msgs)
+  }
+  const r = await run(engine)
+  assert.equal(r.response, '完成', '有进展就不该被无进展检测打断')
+})
+
+test('无进展：中间夹一次不同调用 → 连击清零，不误判', async () => {
+  // 模拟"改代码 → 跑测试 → 改代码 → 跑测试"的正常节律
+  let n = 0
+  const seq = [
+    { content: '', toolCalls: [new ToolCall('a', 'Test', {})] },
+    { content: '', toolCalls: [new ToolCall('b', 'Edit', {})] },
+  ]
+  const engine = makeLoopEngine({
+    maxTurns: 0,
+    tools: [
+      { name: 'Test', handler: async () => 'FAIL' },      // 同样的失败结果
+      { name: 'Edit', handler: async () => 'edited ' + (++n) },
+    ],
+    responses: (i) => (i >= 8 ? { content: '修好了', toolCalls: [] } : seq[i % 2]),
+  })
+  const r = await run(engine)
+  assert.equal(r.response, '修好了', '交替的调用节律不应被判为无进展')
+})
+
+test('不限制轮数：maxTurns=0 时循环上限走极端兜底，且不注入收尾引导', async () => {
+  const engine = makeLoopEngine({ maxTurns: 0, responses: [{ content: 'ok', toolCalls: [] }] })
+  assert.ok(engine._turnLimit() >= 1000, 'maxTurns=0 应由极端兜底接管')
+  assert.equal(engine._wrapUpAt(), Infinity, '不限轮数时不应有"快到上限"的收尾引导')
+})
+
+test('不限制轮数：maxTurns=100 时收尾引导仍在第 81 轮', () => {
+  const engine = makeLoopEngine({ maxTurns: 100, responses: [{ content: 'x', toolCalls: [] }] })
+  assert.equal(engine._turnLimit(), 100)
+  assert.equal(engine._wrapUpAt(), 80)   // turn index 80 == 第 81 轮
 })

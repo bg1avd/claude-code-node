@@ -32,6 +32,29 @@ const TOOL_LOOP_WRAP_UP_HINT =
   '请**立即停止调用任何新工具**，用简洁的文字直接给出：\n' +
   '1) 已经完成的内容与关键结果；2) 尚未完成的部分与原因（如果有）；3) 下一步建议。\n' +
   '不要再调用工具，直接用文字回答。'
+
+/**
+ * 无进展检测（v3.6.16）—— 替代"拍脑袋的固定轮数上限"。
+ *
+ * 为什么：固定轮数（100）既拦不住真正的死循环（轮数多 ≠ 卡住），
+ * 又会误伤正常的长任务，还分不清"在干活"和"在原地打转"。
+ * **真正的信号是「无进展」**：
+ *   - 连续 N 轮用**完全相同的参数**调用同样的工具（说明这一步根本推不动）
+ *   - 连续 N 轮的**工具返回内容一模一样**（说明世界没有变化）
+ * 检测到 → 先注入提示让模型换策略（先礼），仍不改 → 强制停止（后兵）。
+ */
+const NO_PROGRESS_WARN_STREAK = 3    // 连续 3 轮无变化 → 提醒模型换策略
+const NO_PROGRESS_BREAK_STREAK = 5   // 连续 5 轮仍无变化 → 强制停止
+/** maxTurns <= 0（不限）时的极端兜底，避免真·死循环把账单一路烧穿 */
+const HARD_TURN_CAP = 1000
+
+function buildNoProgressHint(toolNames, reason) {
+  return (
+    '【重复检测】你最近几轮' + reason + '（' + toolNames + '），看起来没有取得任何进展。\n' +
+    '请**立即改变策略**：换参数、换工具、跳过这一步，或者承认此路不通。\n' +
+    '如果确实无法继续，请直接用文字说明现状与卡点，不要再重复同样的调用。'
+  )
+}
 import { stripAnsiCodes } from '../utils/ansi.js'
 
 /**
@@ -45,7 +68,11 @@ export class QueryEngineConfig {
     this.systemPrompt = options.systemPrompt || ''
     // 默认模型 — 不绑定任何厂商，用户必须通过 --model 或配置指定
     this.model = options.model || ''
-    this.maxTurns = options.maxTurns || 100
+    // 工具循环轮数上限：**默认 0 = 不限制**（v3.6.16 起）。
+    // 固定轮数上限是给弱模型打的应急补丁，它拦不住真循环、还误伤正常长任务；
+    // 真正的刹车改为「无进展检测 + /stop + 收尾引导」。
+    // >0 时才作为硬上限生效（并启用收尾引导）；<=0 时仅保留 HARD_TURN_CAP 极端兜底。
+    this.maxTurns = options.maxTurns != null ? options.maxTurns : 0
     this.maxBudgetTokens = options.maxBudgetTokens || 1_000_000
     // 压缩触发保守系数（0~1）：估算到可用窗口的该比例即触发压缩，留出 tokenization 差异余量
     this.compressSafetyFactor = options.compressSafetyFactor ?? 0.85
@@ -238,13 +265,26 @@ export class QueryEngine {
   }
 
   /**
+   * 单次请求允许的工具循环轮数上限。
+   * - `maxTurns > 0` → 用它（同时启用收尾引导）
+   * - `maxTurns <= 0` → **不限制**（默认），只保留 HARD_TURN_CAP 作极端兜底；
+   *   真正的刹车交给「无进展检测 + /stop」
+   */
+  _turnLimit() {
+    const m = this.config.maxTurns
+    return (typeof m === 'number' && m > 0) ? m : HARD_TURN_CAP
+  }
+
+  /**
    * 收尾引导的触发轮次 —— maxTurns 的 wrapUpRatio（默认 0.8）。
    * 例：maxTurns=100 → 第 81 轮起开始提示；maxTurns=20 → 第 17 轮起。
-   * 想更早收尾就调小 maxTurns（`/max-turns 20`）或调小 wrapUpRatio。
+   * `maxTurns <= 0`（不限轮数）时返回 Infinity —— 不限就不该有"快到上限了"的提示。
    */
   _wrapUpAt() {
+    const m = this.config.maxTurns
+    if (!(typeof m === 'number' && m > 0)) return Infinity
     const ratio = typeof this.config.wrapUpRatio === 'number' ? this.config.wrapUpRatio : 0.8
-    return Math.max(1, Math.floor(this.config.maxTurns * ratio))
+    return Math.max(1, Math.floor(m * ratio))
   }
 
   /** 判断错误是否为「用户主动中断」(abort) —— 兼容 fetch AbortError 与旧的中文错误 */
@@ -263,9 +303,20 @@ export class QueryEngine {
    */
   async _runToolLoop(userMessage) {
     let finalResponse = ''
-    // 循环收尾原因：'done'(模型给出最终答复) | 'aborted'(用户 /stop) | 'max-turns'(跑满上限)
+    // 循环收尾原因：
+    //   'done'     模型给出最终答复
+    //   'aborted'  用户 /stop
+    //   'max-turns' 跑满用户设定的轮数上限（仅在 maxTurns>0 时可能出现）
+    //   'stuck'    无进展检测判定卡死（重复同样的调用且结果不变）
     let outcome = 'running'
     let turnsUsed = 0        // 本次请求实际跑了几轮（供提示语/诊断用）
+    let pendingHint = ''     // 只注入「下一轮请求体」的一次性 system 提示
+    let stuckWarned = false  // 是否已就"无进展"提醒过模型
+    let prevCallSig = null   // 上一轮的工具调用签名（工具名+参数）
+    let prevResultSig = null // 上一轮的工具结果签名
+    let sameCallStreak = 0
+    let sameResultStreak = 0
+    let lastToolNames = ''
 
     // 小模型模式：每个用户任务开始前，主动清空 LLM 端缓存一次。
     // 根因：LLM 端（llama.cpp 等自建服务）KV cache 无限叠加被塞满，是工作几轮后
@@ -280,7 +331,7 @@ export class QueryEngine {
     // 因此这里【不做任何干预】，回归最原始行为：构建请求 → 调 LLM →
     // 有工具调用就执行 → 循环。
     try {
-      for (let turn = 0; turn < this.config.maxTurns; turn++) {
+      for (let turn = 0; turn < this._turnLimit(); turn++) {
         turnsUsed = turn + 1
         // 用户 /stop → 优雅退出（不再抛异常：保证本轮消息仍走正常流程落盘）
         if (this.abortController.signal.aborted) { outcome = 'aborted'; break }
@@ -289,17 +340,21 @@ export class QueryEngine {
         this._ensureFitWindow()
 
         const requestMessages = this._buildRequest(this.state.messages)
-        // 收尾引导：接近上限时插入一条 system 指令，让模型主动停止调用工具、直接给结论，
-        // 而不是一路撞到 maxTurns 才被强制打断。
-        // 只注入到「本次请求体」，不写入 state.messages（不污染历史、不落盘、不影响 prompt 缓存前缀）。
-        if (turn >= this._wrapUpAt()) {
+        // 注入 system 提示（只进「本次请求体」，不写入 state.messages —— 不污染历史、
+        // 不落盘、不影响 prompt 缓存前缀）：
+        //   ① 收尾引导：接近用户设定的轮数上限时，让模型主动总结而不是硬撞上限
+        //   ② 无进展提醒：重复同样的操作且结果不变时，要求它换策略
+        const hints = []
+        if (turn >= this._wrapUpAt()) hints.push(TOOL_LOOP_WRAP_UP_HINT)
+        if (pendingHint) { hints.push(pendingHint); pendingHint = '' }
+        if (hints.length) {
           const firstNonSystem = requestMessages.findIndex(m => m.role !== 'system')
           requestMessages.splice(firstNonSystem < 0 ? requestMessages.length : firstNonSystem, 0, {
             role: 'system',
-            content: TOOL_LOOP_WRAP_UP_HINT,
+            content: hints.join('\n\n'),
           })
           if (this.config.verbose) {
-            console.error(`[QueryEngine] 第 ${turn + 1}/${this.config.maxTurns} 轮：已注入收尾引导，请求模型总结`)
+            console.error(`[QueryEngine] 第 ${turn + 1} 轮：已注入 ${hints.length} 条 system 提示（收尾/重复检测）`)
           }
         }
         const response = await this._callLLM(requestMessages, this.state.messages)
@@ -335,6 +390,34 @@ export class QueryEngine {
 
         if (this.abortController.signal.aborted) { outcome = 'aborted'; break }
 
+        // ---- 无进展检测（替代"固定轮数上限"的真正刹车）----
+        // 只比较**连续**轮次（不跨轮累计），避免误伤"改了代码再跑同一个测试"这类
+        // 正常节律：只要中间有任何一次不同的调用，签名就会变，连击自然清零。
+        const callSig = JSON.stringify(response.toolCalls.map(tc => [tc.name, tc.input]))
+        const resultSig = toolResults.map(r => String(r.content)).join('\u0000').slice(0, 4000)
+        sameCallStreak = (callSig === prevCallSig) ? sameCallStreak + 1 : 1
+        sameResultStreak = (resultSig === prevResultSig) ? sameResultStreak + 1 : 1
+        prevCallSig = callSig
+        prevResultSig = resultSig
+        lastToolNames = [...new Set(response.toolCalls.map(tc => tc.name))].join(', ')
+
+        const streak = Math.max(sameCallStreak, sameResultStreak)
+        if (streak < NO_PROGRESS_WARN_STREAK) {
+          stuckWarned = false   // 恢复了进展 → 允许下次再提醒
+        } else if (streak >= NO_PROGRESS_BREAK_STREAK) {
+          outcome = 'stuck'
+          break
+        } else if (!stuckWarned) {
+          stuckWarned = true
+          const reason = sameCallStreak >= sameResultStreak
+            ? `连续 ${streak} 轮用**完全相同的参数**调用同一个工具`
+            : `连续 ${streak} 轮拿到**完全相同的结果**`
+          pendingHint = buildNoProgressHint(lastToolNames, reason)
+          if (this.config.verbose) {
+            console.error(`[QueryEngine] 无进展检测：${reason} → 已提醒模型换策略`)
+          }
+        }
+
         if (this.config.verbose) {
           console.error(`[QueryEngine] 工具循环第 ${turn + 1} 轮完成，执行了 ${toolResults.length} 个工具`)
         }
@@ -355,18 +438,25 @@ export class QueryEngine {
     if (!finalResponse) {
       if (outcome === 'aborted') {
         finalResponse = '⏹️ 已按你的要求中断本轮（历史已保留，可直接继续对话）'
+      } else if (outcome === 'stuck') {
+        // 无进展检测：这才是"卡住了"的真正判据
+        finalResponse =
+          `⏹️ 已停止：连续多轮重复同样的操作且结果没有变化（${lastToolNames || '相同工具'}）。\n` +
+          '原因多半是这一步在当前条件下推不动。建议换个思路，或直接告诉我你想达成什么，我来重新拆解。'
       } else if (outcome === 'max-turns') {
-        finalResponse = `[工具循环已达上限 ${this.config.maxTurns} 轮，模型未能给出最终答复，已强制停止]`
+        finalResponse =
+          `⏹️ 本轮工具调用已达 ${this.config.maxTurns} 轮上限，已暂停。\n` +
+          '直接回复「继续」即可接着做；如果不想再受此限制，用 `/max-turns 0` 关闭（默认已是不限）。'
       } else {
         // outcome === 'done'：模型自己结束了这一轮（没有工具调用），但**内容是空的**
         // —— 既没有文字、也没有工具调用。
         //
         // ⚠️ 这里就是"1 分钟就报 100 轮上限"的真凶（3.6.12）：
-        //   空回复让 finalResponse 保持空字符串 → 被下面的"达到上限"分支接住 →
+        //   空回复让 finalResponse 保持空字符串 → 被"达到上限"分支接住 →
         //   打出 `[达到最大回合数限制 (100)，停止响应]`，**哪怕只跑了 1 轮**。
-        //   判据里的 `state.turnCount >= 100`（会话累计请求数，跨重启累加）只是
-        //   让这个错误提示恰好"有条件出现"而已，与工具循环轮数毫无关系。
-        finalResponse = `[模型返回了空回复（本次共 ${turnsUsed} 轮，既无文字也无工具调用）。请再发一次，或换一个模型试试。]`
+        finalResponse =
+          `[模型这次没有返回任何内容（本次共 ${turnsUsed} 轮，既无文字也无工具调用）。` +
+          '可以直接再发一次，或换一个模型试试。]'
       }
     }
 

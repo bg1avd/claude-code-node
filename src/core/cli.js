@@ -277,7 +277,7 @@ Commands:
   /config KEY    — Show config value
   /budget        — Show token budget
   /window [N]    — Show/set context window (e.g. /window 128k, /window auto)
-  /max-turns [N] — Show/set tool-loop turn limit (e.g. /max-turns 20, take effect now)
+  /max-turns [N] — Tool-loop turn limit (0 = unlimited, DEFAULT; e.g. /max-turns 20)
   /channel CMD   — Manage notification channels (list|send|test)
   /cost          — Show API cost report
   /compact       — Manually compact conversation context
@@ -335,7 +335,7 @@ const DETAILED_HELP = {
 
   window:  "/window [N|auto|reset]\n  Show or set the LLM context window (max tokens allowed in conversation).\n  This is the hard ceiling for auto-compression — context will never exceed it.\n\n  Subcommands:\n    (no arg)   — Show current window + its source (manual/probe/table/fallback) + usage\n    /window 128k — Manually set window (persisted to config). Accepts K/M suffix:\n                  64k, 128k, 200k, 1m, or a raw number like 131072.\n    /window auto  — Clear manual override, return to auto-detection (next message re-detects).\n    /window reset — Clear manual override AND re-detect now.\n\n  Manual setting takes priority over auto-detection and survives restart.\n  Auto-detection itself is NOT persisted (re-runs at each startup).\n\n  Examples:\n    /window\n    /window 128k\n    /window 64k\n    /window auto\n    /window reset",
 
-  'max-turns': "/max-turns [N]\n  Show or set the tool-loop turn limit for a SINGLE user message (default: 100).\n\n  Why: if the model gets stuck calling tools without ever summarizing, it will\n  burn the whole budget (100 turns x one LLM call = many minutes) before stopping.\n  Lowering this number makes it give up (and report) much sooner.\n\n  Near the limit, cc-node automatically injects a \"wrap up now\" system hint so\n  the model stops calling tools and answers in plain text by itself.\n\n  Changes take effect IMMEDIATELY (no restart) and are persisted to config.\n\n  Examples:\n    /max-turns        — show current limit + when wrap-up guidance kicks in\n    /max-turns 20     — stop after 20 tool rounds, auto-wrap-up at round 17\n    /max-turns 100    — restore the default",
+  'max-turns': "/max-turns [N]\n  Tool-loop turn limit for a SINGLE user message.\n\n  DEFAULT IS 0 = UNLIMITED. A fixed turn cap is a crude safety net: it cannot\n  tell 'working hard' from 'going in circles', and it cuts off legitimate long\n  tasks. So the real brakes are:\n    1) no-progress detection — same tool with the SAME arguments (or identical\n       results) for 3 rounds in a row -> nudge the model to change strategy;\n       5 rounds in a row -> stop and tell you why\n    2) /stop — you decide, any time\n    3) wrap-up guidance (only when N > 0) — near the limit the model is told to\n       stop calling tools and summarize\n\n  Set N > 0 only if you want a hard ceiling (e.g. /max-turns 20).\n  Changes take effect IMMEDIATELY (no restart) and are persisted to config.\n\n  Examples:\n    /max-turns        — show current setting\n    /max-turns 0      — unlimited (default)\n    /max-turns 20     — hard cap at 20 rounds, wrap-up hint from round 17",
 
   channel: "/channel <list|send|test>\n  Manage notification channels.\n\n  Subcommands:\n    list       — List all configured notification channels\n    send <msg> — Send a message via all channels\n    test       — Send a test message to verify channels\n\n  Requires channel environment variables to be set at startup.",
 
@@ -363,7 +363,7 @@ function parseArgs(argv) {
     model: '',
     systemPrompt: '',
     permissionMode: 'ask',
-    maxTurns: 100,
+    maxTurns: null,          // 未指定 -> 由 config.maxTurns 决定（默认 0 = 不限制）
     verbose: false,
     apiBase: 'https://api.deepseek.com/v1',
     resume: null,
@@ -404,7 +404,7 @@ Options:
   -m, --model NAME          Model to use
   -s, --system-prompt TEXT  System prompt（优先级: -s > config systemPrompt > 内置默认；config 的 preferences.* 会自动追加为补充提示）
   -p, --permission-mode     Permission mode: ask|always-allow|deny
-  -t, --max-turns N         Max tool loop turns (default: 100)
+  -t, --max-turns N         Max tool loop turns (default: 0 = unlimited)
   --api-base URL            API base URL
   --api-key ***             API key (or set LLM_API_KEY env)
   -r, --resume ID           Resume a session
@@ -618,7 +618,8 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
     systemPrompt = `${systemPrompt}\n\n${dreamContext}`
   }
   const permissionMode = cliArgs.permissionMode || config.get('permissionMode')
-  const maxTurns = cliArgs.maxTurns || config.get('maxTurns')
+  // 0 = 不限制，是合法值 -> 必须用 ?? 而不是 ||（否则 0 会被当成未设置）
+  const maxTurns = cliArgs.maxTurns != null ? cliArgs.maxTurns : (config.get('maxTurns') ?? 0)
   let apiKey = cliArgs.apiKey || config.get('apiKey') || ''
 
   const registry = createDefaultRegistry()
@@ -1145,23 +1146,32 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
           break
         case 'max-turns': {
           // /max-turns [N] — 查看/设置单轮工具循环上限（运行时立即生效 + 持久化）
-          // 用途：模型陷入工具循环时，把上限从默认 100 调到 20 之类，卡死时更快收尾。
+          // 0 = 不限制（默认）。限制只是极端兜底；真正的刹车是「无进展检测 + /stop」。
           const arg = rest[0] ? rest.join(' ').trim() : ''
           if (!arg) {
-            const at = (engine._wrapUpAt?.() ?? Math.floor(engine.config.maxTurns * 0.8)) + 1
-            console.log(`Max tool-loop turns: ${engine.config.maxTurns}`)
-            console.log(`  收尾引导：第 ${at} 轮起自动提示模型停止调工具、直接总结`)
-            console.log(`  （提示：值越小越早收尾，避免被长工具循环卡住；默认 100）`)
+            const m = engine.config.maxTurns
+            const unlimited = !(typeof m === 'number' && m > 0)
+            console.log(`Max tool-loop turns: ${unlimited ? '0 (不限制)' : m}`)
+            if (unlimited) {
+              console.log('  不限制轮数。止损交给：无进展检测（重复同样操作且结果不变 → 先提醒、再停止）+ /stop')
+              console.log('  想恢复硬上限：/max-turns 100')
+            } else {
+              const at = (engine._wrapUpAt?.() ?? Math.floor(m * 0.8)) + 1
+              console.log(`  收尾引导：第 ${at} 轮起自动提示模型停止调工具、直接总结`)
+              console.log('  想关掉限制：/max-turns 0')
+            }
+            console.log('  （无进展检测：连续 3 轮重复同样的调用且结果不变 → 提醒换策略；连续 5 轮 → 停止）')
             break
           }
           const n = parseInt(arg, 10)
-          if (!Number.isFinite(n) || n < 1 || n > 1000) {
-            console.log(`❌ Invalid value: "${arg}". Usage: /max-turns <1-1000>   e.g. /max-turns 20`)
+          if (!Number.isFinite(n) || n < 0 || n > 10000) {
+            console.log(`❌ Invalid value: "${arg}". Usage: /max-turns <0-10000>   （0 = 不限制）  e.g. /max-turns 0`)
             break
           }
           engine.config.maxTurns = n
           try { await config.saveKeyToUser('maxTurns', n) } catch (e) { console.log(`⚠️  Failed to persist: ${e.message}`) }
-          console.log(`Max tool-loop turns → ${n} (persisted) · 收尾引导：第 ${engine._wrapUpAt() + 1} 轮起`)
+          if (n === 0) console.log('Max tool-loop turns → 0 (不限制, persisted) · 止损交给无进展检测 + /stop')
+          else console.log(`Max tool-loop turns → ${n} (persisted) · 收尾引导：第 ${engine._wrapUpAt() + 1} 轮起`)
           break
         }
         case 'window': {

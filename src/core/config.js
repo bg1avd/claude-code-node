@@ -35,7 +35,8 @@ const DEFAULTS = {
   // Telegram 提示语言：'zh'/'中文' 等含中文标识 → 中文；
   // 留空则自动（TG 消息 from.language_code 是 zh → 中文，否则英文）
   language: '',
-  maxTurns: 100,
+  // 单次请求内工具循环轮数上限：0 = 不限制（默认）
+  maxTurns: 0,
   maxBudgetTokens: 1_000_000,
   permissionMode: 'ask',
   verbose: false,
