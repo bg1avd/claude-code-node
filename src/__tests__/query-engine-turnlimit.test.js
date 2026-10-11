@@ -17,23 +17,29 @@ import { QueryEngine } from '../core/query-engine.js'
 import { ToolCall } from '../types/index.js'
 
 /** 构造一个只够跑 _runToolLoop 的最小假引擎（_callLLM / _buildRequest 全部打桩） */
-function makeLoopEngine({ maxTurns = 3, responses = [], tools = [], turnCount = 1 } = {}) {
+function makeLoopEngine({ maxTurns = 3, responses = [], tools = [], turnCount = 1, wrapUpRatio } = {}) {
   let i = 0
   const engine = {
     config: {
       maxTurns, verbose: false, tools, cwd: process.cwd(),
-      onConfirmTool: null, readline: null, systemPrompt: '', smallModel: false,
+      onConfirmTool: null, readline: null, systemPrompt: 'BASE_SYS', smallModel: false,
+      wrapUpRatio,
     },
     state: { messages: [], toolResults: new Map(), turnCount },
     abortController: new AbortController(),
     permissionChecker: { check: async () => ({ allowed: true }) },
+    requests: [],                        // 记录每次发给 LLM 的请求体（用于断言收尾引导）
     _clearLlmCache: async () => {},
     _ensureFitWindow: () => {},
-    _buildRequest: () => [{ role: 'user', content: 'x' }],
-    _callLLM: async () => responses[Math.min(i++, responses.length - 1)],
+    _buildRequest: (msgs) => [{ role: 'system', content: 'BASE_SYS' }, ...msgs.map(m => ({ role: m.role, content: m.content }))],
+    _callLLM: async (msgs) => {
+      engine.requests.push(JSON.parse(JSON.stringify(msgs)))
+      return responses[Math.min(i++, responses.length - 1)]
+    },
   }
   engine._executeToolCalls = QueryEngine.prototype._executeToolCalls.bind(engine)
   engine._isAbortError = QueryEngine.prototype._isAbortError.bind(engine)
+  engine._wrapUpAt = QueryEngine.prototype._wrapUpAt.bind(engine)
   return engine
 }
 
@@ -149,4 +155,47 @@ test('工具循环：中断后 state.messages 中 assistant.tool_calls 均配有
       assert.ok(toolIds.has(tc.id), `tool_call ${tc.id} 缺少对应的 tool 消息（会导致下一轮 400）`)
     }
   }
+})
+
+// ---------- 收尾引导（v3.6.14）----------
+
+test('收尾引导：到达 maxTurns 的 wrapUpRatio 后，请求里注入「停止调工具」的 system 指令', async () => {
+  const engine = makeLoopEngine({
+    maxTurns: 10, wrapUpRatio: 0.5,      // → 第 6 轮（index 5）起注入
+    tools: [{ name: 'Noop', handler: async () => 'ok' }],
+    responses: [{ content: '', toolCalls: [new ToolCall('t', 'Noop', {})] }],
+  })
+  await run(engine)
+
+  const hit = (req) => req.some(m => m.role === 'system' && String(m.content).includes('收尾指令'))
+  assert.equal(hit(engine.requests[4]), false, '第 5 轮不应有收尾引导')
+  assert.equal(hit(engine.requests[5]), true, '第 6 轮应开始有收尾引导')
+  assert.equal(hit(engine.requests[9]), true, '之后每轮都应有')
+})
+
+test('收尾引导：system 位置正确（在所有前置 system 之后、正文之前）', async () => {
+  const engine = makeLoopEngine({
+    maxTurns: 4, wrapUpRatio: 0,          // 第 1 轮就注入
+    tools: [{ name: 'Noop', handler: async () => 'ok' }],
+    responses: [{ content: '', toolCalls: [new ToolCall('t', 'Noop', {})] }],
+  })
+  await run(engine)
+  // 注意：_wrapUpAt() 下限为 1，即最早从第 2 轮（index 1）开始注入，第 1 轮永不注入
+  const req = engine.requests[1]
+  assert.ok(req.some(m => m.role === 'system' && String(m.content).includes('收尾指令')), '第 2 轮应已注入收尾引导')
+  const roles = req.map(m => m.role)
+  const lastSystem = roles.lastIndexOf('system')
+  const firstNonSystem = roles.findIndex(r => r !== 'system')
+  assert.ok(lastSystem < firstNonSystem, `system 必须都在正文之前，实际 roles=${roles.join(',')}`)
+})
+
+test('收尾引导：只进请求体，不污染会话历史 state.messages', async () => {
+  const engine = makeLoopEngine({
+    maxTurns: 4, wrapUpRatio: 0,
+    tools: [{ name: 'Noop', handler: async () => 'ok' }],
+    responses: [{ content: '', toolCalls: [new ToolCall('t', 'Noop', {})] }],
+  })
+  await run(engine)
+  const polluted = engine.state.messages.some(m => String(m.content || '').includes('收尾指令'))
+  assert.equal(polluted, false, '收尾引导不得写入 state.messages（否则会落盘/污染后续对话）')
 })

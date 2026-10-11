@@ -18,6 +18,20 @@ import { compactMessages, trimToWindow, foldHistoryByCount, trimToolResults } fr
 import { CostTracker } from './cost-tracker.js'
 import { EnhancedPermissionChecker } from '../security/enhanced-permission.js'
 import { isLocalLlmServer, buildAuthHeaders } from '../utils/index.js'
+
+/**
+ * 收尾引导（v3.6.14）—— 工具循环接近上限时注入的 system 指令。
+ *
+ * 为什么需要它：工具循环真正的痛点是「模型一直调工具、就是不总结」，最后硬撞到
+ * maxTurns 上限被强制打断（100 轮 × 每轮一次 LLM 调用 = 几十分钟白等）。
+ * 只在最后给一句报错没有意义 —— 应该**提前提醒模型收尾**，让它自己停下来。
+ * （v2.8.19 给「小模型模式」做过同样的事，常规模式一直没有。）
+ */
+const TOOL_LOOP_WRAP_UP_HINT =
+  '【收尾指令】你已经连续调用了多轮工具，接近本轮的工具调用上限。\n' +
+  '请**立即停止调用任何新工具**，用简洁的文字直接给出：\n' +
+  '1) 已经完成的内容与关键结果；2) 尚未完成的部分与原因（如果有）；3) 下一步建议。\n' +
+  '不要再调用工具，直接用文字回答。'
 import { stripAnsiCodes } from '../utils/ansi.js'
 
 /**
@@ -38,6 +52,9 @@ export class QueryEngineConfig {
     // 消息条数上限：超过则强制折叠早期历史（解决本地小模型"条数过多、token不高却变傻"）
     // 0 表示不启用条数折叠（仅按 token）
     this.maxMessages = options.maxMessages || 0
+    // 收尾引导触发比例（0~1，默认 0.8）：工具循环跑到 maxTurns 的该比例时，
+    // 注入「停止调工具、直接总结」指令，避免模型硬撞上限后白等几十轮。
+    this.wrapUpRatio = options.wrapUpRatio != null ? options.wrapUpRatio : 0.8
     // 发送前常驻工具结果截断长度（字符），防止超长工具结果堆积（0 表示不截断）
     this.maxToolResultChars = options.maxToolResultChars || 6000
     // 自动压缩总开关（默认开）：到窗口阈值自动「截断工具结果 + 折叠条数 + 摘要压缩 + 滑窗裁剪」。
@@ -221,11 +238,15 @@ export class QueryEngine {
   }
 
   /**
-   * 工具调用循环 — 核心逻辑
-   *
-   * LLM 回复可能包含工具调用 → 执行工具 → 把工具结果喂回 LLM
-   * 最多跑 maxTurns 次
+   * 收尾引导的触发轮次 —— maxTurns 的 wrapUpRatio（默认 0.8）。
+   * 例：maxTurns=100 → 第 81 轮起开始提示；maxTurns=20 → 第 17 轮起。
+   * 想更早收尾就调小 maxTurns（`/max-turns 20`）或调小 wrapUpRatio。
    */
+  _wrapUpAt() {
+    const ratio = typeof this.config.wrapUpRatio === 'number' ? this.config.wrapUpRatio : 0.8
+    return Math.max(1, Math.floor(this.config.maxTurns * ratio))
+  }
+
   /** 判断错误是否为「用户主动中断」(abort) —— 兼容 fetch AbortError 与旧的中文错误 */
   _isAbortError(err) {
     if (!err) return false
@@ -234,6 +255,12 @@ export class QueryEngine {
     return String(err.message || '') === '操作已取消'
   }
 
+  /**
+   * 工具调用循环 — 核心逻辑
+   *
+   * LLM 回复可能包含工具调用 → 执行工具 → 把工具结果喂回 LLM
+   * 最多跑 maxTurns 次；接近上限时自动注入「收尾引导」，让模型主动总结而不是硬撞上限。
+   */
   async _runToolLoop(userMessage) {
     let finalResponse = ''
     // 循环收尾原因：'done'(模型给出最终答复) | 'aborted'(用户 /stop) | 'max-turns'(跑满上限)
@@ -260,6 +287,19 @@ export class QueryEngine {
         this._ensureFitWindow()
 
         const requestMessages = this._buildRequest(this.state.messages)
+        // 收尾引导：接近上限时插入一条 system 指令，让模型主动停止调用工具、直接给结论，
+        // 而不是一路撞到 maxTurns 才被强制打断。
+        // 只注入到「本次请求体」，不写入 state.messages（不污染历史、不落盘、不影响 prompt 缓存前缀）。
+        if (turn >= this._wrapUpAt()) {
+          const firstNonSystem = requestMessages.findIndex(m => m.role !== 'system')
+          requestMessages.splice(firstNonSystem < 0 ? requestMessages.length : firstNonSystem, 0, {
+            role: 'system',
+            content: TOOL_LOOP_WRAP_UP_HINT,
+          })
+          if (this.config.verbose) {
+            console.error(`[QueryEngine] 第 ${turn + 1}/${this.config.maxTurns} 轮：已注入收尾引导，请求模型总结`)
+          }
+        }
         const response = await this._callLLM(requestMessages, this.state.messages)
 
         if (this.abortController.signal.aborted) { outcome = 'aborted'; break }
@@ -741,20 +781,28 @@ export class QueryEngine {
         }
       } catch (err) {
         lastError = err
-        // 兜底：纯文字模型收到历史中的图片时，API 通常以 400 报错且错误文本提及
-        // image/vision/multimodal。典型场景：先用多模态模型发图识别，再 /model 切回
-        // 纯文字模型 —— 历史图片每轮都随请求发送，之后所有消息都会被拒。
-        // 自动剥离【本次请求体 + 会话历史】中的全部图片并立即重试，无需用户 /clear。
-        if (
-          !strippedImagesOnce &&
-          err.name !== 'AbortError' &&
-          /image|vision|multimodal|visual|图片/i.test(err.message)
-        ) {
+        // 兜底：纯文字模型收到历史中的图片时，API 会以 4xx 拒绝。
+        // 典型场景：先用多模态模型发图识别，再切回纯文字模型 —— 历史图片每轮都随
+        // 请求发送，之后**所有消息都被拒**。这里自动剥离【本次请求体 + 会话历史】中的
+        // 全部图片并立即重试，无需用户 /clear。
+        //
+        // v3.6.14 放宽判据（原来只认 "image|vision|multimodal|visual|图片"，太窄）：
+        //   各家的报错文案五花八门，漏判就会表现成"换了纯文字模型后每条消息都报错"。
+        //   补充实测常见的几种说法：
+        //     · "invalid content type"（OpenAI 系）
+        //     · "...expected a string"（DeepSeek 反序列化：content 是数组而非字符串）
+        //     · "该模型不支持图像输入"（中文，"图像"≠"图片"，旧正则匹配不到）
+        //   ⚠️ 注意**不能**写成"只要是 4xx 且有图就剥离"——那会把 API Key 错误之类的
+        //   无关错误也当成图片问题，白白重试一次，并**误删用户历史里的图片**。
+        const errMentionsImage =
+          /image|vision|multimodal|visual|图片|图像|视觉|attachment|content[\s._-]?type|invalid[\s._-]*content|expected[\s._-]*a[\s._-]*string/i
+            .test(err.message)
+        if (!strippedImagesOnce && err.name !== 'AbortError' && errMentionsImage) {
           strippedImagesOnce = true
           const nReq = this._stripImageParts(messages)       // 本次请求体（_buildRequest 产物）
           const nHist = this.stripImagesFromHistory()        // 会话历史（state.messages）
           if (nReq + nHist > 0) {
-            console.error(`[fallback] 当前模型不支持图片 → 已从会话历史移除 ${nReq + nHist} 张图片并重试`)
+            console.error(`[fallback] 当前模型不接受图片 → 已从会话历史移除 ${nReq + nHist} 张图片并重试`)
             continue
           }
         }

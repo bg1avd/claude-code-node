@@ -21,6 +21,7 @@ import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { join, dirname } from 'path'
 import { t, applyMessageLanguage } from '../core/i18n.js'
+import { CC_NODE_VERSION } from '../core/version.js'
 import { markdownToTelegramHtml, splitMarkdown, RICH_MAX_LEN, CLASSIC_CHUNK } from '../utils/markdown.js'
 
 const TG_MD_ESCAPE_CHARS = /[_*[\]()~`>#+\-=|{}.!]/g
@@ -731,12 +732,16 @@ export class TelegramListener {
       case '/ping':
         return '🏓 pong! cc-notify is alive.'
 
+      case '/version':
+        return t('tg.status.version', { n: CC_NODE_VERSION }) + `\n• PID: ${process.pid}`
+
       case '/status': {
         const nodeInfo = await this._findCcNode()
         const chNames = Object.keys(this.config.channels || {})
         return [
           t('tg.status.title'),
           '',
+          t('tg.status.version', { n: CC_NODE_VERSION }),
           t('tg.status.uptime', { n: Math.floor(process.uptime()) }),
           t('tg.status.channels', { n: chNames.join(', ') || t('tg.status.none') }),
           nodeInfo.running ? t('tg.status.nodeRunning') : t('tg.status.nodeStopped'),
@@ -792,6 +797,7 @@ export class TelegramListener {
       t('tg.help.sysTitle'),
       t('tg.help.sys.ping'),
       t('tg.help.sys.status'),
+      t('tg.help.sys.version'),
       t('tg.help.sys.run'),
       t('tg.help.sys.notify'),
       t('tg.help.sys.cancel'),

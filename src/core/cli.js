@@ -277,6 +277,7 @@ Commands:
   /config KEY    — Show config value
   /budget        — Show token budget
   /window [N]    — Show/set context window (e.g. /window 128k, /window auto)
+  /max-turns [N] — Show/set tool-loop turn limit (e.g. /max-turns 20, take effect now)
   /channel CMD   — Manage notification channels (list|send|test)
   /cost          — Show API cost report
   /compact       — Manually compact conversation context
@@ -333,6 +334,8 @@ const DETAILED_HELP = {
   budget:  "/budget\n  Show token budget usage for the current session.\n  Displays how many tokens have been used vs the limit.",
 
   window:  "/window [N|auto|reset]\n  Show or set the LLM context window (max tokens allowed in conversation).\n  This is the hard ceiling for auto-compression — context will never exceed it.\n\n  Subcommands:\n    (no arg)   — Show current window + its source (manual/probe/table/fallback) + usage\n    /window 128k — Manually set window (persisted to config). Accepts K/M suffix:\n                  64k, 128k, 200k, 1m, or a raw number like 131072.\n    /window auto  — Clear manual override, return to auto-detection (next message re-detects).\n    /window reset — Clear manual override AND re-detect now.\n\n  Manual setting takes priority over auto-detection and survives restart.\n  Auto-detection itself is NOT persisted (re-runs at each startup).\n\n  Examples:\n    /window\n    /window 128k\n    /window 64k\n    /window auto\n    /window reset",
+
+  'max-turns': "/max-turns [N]\n  Show or set the tool-loop turn limit for a SINGLE user message (default: 100).\n\n  Why: if the model gets stuck calling tools without ever summarizing, it will\n  burn the whole budget (100 turns x one LLM call = many minutes) before stopping.\n  Lowering this number makes it give up (and report) much sooner.\n\n  Near the limit, cc-node automatically injects a \"wrap up now\" system hint so\n  the model stops calling tools and answers in plain text by itself.\n\n  Changes take effect IMMEDIATELY (no restart) and are persisted to config.\n\n  Examples:\n    /max-turns        — show current limit + when wrap-up guidance kicks in\n    /max-turns 20     — stop after 20 tool rounds, auto-wrap-up at round 17\n    /max-turns 100    — restore the default",
 
   channel: "/channel <list|send|test>\n  Manage notification channels.\n\n  Subcommands:\n    list       — List all configured notification channels\n    send <msg> — Send a message via all channels\n    test       — Send a test message to verify channels\n\n  Requires channel environment variables to be set at startup.",
 
@@ -731,6 +734,9 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
     maxOutputTokens: cliArgs.maxOutputTokens || config.get('maxOutputTokens') || 0,
     // 小模型工具循环轮数上限（默认 8，防无限循环）
     smallModelMaxTurns: cliArgs.smallModelMaxTurns || config.get('smallModelMaxTurns') || 0,
+    // 收尾引导触发比例（默认 0.8）：工具循环跑到 maxTurns 的这个比例时，
+    // 注入「停止调工具、直接总结」的 system 指令，避免硬撞上限白等。
+    wrapUpRatio: config.get('wrapUpRatio'),
   })
   const engine = new QueryEngine(engineConfig)
 
@@ -943,6 +949,34 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
     return results
   }
 
+  /**
+   * 切换模型的**唯一入口** —— 设置 model 并剥离会话历史中的图片。
+   *
+   * 为什么必须收敛成一处（v3.6.14 修复）：
+   *   v3.0.9「多模态发图 → 切纯文字模型 → 之后所有消息被 image not supported 拒绝」
+   *   的修复**只加在 `/model <名称>` 这一条路径上**，而实际切换模型共有 3 条路径：
+   *     ① `/model <名称/编号>`（终端）           —— 当年修过 ✅
+   *     ② Telegram 里 `/models` → 回复编号选择   —— 漏了 ❌  ← 遥控场景最常用
+   *     ③ 终端 `/models` → 交互式输入编号        —— 漏了 ❌
+   *   走 ②③ 切换时历史图片没被剥离，纯文字模型每轮都收到 image_url，
+   *   于是**从此每条消息都报错**（用户实际踩的就是这个）。
+   *
+   * @returns {number} 移除的图片张数
+   */
+  function switchModelTo(newModel, { quiet = false } = {}) {
+    engine.config.model = newModel
+    model = newModel
+    if (!quiet) console.log(`Model → ${newModel}`)
+    let removed = 0
+    try {
+      removed = engine.stripImagesFromHistory()
+      if (removed > 0) {
+        console.log(`  ↳ 已从会话历史移除 ${removed} 张图片（新模型可能不支持视觉；如需继续讨论请重新发送图片）`)
+      }
+    } catch { /* 清理失败不阻断切换 */ }
+    return removed
+  }
+
   async function processInputLine(input, source = 'cli', tgChatId = null, images = []) {
     const trimmed = input.trim()
     if (!trimmed) { showPrompt(); return }
@@ -988,8 +1022,7 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
       // 无论是否是有效选择，都结束"等待选择"状态
       pendingModelSelect = false
       if (selected) {
-        engine.config.model = selected
-        console.log(`Model → ${selected}`)
+        switchModelTo(selected)   // ← v3.6.14: 之前漏了图片剥离，纯文字模型会被历史图片卡死
         if (tgListener?.bot) {
           await sendTelegram(t('tg.model.switched', { model: selected }), tgChatId || null).catch(() => {})
         }
@@ -1057,21 +1090,10 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
           if (rest[0]) {
             const num = parseInt(rest[0], 10)
             if (!isNaN(num) && modelList.length > 0 && num >= 1 && num <= modelList.length) {
-              engine.config.model = modelList[num - 1]
+              switchModelTo(modelList[num - 1])
             } else {
-              engine.config.model = rest.join(' ')
+              switchModelTo(rest.join(' '))
             }
-            model = engine.config.model
-            console.log(`Model → ${engine.config.model}`)
-            // 新模型可能不支持视觉（纯文字模型）：剥离会话历史中的图片。
-            // 否则历史图片每轮随请求发送，纯文字模型会以 "image not supported" 拒绝
-            // 所有后续消息（典型：多模态发图识别 → 切回纯文字模型 → 全部报错）。
-            try {
-              const removedImgs = engine.stripImagesFromHistory()
-              if (removedImgs > 0) {
-                console.log(`  ↳ 已从会话历史移除 ${removedImgs} 张图片（新模型可能不支持视觉；如需继续讨论请重新发送图片）`)
-              }
-            } catch { /* 清理失败不阻断切换 */ }
             // 切换模型后重新探测上下文窗口（仅当非手动指定时自动更新）
             if ((config.get('maxBudgetTokens') || 0) <= 0) {
               const { window: win, source } = await reapplyWindow()
@@ -1121,6 +1143,27 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
           console.log(`API Key: ${engine.config.apiKey ? `已设置 (${engine.config.apiKey.slice(0, 4)}...${engine.config.apiKey.slice(-4)})` : '未设置'}`)
           console.log(`Model: ${engine.config.model}`)
           break
+        case 'max-turns': {
+          // /max-turns [N] — 查看/设置单轮工具循环上限（运行时立即生效 + 持久化）
+          // 用途：模型陷入工具循环时，把上限从默认 100 调到 20 之类，卡死时更快收尾。
+          const arg = rest[0] ? rest.join(' ').trim() : ''
+          if (!arg) {
+            const at = (engine._wrapUpAt?.() ?? Math.floor(engine.config.maxTurns * 0.8)) + 1
+            console.log(`Max tool-loop turns: ${engine.config.maxTurns}`)
+            console.log(`  收尾引导：第 ${at} 轮起自动提示模型停止调工具、直接总结`)
+            console.log(`  （提示：值越小越早收尾，避免被长工具循环卡住；默认 100）`)
+            break
+          }
+          const n = parseInt(arg, 10)
+          if (!Number.isFinite(n) || n < 1 || n > 1000) {
+            console.log(`❌ Invalid value: "${arg}". Usage: /max-turns <1-1000>   e.g. /max-turns 20`)
+            break
+          }
+          engine.config.maxTurns = n
+          try { await config.saveKeyToUser('maxTurns', n) } catch (e) { console.log(`⚠️  Failed to persist: ${e.message}`) }
+          console.log(`Max tool-loop turns → ${n} (persisted) · 收尾引导：第 ${engine._wrapUpAt() + 1} 轮起`)
+          break
+        }
         case 'window': {
           const arg = rest[0] ? rest.join(' ').trim() : ''
           if (!arg) {
@@ -1206,8 +1249,7 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
               selected = answer.trim()
             }
             if (selected) {
-              engine.config.model = selected
-              console.log(`Model → ${selected}`)
+              switchModelTo(selected)   // ← v3.6.14: 之前漏了图片剥离
             }
           } catch (err) {
             console.log(`❌ ${err.message}`)

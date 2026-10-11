@@ -45,6 +45,7 @@ const DICT = {
 
     // —— /status ——
     'tg.status.title': '📊 *cc-notify status*',
+    'tg.status.version': '• cc-node version: v{n}',
     'tg.status.uptime': '• Uptime: {n}s',
     'tg.status.channels': '• Channels: {n}',
     'tg.status.nodeRunning': '• cc-node: ✅ Running',
@@ -64,6 +65,7 @@ const DICT = {
     'tg.help.sysTitle': '*🔧 System commands*',
     'tg.help.sys.ping': '• `/ping` — Check service status',
     'tg.help.sys.status': '• `/status` — Show detailed status',
+    'tg.help.sys.version': '• `/version` — Show cc-node version',
     'tg.help.sys.run': '• `/run <cmd>` — Execute a shell command directly',
     'tg.help.sys.notify': '• `/notify <msg>` — Broadcast a notification to all channels',
     'tg.help.sys.cancel': '• `/cancel` — Cancel current operation',
@@ -126,6 +128,7 @@ const DICT = {
     'tg.menu.allow': '🔓 工具权限管理',
 
     'tg.status.title': '📊 *cc-notify 状态*',
+    'tg.status.version': '• cc-node 版本: v{n}',
     'tg.status.uptime': '• 运行时间: {n}s',
     'tg.status.channels': '• 通道: {n}',
     'tg.status.nodeRunning': '• cc-node: ✅ 运行中',
@@ -143,6 +146,7 @@ const DICT = {
     'tg.help.sysTitle': '*🔧 系统命令*',
     'tg.help.sys.ping': '• `/ping` — 检查服务状态',
     'tg.help.sys.status': '• `/status` — 查看详细状态',
+    'tg.help.sys.version': '• `/version` — 查看 cc-node 版本',
     'tg.help.sys.run': '• `/run <cmd>` — 直接执行 shell 命令',
     'tg.help.sys.notify': '• `/notify <msg>` — 广播通知到所有通道',
     'tg.help.sys.cancel': '• `/cancel` — 取消当前操作',
