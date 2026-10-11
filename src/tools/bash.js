@@ -73,6 +73,9 @@ export const bashTool = new ToolDef(
       return `[🚫 命令被安全策略阻止]\n${safetyResult.reasons.join('\n')}\n\n如果确认需要执行，请使用 /allow Bash 命令`
     }
 
+    // 用户已请求停止 → 直接不执行
+    if (ctx.signal?.aborted) return '[已中断：用户请求停止，命令未执行]'
+
     // 每次执行时重新探测（幂等），用缓存的 shell 配置
     const cfg = detectShell()
     const shell = cfg.shell
@@ -87,6 +90,21 @@ export const bashTool = new ToolDef(
 
       let stdout = ''
       let stderr = ''
+      let settled = false
+      let killedByAbort = false
+
+      // 用户 /stop → 立即终止子进程（否则要等命令自然跑完或超时）
+      const signal = ctx.signal
+      const onAbort = () => {
+        killedByAbort = true
+        try { proc.kill('SIGTERM') } catch {}
+        setTimeout(() => { try { proc.kill('SIGKILL') } catch {} }, 2000)
+      }
+      if (signal) {
+        if (signal.aborted) onAbort()
+        else signal.addEventListener('abort', onAbort, { once: true })
+      }
+      const cleanupSignal = () => { if (signal) signal.removeEventListener('abort', onAbort) }
 
       proc.stdout.on('data', (data) => {
         stdout += data.toString()
@@ -107,8 +125,13 @@ export const bashTool = new ToolDef(
 
       proc.on('close', (code) => {
         clearTimeout(timer)
+        cleanupSignal()
+        if (settled) return
+        settled = true
         const output = stdout + (stderr ? '\n--- stderr ---\n' + stderr : '')
-        if (code === 0) {
+        if (killedByAbort) {
+          resolve(`[已中断：用户请求停止]\n${output}`)
+        } else if (code === 0) {
           resolve(output || '(no output)')
         } else {
           resolve(`[Exit code: ${code}]\n${output}`)
@@ -117,6 +140,9 @@ export const bashTool = new ToolDef(
 
       proc.on('error', (err) => {
         clearTimeout(timer)
+        cleanupSignal()
+        if (settled) return
+        settled = true
         resolve(`[Error: ${err.message}]`)
       })
 

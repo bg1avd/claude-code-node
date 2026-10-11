@@ -226,8 +226,18 @@ export class QueryEngine {
    * LLM 回复可能包含工具调用 → 执行工具 → 把工具结果喂回 LLM
    * 最多跑 maxTurns 次
    */
+  /** 判断错误是否为「用户主动中断」(abort) —— 兼容 fetch AbortError 与旧的中文错误 */
+  _isAbortError(err) {
+    if (!err) return false
+    if (err.name === 'AbortError') return true
+    if (this.abortController?.signal?.aborted) return true
+    return String(err.message || '') === '操作已取消'
+  }
+
   async _runToolLoop(userMessage) {
     let finalResponse = ''
+    // 循环收尾原因：'done'(模型给出最终答复) | 'aborted'(用户 /stop) | 'max-turns'(跑满上限)
+    let outcome = 'running'
 
     // 小模型模式：每个用户任务开始前，主动清空 LLM 端缓存一次。
     // 根因：LLM 端（llama.cpp 等自建服务）KV cache 无限叠加被塞满，是工作几轮后
@@ -241,56 +251,82 @@ export class QueryEngine {
     // 多步计划、框架代执行等"辅助机制"反而让模型乱套（不调用工具、瞎编内容）。
     // 因此这里【不做任何干预】，回归最原始行为：构建请求 → 调 LLM →
     // 有工具调用就执行 → 循环。
-    for (let turn = 0; turn < this.config.maxTurns; turn++) {
-      // 发送前硬校验：工具结果可能已使上下文超窗，确保 ≤ 窗口（摘要优先 + 滑动窗口裁剪兜底）
-      this._ensureFitWindow()
+    try {
+      for (let turn = 0; turn < this.config.maxTurns; turn++) {
+        // 用户 /stop → 优雅退出（不再抛异常：保证本轮消息仍走正常流程落盘）
+        if (this.abortController.signal.aborted) { outcome = 'aborted'; break }
 
-      const requestMessages = this._buildRequest(this.state.messages)
-      const response = await this._callLLM(requestMessages, this.state.messages)
+        // 发送前硬校验：工具结果可能已使上下文超窗，确保 ≤ 窗口（摘要优先 + 滑动窗口裁剪兜底）
+        this._ensureFitWindow()
 
-      if (this.abortController.signal.aborted) {
-        throw new Error('操作已取消')
+        const requestMessages = this._buildRequest(this.state.messages)
+        const response = await this._callLLM(requestMessages, this.state.messages)
+
+        if (this.abortController.signal.aborted) { outcome = 'aborted'; break }
+
+        // 没有工具调用 → 最终回复
+        if (!response.toolCalls || response.toolCalls.length === 0) {
+          finalResponse = response.content
+          this.state.messages.push(new AssistantMessage(response.content, [], response.reasoningContent))
+          outcome = 'done'
+          break
+        }
+
+        // 有工具调用 → 记录 assistant 消息（含 tool_calls）
+        this.state.messages.push(new AssistantMessage(response.content, response.toolCalls, response.reasoningContent))
+
+        // 执行工具（串行；中断时仍为每个 tool_call 补齐结果，保证 OpenAI 协议不出现「孤儿 tool_calls」）
+        const toolResults = await this._executeToolCalls(response.toolCalls)
+
+        // 工具结果加入 state.messages（OpenAI 兼容格式）
+        // 入库前剥离 ANSI 序列：颜色码对模型无意义（白耗 token），且会被
+        // 截断逻辑（trimToolResults/compact）拦腰切断造成终端颜色泄漏
+        for (const result of toolResults) {
+          const cleanContent = stripAnsiCodes(result.content)
+          this.state.messages.push({
+            role: 'tool',
+            tool_call_id: result.toolCallId,
+            content: result.isError ? `[ERROR] ${cleanContent}` : cleanContent,
+          })
+          this.state.toolResults.set(result.toolCallId, result)
+        }
+
+        if (this.abortController.signal.aborted) { outcome = 'aborted'; break }
+
+        if (this.config.verbose) {
+          console.error(`[QueryEngine] 工具循环第 ${turn + 1} 轮完成，执行了 ${toolResults.length} 个工具`)
+        }
       }
-
-      // 没有工具调用 → 最终回复
-      if (!response.toolCalls || response.toolCalls.length === 0) {
-        finalResponse = response.content
-        this.state.messages.push(new AssistantMessage(response.content, [], response.reasoningContent))
-        break
-      }
-
-      // 有工具调用 → 记录 assistant 消息（含 tool_calls）
-      this.state.messages.push(new AssistantMessage(response.content, response.toolCalls, response.reasoningContent))
-
-      // 执行工具
-      const toolResults = await this._executeToolCalls(response.toolCalls)
-
-      // 工具结果加入 state.messages（OpenAI 兼容格式）
-      // 入库前剥离 ANSI 序列：颜色码对模型无意义（白耗 token），且会被
-      // 截断逻辑（trimToolResults/compact）拦腰切断造成终端颜色泄漏
-      for (const result of toolResults) {
-        const cleanContent = stripAnsiCodes(result.content)
-        this.state.messages.push({
-          role: 'tool',
-          tool_call_id: result.toolCallId,
-          content: result.isError ? `[ERROR] ${cleanContent}` : cleanContent,
-        })
-        this.state.toolResults.set(result.toolCallId, result)
-      }
-
-      if (this.config.verbose) {
-        console.error(`[QueryEngine] 工具循环第 ${turn + 1} 轮完成，执行了 ${toolResults.length} 个工具`)
+    } catch (err) {
+      // 用户中断可能以异常形式冒泡（fetch/sw 流被 abort → AbortError）。
+      // 统一转成「优雅收尾」：不抛出，保证 state.messages 一致 + 本轮仍能落盘。
+      if (this._isAbortError(err)) {
+        outcome = 'aborted'
+      } else {
+        throw err
       }
     }
 
-    if (!finalResponse && this.state.turnCount >= this.config.maxTurns) {
-      finalResponse = `[达到最大回合数限制 (${this.config.maxTurns})，停止响应]`
+    // 循环正常耗尽（既没 break 也没中断）→ 判定为跑满上限
+    if (outcome === 'running') outcome = 'max-turns'
+
+    if (!finalResponse) {
+      if (outcome === 'aborted') {
+        finalResponse = '⏹️ 已按你的要求中断本轮（历史已保留，可直接继续对话）'
+      } else {
+        // ⚠️ 修复（v3.6.13）：原来用 state.turnCount（会话累计用户请求数，跨重启累加）
+        // 判断是否达到工具循环上限，是完全错误的量纲 → 会话请求数 < maxTurns 时
+        // 明明跑满 100 轮工具循环却只返回空字符串（静默无响应）。
+        // 现在按「工具循环自身是否跑满」判定。
+        finalResponse = `[工具循环已达上限 ${this.config.maxTurns} 轮，模型未能给出最终答复，已强制停止]`
+      }
     }
 
     return {
       response: finalResponse,
       turns: this.state.turnCount,
       toolResults: Array.from(this.state.toolResults.values()),
+      aborted: outcome === 'aborted',
     }
   }
 
@@ -424,7 +460,7 @@ export class QueryEngine {
   /**
    * 执行工具调用 — 两阶段策略
    * 阶段1（串行）：安全检查 + ask 模式确认（需要用户交互，必须串行）
-   * 阶段2（并行）：批准后的工具并行执行，互不依赖的工具同时跑
+   * 阶段2（串行）：按模型给出的顺序依次执行；中断时为剩余调用补齐占位结果
    */
   async _executeToolCalls(toolCalls) {
     // 阶段1：串行安全检查
@@ -463,6 +499,7 @@ export class QueryEngine {
     // 串行把"模型给出的顺序"原样落实，用极小的延迟代价换取正确性。
     // （Write/Edit 另带文件级串行锁 utils/file-lock.js 作为纵深防御。）
     const results = []
+    const signal = this.abortController?.signal
     for (const item of approved) {
       if (item.error) {
         const r = new ToolResult(item.tc.id, item.error, true)
@@ -471,9 +508,26 @@ export class QueryEngine {
         continue
       }
       const { tc, tool } = item
+
+      // 用户 /stop → 剩余工具不再执行，但仍为每个 tool_call 补齐一条结果。
+      // 必须补齐：OpenAI 协议要求每条带 tool_calls 的 assistant 消息，其后必须有
+      // 与之一一对应的 tool 消息；否则下一轮请求直接 400（历史损坏）。
+      if (signal?.aborted) {
+        tc.status = 'aborted'
+        const r = new ToolResult(tc.id, '[已中断：用户请求停止，此工具未执行]', true)
+        r.toolName = tc.name
+        results.push(r)
+        continue
+      }
+
       tc.status = 'running'
       try {
-        const content = await tool.handler(tc.input, { cwd: this.config.cwd, engine: this, readline: this.config.readline })
+        const content = await tool.handler(tc.input, {
+          cwd: this.config.cwd,
+          engine: this,
+          readline: this.config.readline,
+          signal,                       // 长任务工具（Bash 等）可用它实现即时中断
+        })
         tc.status = 'done'
         const r = new ToolResult(tc.id, typeof content === 'string' ? content : JSON.stringify(content), false)
         r.toolName = tc.name
