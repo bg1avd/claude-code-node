@@ -13,6 +13,7 @@ import { spawn } from 'child_process'
 import { ToolDef } from '../types/index.js'
 import { checkBashSafety } from '../security/bash-guard.js'
 import { detectShell, getShellDescription } from '../utils/shell.js'
+import { createBoundedOutput } from '../utils/output-buffer.js'
 
 // 启动时探测一次并缓存
 const shellCfg = detectShell()
@@ -88,8 +89,12 @@ export const bashTool = new ToolDef(
         stdio: ['pipe', 'pipe', 'pipe'],
       })
 
-      let stdout = ''
-      let stderr = ''
+      // 有界输出缓冲：命令输出可能极大（cat 大文件 / 日志刷屏 / 死循环打印），
+      // 无界拼接会超过 V8 字符串上限并抛 RangeError: Invalid string length，
+      // 该异常在 'data' 回调里抛出 → 未捕获 → **整个 cc-node 进程崩溃**。
+      // 现在只保留「头 + 尾」（尾部最重要：报错总在最后），中间省略并显式标记。
+      const outBuf = createBoundedOutput()
+      const errBuf = createBoundedOutput()
       let settled = false
       let killedByAbort = false
 
@@ -107,12 +112,20 @@ export const bashTool = new ToolDef(
       const cleanupSignal = () => { if (signal) signal.removeEventListener('abort', onAbort) }
 
       proc.stdout.on('data', (data) => {
-        stdout += data.toString()
+        try { outBuf.push(data) } catch { /* 累积失败绝不能让回调抛异常（会崩进程） */ }
       })
 
       proc.stderr.on('data', (data) => {
-        stderr += data.toString()
+        try { errBuf.push(data) } catch { /* 同上 */ }
       })
+
+      const collect = () => {
+        outBuf.flush()
+        errBuf.flush()
+        const o = outBuf.toString()
+        const e = errBuf.toString()
+        return o + (e ? '\n--- stderr ---\n' + e : '')
+      }
 
       const timer = setTimeout(() => {
         proc.kill('SIGTERM')
@@ -120,7 +133,7 @@ export const bashTool = new ToolDef(
         setTimeout(() => {
           try { proc.kill('SIGKILL') } catch {}
         }, 5000)
-        resolve(`[Timeout after ${timeoutSec}s]\n${stdout}${stderr ? '\n--- stderr ---\n' + stderr : ''}`)
+        resolve(`[Timeout after ${timeoutSec}s]\n${collect()}`)
       }, timeoutSec * 1000)
 
       proc.on('close', (code) => {
@@ -128,7 +141,7 @@ export const bashTool = new ToolDef(
         cleanupSignal()
         if (settled) return
         settled = true
-        const output = stdout + (stderr ? '\n--- stderr ---\n' + stderr : '')
+        const output = collect()
         if (killedByAbort) {
           resolve(`[已中断：用户请求停止]\n${output}`)
         } else if (code === 0) {

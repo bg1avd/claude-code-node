@@ -3,6 +3,7 @@
  * 对应原版: src/utils/process.ts + src/utils/Shell.ts
  */
 import { spawn, exec } from 'child_process'
+import { createBoundedOutput } from './output-buffer.js'
 
 /**
  * 执行命令并获取输出
@@ -40,16 +41,17 @@ export function spawnProcess(command, args = [], options = {}) {
     shell: options.shell || false,
   })
 
-  let stdout = ''
-  let stderr = ''
+  // 有界累积（防止海量输出撑爆字符串 → RangeError: Invalid string length → 进程崩溃）
+  const outBuf = createBoundedOutput()
+  const errBuf = createBoundedOutput()
 
   proc.stdout.on('data', (data) => {
-    stdout += data.toString()
+    try { outBuf.push(data) } catch {}
     options.onStdout?.(data.toString())
   })
 
   proc.stderr.on('data', (data) => {
-    stderr += data.toString()
+    try { errBuf.push(data) } catch {}
     options.onStderr?.(data.toString())
   })
 
@@ -65,20 +67,22 @@ export function spawnProcess(command, args = [], options = {}) {
   const promise = new Promise((resolve) => {
     proc.on('close', (code) => {
       if (timer) clearTimeout(timer)
+      outBuf.flush(); errBuf.flush()
       resolve({
         ok: code === 0,
         exitCode: code || 0,
-        stdout,
-        stderr,
+        stdout: outBuf.toString(),
+        stderr: errBuf.toString(),
       })
     })
 
     proc.on('error', (err) => {
       if (timer) clearTimeout(timer)
+      outBuf.flush(); errBuf.flush()
       resolve({
         ok: false,
         exitCode: -1,
-        stdout,
+        stdout: outBuf.toString(),
         stderr: err.message,
       })
     })

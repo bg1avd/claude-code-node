@@ -1,5 +1,66 @@
 # CHANGELOG
 
+## 3.6.17
+
+### 🔴 修复：命令输出过大 → `RangeError: Invalid string length` → **整个进程崩溃**
+
+**用户实测堆栈（Windows）**：
+
+```
+src/tools/bash.js:96
+        stderr += data.toString()
+                       ^
+RangeError: Invalid string length
+    at Socket.<anonymous> (.../src/tools/bash.js:96:24)
+```
+
+**根因**：Bash 工具把子进程输出**无界拼接**到字符串里：
+
+```js
+proc.stdout.on('data', (data) => { stdout += data.toString() })
+proc.stderr.on('data', (data) => { stderr += data.toString() })
+```
+
+命令输出极大时（`cat` 大文件 / 日志刷屏 / 程序死循环打印），字符串超过 V8 上限
+（约 **512MB**）→ 抛 `RangeError`。更致命的是：这个异常**发生在 `'data'` 事件回调里
+→ 属于未捕获异常 → 整个 cc-node 进程当场崩溃**（不是"工具失败"，是**进程死**）。
+
+### 修复：新增有界输出缓冲 `src/utils/output-buffer.js`
+
+**保留「头部 + 尾部」，丢弃中间** —— 因为**报错信息几乎总在最后**，而中间是
+信息密度最低的重复日志。截断处插入显式标记：
+
+```
+…[输出过长，已省略中间 123456789 个字符（保留开头与结尾）]…
+```
+
+- 单流上限 **头 1MB + 尾 1MB**（合计 2MB），超出部分不再进内存。
+- **`'data'` 回调里一律 try/catch 包裹** —— 累积环节任何异常都绝不允许冒泡成
+  未捕获异常（崩进程）。这是本次修复的第二道防线。
+- 顺手用 **`StringDecoder`** 处理**跨 chunk 的多字节 UTF-8**：原实现每块各自
+  `toString()`，中文恰好被切在两块之间时会出乱码，现已消除。
+
+### 同源问题一并修掉（全仓库排查）
+
+同样的「无界累积」模式共 **5 处**，全部整改：
+
+| 文件 | 位置 |
+|---|---|
+| `src/tools/bash.js` | stdout / stderr（用户中招的地方） |
+| `src/utils/process.js` | stdout / stderr |
+| `src/tools/grep.js` | ripgrep / grep 两处（命中海量行时同样会炸） |
+| `src/channel/notify-daemon.js` | 一次性任务子进程输出 |
+| `src/core/cli.js`、`src/mcp/client.js` | 协议行缓冲加 **8MB 护栏**（持续无换行超长数据 → 丢弃并报错，而不是无限涨） |
+
+### 🧪 测试
+
+- 新增 `output-buffer.test.js`（7 例）：小输出原样通过、超长输出有界且标记
+  省略字符数（与真实值一致）、**跨 chunk 多字节 UTF-8 不出乱码**、单个超大 chunk
+  击不穿上限、模拟日志刷屏 20000 次不抛异常、`null/undefined` 安全。
+- 全量 **473 通过 / 0 失败**（466 → +7）。
+- **真机端到端**：让子进程真实输出 ~6MB（stdout+stderr 各 3MB）——
+  **不抛异常**、返回长度有界（4,194,398）、含截断标记、头尾都保留、退出码 0、无残留进程。
+
 ## 3.6.16
 
 ### 🟢 设计整改：**去掉"100 轮上限"这个多余的硬限制**

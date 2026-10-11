@@ -153,8 +153,16 @@ export class MCPClient {
       env: sanitizeEnv(env),
     })
 
+    // 护栏：MCP 是「一行一条 JSON」协议，正常每行都会被消费掉。
+    // 但对端若持续发超长无换行数据，buffer 会无限增长并撑爆字符串（RangeError → 崩进程）。
+    const MCP_BUFFER_MAX = 8 * 1024 * 1024
     this.process.stdout.on('data', (data) => {
       this.buffer += data.toString()
+      if (this.buffer.length > MCP_BUFFER_MAX) {
+        console.error('[MCP] 单条消息超过 8MB 且无换行，已丢弃（协议异常）')
+        this.buffer = ''
+        return
+      }
       this._processBuffer()
     })
 

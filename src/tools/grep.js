@@ -4,6 +4,7 @@
  * 优先使用 ripgrep (rg)，回退到 grep，最后用纯 JS 实现
  */
 import { spawn } from 'child_process'
+import { createBoundedOutput } from '../utils/output-buffer.js'
 import { resolve, isAbsolute } from 'path'
 import { ToolDef } from '../types/index.js'
 
@@ -16,14 +17,16 @@ async function grepWithRg(pattern, path, options = {}) {
 
   return new Promise((resolve, reject) => {
     const proc = spawn('rg', args, { stdio: ['pipe', 'pipe', 'pipe'] })
-    let stdout = ''
-    let stderr = ''
-    proc.stdout.on('data', d => stdout += d)
-    proc.stderr.on('data', d => stderr += d)
+    // 有界累积：grep 可能命中海量行，无界拼接会撑爆字符串并崩进程
+    const outBuf = createBoundedOutput()
+    const errBuf = createBoundedOutput()
+    proc.stdout.on('data', d => { try { outBuf.push(d) } catch {} })
+    proc.stderr.on('data', d => { try { errBuf.push(d) } catch {} })
     proc.on('close', (code) => {
+      outBuf.flush(); errBuf.flush()
       // rg exit 1 = no matches, 2 = error
-      if (code === 0 || code === 1) resolve(stdout)
-      else resolve(`[ripgrep error: ${stderr}]`)
+      if (code === 0 || code === 1) resolve(outBuf.toString())
+      else resolve(`[ripgrep error: ${errBuf.toString()}]`)
     })
     proc.on('error', () => resolve(null)) // rg not found
     proc.stdin.end()
@@ -39,13 +42,14 @@ async function grepWithGrep(pattern, path, options = {}) {
 
   return new Promise((resolve, reject) => {
     const proc = spawn('grep', args, { stdio: ['pipe', 'pipe', 'pipe'] })
-    let stdout = ''
-    let stderr = ''
-    proc.stdout.on('data', d => stdout += d)
-    proc.stderr.on('data', d => stderr += d)
+    const outBuf = createBoundedOutput()
+    const errBuf = createBoundedOutput()
+    proc.stdout.on('data', d => { try { outBuf.push(d) } catch {} })
+    proc.stderr.on('data', d => { try { errBuf.push(d) } catch {} })
     proc.on('close', (code) => {
-      if (code === 0 || code === 1) resolve(stdout)
-      else resolve(`[grep error: ${stderr}]`)
+      outBuf.flush(); errBuf.flush()
+      if (code === 0 || code === 1) resolve(outBuf.toString())
+      else resolve(`[grep error: ${errBuf.toString()}]`)
     })
     proc.on('error', () => resolve(null))
     proc.stdin.end()

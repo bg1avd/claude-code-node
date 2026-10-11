@@ -33,6 +33,7 @@ import { createConnection } from 'node:net'
 import crypto from 'node:crypto'
 import { SOCK_DIR, SOCK_PATH, CC_NODE_PID, CC_NOTIFY_PID, CC_NOTIFY_LOG, DEFAULT_HTTP_PORT } from '../core/paths.js'
 import { ChannelManager } from './index.js'
+import { createBoundedOutput } from '../utils/output-buffer.js'
 
 // ============================================================
 // 配置加载
@@ -216,11 +217,15 @@ function spawnNewNode(ccNodePath, text) {
         env: { ...process.env, CC_NODE_ONESHOT: '1' },
         timeout,
       })
-      let stdout = ''
-      let stderr = ''
-      child.stdout.on('data', (d) => (stdout += d.toString()))
-      child.stderr.on('data', (d) => (stderr += d.toString()))
+      // 有界累积（防海量输出撑爆字符串 → RangeError → 进程崩溃）
+      const outBuf = createBoundedOutput()
+      const errBuf = createBoundedOutput()
+      child.stdout.on('data', (d) => { try { outBuf.push(d) } catch {} })
+      child.stderr.on('data', (d) => { try { errBuf.push(d) } catch {} })
       child.on('close', (code) => {
+        outBuf.flush(); errBuf.flush()
+        const stdout = outBuf.toString()
+        const stderr = errBuf.toString()
         if (stdout.trim()) {
           finish({ type: 'reply', text: stdout.trim().slice(0, 4000) })
         } else if (stderr.trim()) {

@@ -79,8 +79,18 @@ function startSocketServer(engine, session, sessionManager, channelManager, verb
     // Unix socket 本身通过文件系统权限保护
     let buffer = ''
 
+    // 协议行缓冲护栏：正常情况下每收到一行就消费掉，buffer 不会涨；
+    // 但对端若一直发超长「无换行」数据，仍会把字符串撑爆（RangeError → 崩进程）。
+    // 超过 8MB 视为协议异常，直接丢弃并报错，绝不冒险累积。
+    const IPC_BUFFER_MAX = 8 * 1024 * 1024
+
     client.on('data', async (data) => {
       buffer += data.toString()
+      if (buffer.length > IPC_BUFFER_MAX) {
+        console.error(`[ipc] 单条消息超过 ${IPC_BUFFER_MAX} 字符且无换行，已丢弃（协议异常）`)
+        buffer = ''
+        return
+      }
 
       // 按行解析 JSON 消息
       const lines = buffer.split('\n')
