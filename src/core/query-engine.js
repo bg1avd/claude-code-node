@@ -265,6 +265,7 @@ export class QueryEngine {
     let finalResponse = ''
     // 循环收尾原因：'done'(模型给出最终答复) | 'aborted'(用户 /stop) | 'max-turns'(跑满上限)
     let outcome = 'running'
+    let turnsUsed = 0        // 本次请求实际跑了几轮（供提示语/诊断用）
 
     // 小模型模式：每个用户任务开始前，主动清空 LLM 端缓存一次。
     // 根因：LLM 端（llama.cpp 等自建服务）KV cache 无限叠加被塞满，是工作几轮后
@@ -280,6 +281,7 @@ export class QueryEngine {
     // 有工具调用就执行 → 循环。
     try {
       for (let turn = 0; turn < this.config.maxTurns; turn++) {
+        turnsUsed = turn + 1
         // 用户 /stop → 优雅退出（不再抛异常：保证本轮消息仍走正常流程落盘）
         if (this.abortController.signal.aborted) { outcome = 'aborted'; break }
 
@@ -353,12 +355,18 @@ export class QueryEngine {
     if (!finalResponse) {
       if (outcome === 'aborted') {
         finalResponse = '⏹️ 已按你的要求中断本轮（历史已保留，可直接继续对话）'
-      } else {
-        // ⚠️ 修复（v3.6.13）：原来用 state.turnCount（会话累计用户请求数，跨重启累加）
-        // 判断是否达到工具循环上限，是完全错误的量纲 → 会话请求数 < maxTurns 时
-        // 明明跑满 100 轮工具循环却只返回空字符串（静默无响应）。
-        // 现在按「工具循环自身是否跑满」判定。
+      } else if (outcome === 'max-turns') {
         finalResponse = `[工具循环已达上限 ${this.config.maxTurns} 轮，模型未能给出最终答复，已强制停止]`
+      } else {
+        // outcome === 'done'：模型自己结束了这一轮（没有工具调用），但**内容是空的**
+        // —— 既没有文字、也没有工具调用。
+        //
+        // ⚠️ 这里就是"1 分钟就报 100 轮上限"的真凶（3.6.12）：
+        //   空回复让 finalResponse 保持空字符串 → 被下面的"达到上限"分支接住 →
+        //   打出 `[达到最大回合数限制 (100)，停止响应]`，**哪怕只跑了 1 轮**。
+        //   判据里的 `state.turnCount >= 100`（会话累计请求数，跨重启累加）只是
+        //   让这个错误提示恰好"有条件出现"而已，与工具循环轮数毫无关系。
+        finalResponse = `[模型返回了空回复（本次共 ${turnsUsed} 轮，既无文字也无工具调用）。请再发一次，或换一个模型试试。]`
       }
     }
 

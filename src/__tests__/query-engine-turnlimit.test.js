@@ -199,3 +199,50 @@ test('收尾引导：只进请求体，不污染会话历史 state.messages', as
   const polluted = engine.state.messages.some(m => String(m.content || '').includes('收尾指令'))
   assert.equal(polluted, false, '收尾引导不得写入 state.messages（否则会落盘/污染后续对话）')
 })
+
+// ---------- 空回复：不能再误报成「达到上限」（v3.6.15，用户实测反馈）----------
+//
+// 用户现象：Telegram 里 13:16 有输出、13:17 就出现「[达到最大回合数限制 (100)，停止响应]」——
+// 中间只隔 1 分钟，**根本不可能跑满 100 轮**。真凶是：模型返回「空回复」（既无文字、
+// 也无工具调用）时 finalResponse 保持空串，被「达到上限」分支接住误报。
+// 而旧判据 `state.turnCount >= 100`（会话累计请求数，跨重启累加）只是让这个
+// 错误提示"恰好有条件出现"，与工具循环轮数毫无关系。
+
+test('空回复：模型返回空内容且无工具调用 → 报「空回复」，绝不误报「已达上限」', async () => {
+  const engine = makeLoopEngine({
+    maxTurns: 100,
+    turnCount: 999,                                     // ← 用户那台机器的状态
+    responses: [{ content: '', toolCalls: [] }],        // ← 空回复（第 1 轮就发生）
+  })
+  const r = await run(engine)
+  assert.doesNotMatch(r.response, /达到最大回合数限制|已达上限/, '绝不能误报成达到上限')
+  assert.match(r.response, /空回复/, '应明确告知是空回复')
+  assert.match(r.response, /共 1 轮/, '应报告真实轮数（1 轮），而不是 100')
+  assert.equal(r.aborted, false)
+})
+
+test('空回复：content 为 null 同样不该误报上限', async () => {
+  const engine = makeLoopEngine({
+    maxTurns: 100, turnCount: 100,
+    responses: [{ content: null, toolCalls: [] }],
+  })
+  const r = await run(engine)
+  assert.doesNotMatch(r.response, /达到最大回合数限制|已达上限/)
+  assert.match(r.response, /空回复/)
+})
+
+test('回归对照：真的跑满上限时，仍应报「已达上限」', async () => {
+  const engine = makeLoopEngine({
+    maxTurns: 3, turnCount: 1,
+    tools: [{ name: 'Noop', handler: async () => 'ok' }],
+    responses: [{ content: '', toolCalls: [new ToolCall('t', 'Noop', {})] }],
+  })
+  const r = await run(engine)
+  assert.match(r.response, /工具循环已达上限 3 轮/)
+})
+
+test('回归对照：正常有内容的答复，原样返回（不追加任何提示）', async () => {
+  const engine = makeLoopEngine({ maxTurns: 100, turnCount: 999, responses: [{ content: '正常答复', toolCalls: [] }] })
+  const r = await run(engine)
+  assert.equal(r.response, '正常答复')
+})
