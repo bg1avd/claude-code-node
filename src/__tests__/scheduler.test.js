@@ -457,8 +457,10 @@ test('maxRetries 失败后延迟重试,耗尽才归档 failed', async () => {
   s.start()
   s.addTask({ kind: 'once', dueAt: Date.now() - 100, actionType: 'exec', cmd: 'x', maxRetries: 3, retryDelayMs: 20 })
   // 轮询驱动直到达到 3 次调用(确定性,容忍异步 execute 时序)
-  const deadline = Date.now() + 1500
-  while (calls < 3 && Date.now() < deadline) {
+  // ⚠️ 必须**同时**等归档出现：calls 在第 3 次 runExec *进入时* 就 +1，
+  //    而归档发生在它 resolve 之后 —— 只等 calls 会撞上竞态（历史还是空的）。
+  const deadline = Date.now() + 2000
+  while ((calls < 3 || s.history().length === 0) && Date.now() < deadline) {
     await sleep(30)
     s.tickNow()
   }
@@ -477,8 +479,9 @@ test('重试耗尽仍失败 → 归档 failed', async () => {
   })
   s.start()
   s.addTask({ kind: 'once', dueAt: Date.now() - 100, actionType: 'exec', cmd: 'x', maxRetries: 2, retryDelayMs: 20 })
-  const deadline = Date.now() + 1500
-  while (calls < 3 && Date.now() < deadline) {
+  // 同上：等 calls 到位 **且** 归档已写入，避免"已调用完但还没落 history"的竞态
+  const deadline = Date.now() + 2000
+  while ((calls < 3 || s.history().length === 0) && Date.now() < deadline) {
     await sleep(30)
     s.tickNow()
   }

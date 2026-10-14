@@ -195,7 +195,13 @@ export class Config {
           // 写前备份原文件（.bak，覆盖旧备份）— 迁移万一有问题可手工恢复
           try { await copyFile(p, p + '.bak') } catch { /* 备份失败不阻断迁移 */ }
           await atomicWriteFile(p, JSON.stringify(disk, null, 2))
-          console.log(`🔄 已自动迁移 ${p}: model ${oldName} → ${newName}（deepseek-chat 已由 Flash 接管，原文件备份为 config.json.bak）`)
+          // ⚠️ 必须写 **stderr**，不能写 stdout。
+          // 原因：node:test 在 Node 20 下靠 stdout 传 v8 序列化结果，测试进程里任何
+          // 杂散 stdout 写入（尤其中文/emoji 多字节）都可能**切断序列**，表现为
+          // 「Unable to deserialize cloned data due to invalid or unsupported version」
+          // 的文件级失败（用例本身却全绿）——实测就是这个文件偶发红。
+          // 同理，`--stdio` 模式 stdout 是 JSON-RPC 通道，写日志会污染协议。
+          console.error(`🔄 已自动迁移 ${p}: model ${oldName} → ${newName}（deepseek-chat 已由 Flash 接管，原文件备份为 config.json.bak）`)
         }
       } catch { /* 文件不存在或不可写 — 跳过 */ }
     }

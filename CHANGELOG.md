@@ -45,6 +45,17 @@
   最常见的真因（OpenRouter 官方文档明确警告：reasoning tokens 计入 max_tokens）
 - Qwen 路径显式设置 `thinking_budget` 时，自动保证 `max_tokens > budget + 1024`，避免预算被吃光
 
+### 🔧 修复：两处 CI flaky（发布流程偶发红）
+
+1. **`config.js` 的迁移提示写 stdout** → Node 20 下 `node --test` 靠 stdout 传 v8 序列化结果，
+   该提示含中文/emoji 多字节，偶发**切断序列**，表现为
+   `Unable to deserialize cloned data due to invalid or unsupported version` 的**文件级失败**
+   （用例本身却全绿）。改为写 **stderr**。
+   > 顺带修掉一个真 bug：`--stdio` 模式下 stdout 是 JSON-RPC 通道，写日志会污染协议。
+2. **`scheduler.test.js` 重试用例竞态** → `calls` 在 `runExec` **进入时**就 +1，而归档发生在它
+   resolve 之后；只等 `calls` 会读到空 history（`Cannot read properties of undefined`）。
+   改为**同时**等待归档出现。
+
 ### 测试
 - 新增 28 例（provider 识别 / 档位裁剪 / 各厂商参数形状 / 保守边界）+ 4 例空回复诊断
 - 全量 **505 通过 / 0 失败**
