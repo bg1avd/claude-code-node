@@ -1,5 +1,55 @@
 # CHANGELOG
 
+## 3.6.18
+
+### ✨ 新增：思考深度（thinking / reasoning depth）适配层
+
+**背景**：各家都自称 "OpenAI 兼容"，但那只指请求/响应**结构**。具体到"怎么设置思考深度"，
+**每家各说各话**（均据各自官方文档核对）：
+
+| 厂商 | 参数 | 取值 |
+|---|---|---|
+| OpenAI | `reasoning_effort` | none…max（随模型） |
+| DeepSeek | `reasoning_effort` + `thinking:{type}` | low/medium/high |
+| Kimi | `reasoning_effort` | low/high/max（默认 max） |
+| Qwen | `enable_thinking` + `thinking_budget` | true/false + 数字 |
+| Anthropic | `output_config.effort` | low/medium/high/max |
+| GLM | `thinking:{type}` | 仅开关，无档位 |
+| OpenRouter | `reasoning:{effort\|max_tokens}` | 归一化层（7 档） |
+
+统一发 `reasoning_effort` 会**吃 400**（给 Kimi 发 `medium`、给 DeepSeek 发 `minimal` 均不被接受）。
+
+**新增 `src/core/thinking-adapter.js`**：按 `apiBase`/`model` 识别 provider，翻译成对方
+真正接受的参数，并把档位**裁剪**到其允许集合（取最接近，并列时偏深）。
+
+- 配置：`thinking: { mode: 'auto'|'off'|'on', effort, budgetTokens }`
+- CLI：`--thinking MODE` / `--thinking-effort LEVEL` / `--thinking-budget N`
+- 命令：`/thinking [auto|off|on] [effort]`、`/thinking effort <level>`（**立即生效 + 持久化**）
+- 三道保险：
+  1. **未识别的 provider → 什么都不发**（保守，用服务端默认）
+  2. 档位按 provider 允许集合裁剪
+  3. 若带参数仍被 **400** 拒绝 → **自动剥离参数重试一次**，绝不因此不可用
+- `auto`（默认）保持历史行为：**DeepSeek 默认关闭思考**，其他不干预服务端默认
+
+### 🔴 修复：`deepseek-v` 前缀匹配导致"关闭思考"从未生效
+
+旧代码只有一行 `if (model.startsWith('deepseek-v')) body.thinking = {type:'disabled'}`，
+而**项目默认模型是 `deepseek-flash`，匹配不上** → 等于从未关闭。现按 provider 识别，不再靠脆弱前缀。
+
+### ✨ 新增：采集思考 token + 空回复诊断
+
+- `usage.completion_tokens_details.reasoning_tokens` 现被采集（流式/非流式都支持），
+  计入 `costTracker.totalReasoningTokens`（**不重复计费**：它本就含在 completion_tokens 内）
+- 空回复时给出**原因**：若 `finish_reason=length` 且思考占 ≥80% 输出 token → 明确提示
+  「多半是思考吃光了输出预算，可试 `/thinking off` 或降低深度」。这正是"模型返回空回复"
+  最常见的真因（OpenRouter 官方文档明确警告：reasoning tokens 计入 max_tokens）
+- Qwen 路径显式设置 `thinking_budget` 时，自动保证 `max_tokens > budget + 1024`，避免预算被吃光
+
+### 测试
+- 新增 28 例（provider 识别 / 档位裁剪 / 各厂商参数形状 / 保守边界）+ 4 例空回复诊断
+- 全量 **505 通过 / 0 失败**
+- 真机端到端：mock LLM 校验实际发出的请求体、400 剥离重试、PTY 验证 `/thinking` 四个分支
+
 ## 3.6.17
 
 ### 🔴 修复：命令输出过大 → `RangeError: Invalid string length` → **整个进程崩溃**

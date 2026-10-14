@@ -83,6 +83,7 @@ export class CostTracker {
     this.totalInputTokens = 0
     this.totalOutputTokens = 0
     this.totalCacheReadTokens = 0
+    this.totalReasoningTokens = 0   // 思考 token（v3.6.18）：**已含在 outputTokens 内**，仅用于展示/诊断
     this.totalApiCalls = 0
     this.history = []  // 每次 API 调用的记录
   }
@@ -98,12 +99,19 @@ export class CostTracker {
     const inputTokens = usage.input_tokens || usage.prompt_tokens || 0
     const outputTokens = usage.output_tokens || usage.completion_tokens || 0
     const cacheReadTokens = usage.cache_read_input_tokens || 0
+    // 思考 token 是 completion_tokens 的**子集**（各家口径一致），所以：
+    //   · 计费只按 outputTokens（避免重复计算）
+    //   · 单独累计，用于"这次回答有多少花在思考上"以及诊断空回复
+    const reasoningTokens = usage.reasoning_tokens
+      || usage.completion_tokens_details?.reasoning_tokens
+      || 0
 
     const cost = this.calculateCost(inputTokens, outputTokens, cacheReadTokens)
 
     this.totalInputTokens += inputTokens
     this.totalOutputTokens += outputTokens
     this.totalCacheReadTokens += cacheReadTokens
+    this.totalReasoningTokens += reasoningTokens
     this.totalApiCalls++
 
     this.history.push({
@@ -111,6 +119,7 @@ export class CostTracker {
       inputTokens,
       outputTokens,
       cacheReadTokens,
+      reasoningTokens,
       cost,
     })
 

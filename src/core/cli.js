@@ -288,6 +288,7 @@ Commands:
   /budget        — Show token budget
   /window [N]    — Show/set context window (e.g. /window 128k, /window auto)
   /max-turns [N] — Tool-loop turn limit (0 = unlimited, DEFAULT; e.g. /max-turns 20)
+  /thinking [auto|off|on] [effort] — 思考深度（按厂商翻译；立即生效并持久化）
   /channel CMD   — Manage notification channels (list|send|test)
   /cost          — Show API cost report
   /compact       — Manually compact conversation context
@@ -345,6 +346,8 @@ const DETAILED_HELP = {
 
   window:  "/window [N|auto|reset]\n  Show or set the LLM context window (max tokens allowed in conversation).\n  This is the hard ceiling for auto-compression — context will never exceed it.\n\n  Subcommands:\n    (no arg)   — Show current window + its source (manual/probe/table/fallback) + usage\n    /window 128k — Manually set window (persisted to config). Accepts K/M suffix:\n                  64k, 128k, 200k, 1m, or a raw number like 131072.\n    /window auto  — Clear manual override, return to auto-detection (next message re-detects).\n    /window reset — Clear manual override AND re-detect now.\n\n  Manual setting takes priority over auto-detection and survives restart.\n  Auto-detection itself is NOT persisted (re-runs at each startup).\n\n  Examples:\n    /window\n    /window 128k\n    /window 64k\n    /window auto\n    /window reset",
 
+  thinking: "/thinking [auto|off|on] [effort]\n  \u601d\u8003\u6df1\u5ea6\u63a7\u5236\u3002\u5404\u5bb6\u867d\u90fd\u79f0 'OpenAI \u517c\u5bb9'\uff0c\u4f46'\u600e\u4e48\u8bbe\u7f6e\u601d\u8003\u6df1\u5ea6'\u5404\u4e0d\u76f8\u540c\uff0c\n  \u672c\u547d\u4ee4\u4f1a\u6309\u4f60\u5f53\u524d\u7684 apiBase/model \u8bc6\u522b\u5382\u5546\uff0c\u7ffb\u8bd1\u6210\u5bf9\u65b9\u771f\u6b63\u63a5\u53d7\u7684\u53c2\u6570\u3002\n\n  \u6a21\u5f0f:\n    auto  \u2014 \u6309\u63d0\u4f9b\u5546\u9ed8\u8ba4\uff08DeepSeek \u9ed8\u8ba4\u5173\u601d\u8003\uff1b\u5176\u4ed6\u4e0d\u5e72\u9884\uff09\n    off   \u2014 \u660e\u786e\u5173\u95ed\u601d\u8003\n    on    \u2014 \u660e\u786e\u5f00\u542f\uff0c\u6df1\u5ea6\u53d6 effort\n\n  effort \u53d6\u503c: none|minimal|low|medium|high|xhigh|max\n    \u4f1a\u6309\u5382\u5546\u5141\u8bb8\u7684\u96c6\u5408\u88c1\u526a\uff08\u5982 Kimi \u53ea\u8ba4 low/high/max \u2192 \u8bf7\u6c42 medium \u5b9e\u9645\u53d6 high\uff09\u3002\n\n  \u5b9e\u4f8b:\n    /thinking            \u2014 \u67e5\u770b\u5f53\u524d\u8bbe\u7f6e + \u5b9e\u9645\u4f1a\u53d1\u9001\u7684\u53c2\u6570\n    /thinking off        \u2014 \u5173\u95ed\u601d\u8003\n    /thinking on high    \u2014 \u5f00\u542f\u5e76\u7528 high\n    /thinking effort low \u2014 \u53ea\u6539\u6df1\u5ea6\n\n  \u6539\u52a8\u7acb\u5373\u751f\u6548\uff08\u65e0\u9700\u91cd\u542f\uff09\u5e76\u6301\u4e45\u5316\u3002\n  \u82e5\u670d\u52a1\u7aef\u4e0d\u63a5\u53d7\u601d\u8003\u53c2\u6570\uff08400\uff09\uff0c\u4f1a\u81ea\u52a8\u5265\u79bb\u53c2\u6570\u91cd\u8bd5\u4e00\u6b21\uff08\u4e0d\u4f1a\u56e0\u6b64\u4e0d\u53ef\u7528\uff09\u3002",
+
   'max-turns': "/max-turns [N]\n  Tool-loop turn limit for a SINGLE user message.\n\n  DEFAULT IS 0 = UNLIMITED. A fixed turn cap is a crude safety net: it cannot\n  tell 'working hard' from 'going in circles', and it cuts off legitimate long\n  tasks. So the real brakes are:\n    1) no-progress detection — same tool with the SAME arguments (or identical\n       results) for 3 rounds in a row -> nudge the model to change strategy;\n       5 rounds in a row -> stop and tell you why\n    2) /stop — you decide, any time\n    3) wrap-up guidance (only when N > 0) — near the limit the model is told to\n       stop calling tools and summarize\n\n  Set N > 0 only if you want a hard ceiling (e.g. /max-turns 20).\n  Changes take effect IMMEDIATELY (no restart) and are persisted to config.\n\n  Examples:\n    /max-turns        — show current setting\n    /max-turns 0      — unlimited (default)\n    /max-turns 20     — hard cap at 20 rounds, wrap-up hint from round 17",
 
   channel: "/channel <list|send|test>\n  Manage notification channels.\n\n  Subcommands:\n    list       — List all configured notification channels\n    send <msg> — Send a message via all channels\n    test       — Send a test message to verify channels\n\n  Requires channel environment variables to be set at startup.",
@@ -401,6 +404,9 @@ function parseArgs(argv) {
       case '--small-model': args.smallModel = true; break
       case '--max-output-tokens': args.maxOutputTokens = parseInt(argv[++i], 10); break
       case '--small-model-max-turns': args.smallModelMaxTurns = parseInt(argv[++i], 10); break
+      case '--thinking': args.thinkingMode = argv[++i]; break
+      case '--thinking-effort': args.thinkingEffort = argv[++i]; break
+      case '--thinking-budget': args.thinkingBudget = parseInt(argv[++i], 10); break
       case '--stdio': args.stdio = true; break
       case '--with-notify': args.withNotify = true; break
       case '--version':
@@ -425,6 +431,9 @@ Options:
   --small-model             Small-model mode: 每轮自动清空 LLM 缓存 (cache_prompt:false) + 合并 system 为单条，根治本地服务 500
   --max-output-tokens N     Override max single-response output tokens (default: computed from window size)
   --small-model-max-turns N Reserved (no-op — tool loop uses maxTurns)
+  --thinking MODE           Thinking depth mode: auto|off|on (default: auto = provider default)
+  --thinking-effort LEVEL   none|minimal|low|medium|high|xhigh|max (clamped per provider)
+  --thinking-budget N       Explicit thinking token budget (>0 overrides effort; used by Qwen)
   --with-notify             Start built-in channel listener (Telegram)
                             (replaces cc-notify daemon — no external script needed)
   --no-continue             Don't auto-resume the last session on startup (config autoContinue)
@@ -748,6 +757,15 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
     // 收尾引导触发比例（默认 0.8）：工具循环跑到 maxTurns 的这个比例时，
     // 注入「停止调工具、直接总结」的 system 指令，避免硬撞上限白等。
     wrapUpRatio: config.get('wrapUpRatio'),
+    // 思考深度（v3.6.18）：{mode, effort, budgetTokens} —— 见 thinking-adapter.js
+    // 优先级：CLI 参数 > config（用户级/项目级）
+    thinking: (() => {
+      const base = { mode: 'auto', effort: '', budgetTokens: 0, ...(config.get('thinking') || {}) }
+      if (cliArgs.thinkingMode) base.mode = cliArgs.thinkingMode
+      if (cliArgs.thinkingEffort) base.effort = cliArgs.thinkingEffort
+      if (Number.isInteger(cliArgs.thinkingBudget)) base.budgetTokens = cliArgs.thinkingBudget
+      return base
+    })(),
   })
   const engine = new QueryEngine(engineConfig)
 
@@ -1154,6 +1172,50 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
           console.log(`API Key: ${engine.config.apiKey ? `已设置 (${engine.config.apiKey.slice(0, 4)}...${engine.config.apiKey.slice(-4)})` : '未设置'}`)
           console.log(`Model: ${engine.config.model}`)
           break
+        case 'thinking': {
+          // /thinking [auto|off|on] [effort]
+          //   /thinking              — 查看当前设置 + 实际会发送的参数
+          //   /thinking off|auto|on  — 切换模式
+          //   /thinking on high      — 开启并指定深度
+          //   /thinking effort high  — 只改深度（保持当前 mode）
+          // 运行时立即生效（无需重启）+ 持久化到用户级 config。
+          const { buildThinkingParams, describeThinking, EFFORT_LADDER } = await import('./thinking-adapter.js')
+          const persist = async (patch) => {
+            const cur = { mode: 'auto', effort: '', budgetTokens: 0, ...(engine.config.thinking || {}), ...patch }
+            engine.config.thinking = cur
+            try { await config.saveKeyToUser('thinking', cur) } catch (e) { console.log(`⚠️  Failed to persist: ${e.message}`) }
+            return cur
+          }
+          const show = (cur) => {
+            const info = buildThinkingParams({
+              mode: cur.mode, effort: cur.effort, budgetTokens: cur.budgetTokens,
+              apiBase: engine.config.apiBase, model: engine.config.model,
+            })
+            console.log('── 思考深度 ──────────────────────────────')
+            for (const line of describeThinking(info)) console.log('  ' + line)
+            console.log('  （改动立即生效并持久化；/thinking off|auto|on [effort]）')
+          }
+          const a1 = (rest[0] || '').trim().toLowerCase()
+          const a2 = (rest[1] || '').trim().toLowerCase()
+          const cur = { mode: 'auto', effort: '', budgetTokens: 0, ...(engine.config.thinking || {}) }
+          if (!a1) { show(cur); break }
+          if (a1 === 'effort') {
+            if (!EFFORT_LADDER.includes(a2)) { console.log(`❌ Invalid effort: "${a2}". 取值: ${EFFORT_LADDER.join('|')}`); break }
+            show(await persist({ effort: a2 }))
+            break
+          }
+          if (!['auto', 'off', 'on'].includes(a1)) {
+            console.log(`❌ Usage: /thinking [auto|off|on] [effort]   ·   /thinking effort <${EFFORT_LADDER.join('|')}>`)
+            break
+          }
+          const patch = { mode: a1 }
+          if (a2) {
+            if (!EFFORT_LADDER.includes(a2)) { console.log(`❌ Invalid effort: "${a2}". 取值: ${EFFORT_LADDER.join('|')}`); break }
+            patch.effort = a2
+          }
+          show(await persist(patch))
+          break
+        }
         case 'max-turns': {
           // /max-turns [N] — 查看/设置单轮工具循环上限（运行时立即生效 + 持久化）
           // 0 = 不限制（默认）。限制只是极端兜底；真正的刹车是「无进展检测 + /stop」。

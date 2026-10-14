@@ -320,3 +320,35 @@ test('不限制轮数：maxTurns=100 时收尾引导仍在第 81 轮', () => {
   assert.equal(engine._turnLimit(), 100)
   assert.equal(engine._wrapUpAt(), 80)   // turn index 80 == 第 81 轮
 })
+
+// ---------- 空回复诊断（v3.6.18）----------
+// 空回复最常见的真因是「思考 token 吃光 max_tokens 预算」：
+// 此时 finish_reason === 'length' 且 reasoning 几乎等于全部 completion_tokens。
+// 只说"模型没返回内容"会让用户误以为是模型抽风，必须把这个信号带出来。
+
+/** 直接在被 _runToolLoop 使用的形态上调用该方法（只需 _lastUsage） */
+const hint = (usage) => QueryEngine.prototype._emptyReplyHint.call({ _lastUsage: usage })
+
+test('空回复诊断：思考吃光预算 → 明确指向 /thinking', () => {
+  const s = hint({ finish_reason: 'length', reasoning_tokens: 250, output_tokens: 300 })
+  assert.match(s, /思考吃光/)
+  assert.match(s, /\/thinking/)
+})
+
+test('空回复诊断：length 但无思考 → 指向输出上限', () => {
+  const s = hint({ finish_reason: 'length', output_tokens: 300 })
+  assert.match(s, /截断/)
+  assert.doesNotMatch(s, /思考吃光/)
+})
+
+test('空回复诊断：有思考但正常结束 → 只报告思考用量', () => {
+  const s = hint({ finish_reason: 'stop', reasoning_tokens: 120, output_tokens: 400 })
+  assert.match(s, /思考 120 token/)
+  assert.doesNotMatch(s, /截断|吃光/)
+})
+
+test('空回复诊断：无 usage / 无信号 → 不追加任何内容', () => {
+  assert.equal(hint(null), '')
+  assert.equal(hint({}), '')
+  assert.equal(hint({ finish_reason: 'stop', output_tokens: 10 }), '')
+})

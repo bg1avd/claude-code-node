@@ -18,6 +18,7 @@ import { compactMessages, trimToWindow, foldHistoryByCount, trimToolResults } fr
 import { CostTracker } from './cost-tracker.js'
 import { EnhancedPermissionChecker } from '../security/enhanced-permission.js'
 import { isLocalLlmServer, buildAuthHeaders } from '../utils/index.js'
+import { buildThinkingParams } from './thinking-adapter.js'
 
 /**
  * 收尾引导（v3.6.14）—— 工具循环接近上限时注入的 system 指令。
@@ -117,6 +118,9 @@ export class QueryEngineConfig {
     this.readline = options.readline || null              // 用于 AskUserQuestion 工具
     this.onDelta = options.onDelta || null                // 流式增量回调 {type:'text'|'reasoning', text}（供 VS Code 扩展等 UI 消费）
     this.configStore = options.configStore || null        // 配置实例（供工具读取 web.fetch.jinaApiKey 等；可选）
+    // 思考深度（v3.6.18）：{ mode:'auto'|'off'|'on', effort:'', budgetTokens:0 }
+    // 由 thinking-adapter 按 provider 翻译成各家真正接受的参数（见 thinking-adapter.js）
+    this.thinking = options.thinking || { mode: 'auto', effort: '', budgetTokens: 0 }
   }
 }
 
@@ -456,7 +460,7 @@ export class QueryEngine {
         //   打出 `[达到最大回合数限制 (100)，停止响应]`，**哪怕只跑了 1 轮**。
         finalResponse =
           `[模型这次没有返回任何内容（本次共 ${turnsUsed} 轮，既无文字也无工具调用）。` +
-          '可以直接再发一次，或换一个模型试试。]'
+          '可以直接再发一次，或换一个模型试试。' + (this._emptyReplyHint?.() || '') + ']'
       }
     }
 
@@ -767,7 +771,6 @@ export class QueryEngine {
     }))
 
     const useStream = !this.config.noStream
-    const modelLower = this.config.model.toLowerCase()
     const url = apiBase.replace(/\/+$/, '') + '/chat/completions'
 
     const body = {
@@ -808,11 +811,31 @@ export class QueryEngine {
       }
     }
 
-    // DeepSeek V4: 默认启用 thinking mode → 要求回传 reasoning_content
-    // 这里显式关闭，避免 tool call 场景下的 400 错误
-    // thinking 参数是 DeepSeek 私有扩展，直接放在 body 顶层
-    if (modelLower.startsWith('deepseek-v')) {
-      body.thinking = { type: 'disabled' }
+    // 思考深度（v3.6.18）：交由 thinking-adapter 按 provider 分别构造参数。
+    //
+    // 旧实现是一行硬编码：`if (model.startsWith('deepseek-v')) body.thinking = {type:'disabled'}`，
+    // 有两个问题：① 前缀匹配脆弱（默认模型 deepseek-flash 根本匹配不上，等于没关）；
+    // ② 只处理 DeepSeek，其他厂商完全没有思考深度控制。
+    // 现在：按 apiBase/model 识别 provider → 生成该厂商真正接受的参数
+    // （OpenAI: reasoning_effort；DeepSeek: reasoning_effort+thinking；Kimi: low/high/max；
+    //   Qwen: enable_thinking+thinking_budget；Anthropic: output_config.effort；
+    //   GLM: thinking:{type}；OpenRouter: reasoning:{...}；未识别 → 不发）。
+    const thinking = buildThinkingParams({
+      mode: this.config.thinking?.mode ?? 'auto',
+      effort: this.config.thinking?.effort ?? '',
+      budgetTokens: this.config.thinking?.budgetTokens ?? 0,
+      apiBase,
+      model: this.config.model,
+    })
+    Object.assign(body, thinking.params)
+    // Qwen 的 thinking_budget 与可见输出**共享** max_tokens 预算：
+    // 预算不够时会「思考吃光配额 → content 为空 + finish_reason=length」。
+    // 所以显式给了预算时，保证输出上限高于它。
+    if (thinking.minOutputTokens > 0) {
+      body.max_tokens = Math.max(body.max_tokens, thinking.minOutputTokens + 1024)
+    }
+    if (this.config.verbose) {
+      console.error(`[thinking] provider=${thinking.provider} mode=${thinking.mode} ${Object.keys(thinking.params).length ? JSON.stringify(thinking.params) : '(不发参数)'}${thinking.note ? ' — ' + thinking.note : ''}`)
     }
 
     // apiBase 是用户显式指定的配置（--api-base），不是外部输入，跳过 SSRF 检查
@@ -826,6 +849,7 @@ export class QueryEngine {
     }
     let lastError = null
     let strippedImagesOnce = false // 图片降级只做一次，防止剥离后仍报同样错误时死循环
+    let strippedThinkingOnce = false // 思考参数被拒时剥离重试（同样只做一次）
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         if (this.abortController?.signal?.aborted) {
@@ -859,6 +883,7 @@ export class QueryEngine {
         // 流式或非流式处理
         if (useStream && response.body) {
           const result = await this._handleStreamResponse(response)
+          this._lastUsage = result.usage || null   // 供空回复诊断（finish_reason / reasoning_tokens）
           if (result.usage && this.costTracker) {
             this.costTracker.recordUsage(result.usage)
           }
@@ -869,6 +894,7 @@ export class QueryEngine {
         } else {
           const data = await response.json()
           const result = parseNonStreamResponse(data)
+          this._lastUsage = result.usage || null   // 供空回复诊断
           if (result.usage && this.costTracker) {
             this.costTracker.recordUsage(result.usage)
           }
@@ -904,6 +930,22 @@ export class QueryEngine {
             continue
           }
         }
+        // 思考参数被服务端拒绝 → 剥掉参数重试一次。
+        //
+        // 背景：thinking-adapter 是按厂商文档构造参数的，但"OpenAI 兼容"的实现五花八门，
+        // 网关（中转/代理）可能不认 `reasoning_effort` / `thinking` / `enable_thinking`，
+        // 直接回 400。此时**不能**让整个会话不可用 —— 剥掉参数退回"服务端默认"即可。
+        // 只做一次（strippedThinkingOnce），避免剥离后仍报错时反复重试。
+        const thinkingKeys = ['reasoning_effort', 'thinking', 'enable_thinking', 'thinking_budget', 'output_config', 'reasoning']
+        const hasThinkingParams = thinkingKeys.some(k => k in body)
+        if (!strippedThinkingOnce && err.name !== 'AbortError' && hasThinkingParams
+            && /400|invalid|unsupported|unknown|unrecognized|not support/i.test(err.message)) {
+          strippedThinkingOnce = true
+          const present = thinkingKeys.filter(k => k in body)
+          for (const k of present) delete body[k]
+          console.error(`[fallback] 服务端不接受思考参数（${present.join('/')}）→ 已剥离并重试。如需固定此行为：/thinking auto`)
+          continue
+        }
         // 网络错误重试
         if (err.name !== 'AbortError' && attempt < maxRetries && !err.message.startsWith('API 错误')) {
           const waitMs = retryDelay(1000, attempt)
@@ -917,6 +959,35 @@ export class QueryEngine {
       }
     }
     throw lastError
+  }
+
+  /**
+   * 空回复的**原因提示**（v3.6.18）。
+   *
+   * 为什么需要：空回复（无文字无工具调用）最常见的真因是
+   * **思考 token 吃光了 max_tokens 预算** —— 此时 finish_reason === 'length'，
+   * 且 reasoning_tokens ≈ completion_tokens，可见输出为 0。
+   * 只说"模型没返回任何内容"会让用户以为是模型抽风；把这两个信号带出来，
+   * 用户一眼就能判断该「/thinking off 或调小深度」还是「换个模型」。
+   *
+   * @returns {string} 形如 " ⚠️ finish_reason=length 且思考占 250/300 token —— 多半是思考吃光了输出预算，可试 /thinking off 或降低深度。"；无信号时返回 ''
+   */
+  _emptyReplyHint() {
+    const u = this._lastUsage
+    if (!u) return ''
+    const fr = u.finish_reason
+    const rt = u.reasoning_tokens || 0
+    const out = u.output_tokens || u.completion_tokens || 0
+    if (fr === 'length' && rt > 0 && rt >= out * 0.8) {
+      return ` ⚠️ finish_reason=length，且思考占 ${rt}/${out} token —— 多半是思考吃光了输出预算，可试 /thinking off 或降低深度（/thinking on low）。`
+    }
+    if (fr === 'length') {
+      return ` ⚠️ finish_reason=length —— 输出被 max_tokens 截断，可用 /window 或 /max-turns 检查输出上限。`
+    }
+    if (rt > 0) {
+      return ` （本次思考 ${rt} token，finish_reason=${fr || '未上报'}）`
+    }
+    return ''
   }
 
   /**

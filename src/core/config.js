@@ -58,6 +58,20 @@ const DEFAULTS = {
   // 输入区下方的「软键行」提示：true=默认集；数组=指定动作；false=关闭。
   // 内容由当前绑定实时生成（改键即同步显示）。
   softkeys: true,
+  // 思考深度（v3.6.18）。各家"OpenAI 兼容"的写法不同，这里统一成一个开关，
+  // 由 thinking-adapter 按 provider 翻译成对方真正接受的参数：
+  //   auto  — 按提供商默认。DeepSeek 强制 off（兼容历史行为）；其他不干预服务端默认
+  //   off   — 明确关闭思考（不支持的厂商会给出提示，保持服务端默认）
+  //   on    — 明确开启，深度取 effort
+  // effort 取值：none|minimal|low|medium|high|xhigh|max
+  //   · 会按 provider **裁剪**到其允许集合（如 Kimi 只认 low/high/max，请求 medium → 实际 high）
+  //   · /thinking 会把"请求值 → 实际值"显示出来
+  // budgetTokens > 0 时改用 token 预算（Qwen 的 thinking_budget；优先于 effort）
+  thinking: {
+    mode: 'auto',
+    effort: '',
+    budgetTokens: 0,
+  },
   dream: {
     maxRetain: 50,
     minLLMMessages: 8, // 会话达到此消息数才调用本地摘要模型（省成本）

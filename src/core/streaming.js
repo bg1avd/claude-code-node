@@ -86,7 +86,18 @@ export async function* parseStream(response) {
           if (chunk.usage) {
             result.usage.input_tokens = chunk.usage.prompt_tokens || 0
             result.usage.output_tokens = chunk.usage.completion_tokens || 0
+            // 思考 token（v3.6.18）：各家的位置/命名不一，逐个兜。
+            // 为什么必须采集：思考 token **计入 completion_tokens / max_tokens**。
+            // 若预算被思考吃光，响应会是「content 为空 + finish_reason=length」——
+            // 这正是"模型返回空回复"最常见的真因，采到它才能一眼定位。
+            const rt = chunk.usage.completion_tokens_details?.reasoning_tokens
+              ?? chunk.usage.output_tokens_details?.reasoning_tokens
+              ?? chunk.usage.reasoning_tokens
+            if (typeof rt === 'number') result.usage.reasoning_tokens = rt
           }
+          // 结束原因（供上层诊断空回复：length vs stop）
+          const fr = chunk.choices?.[0]?.finish_reason
+          if (fr) result.usage.finish_reason = fr
         } catch {
           // 忽略解析错误
         }
@@ -121,9 +132,14 @@ export function parseNonStreamResponse(data) {
   }
 
   if (data.usage) {
+    const rt = data.usage.completion_tokens_details?.reasoning_tokens
+      ?? data.usage.output_tokens_details?.reasoning_tokens
+      ?? data.usage.reasoning_tokens
     result.usage = {
       input_tokens: data.usage.prompt_tokens,
       output_tokens: data.usage.completion_tokens,
+      ...(typeof rt === 'number' && { reasoning_tokens: rt }),
+      ...(choice?.finish_reason && { finish_reason: choice.finish_reason }),
     }
   }
 
