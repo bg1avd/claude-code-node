@@ -36,6 +36,7 @@ import { isLocalLlmServer } from '../utils/index.js'
 import { stripAnsiCodes } from '../utils/ansi.js'
 import { SOCK_DIR, SOCK_PATH, CC_NODE_PID } from './paths.js'
 import { renderHeadpiece } from './headpiece.js'
+import { buildStatus } from './status.js'
 import { TelegramListener } from '../channel/tg-listener.js'
 import { DreamManager } from './dream.js'
 import { setConfigLanguage, setLanguage, detectLanguage, t } from './i18n.js'
@@ -280,6 +281,7 @@ Commands:
   /api           — Show current API base/key/model
   /tools         — List available tools
   /keys [watch]  — 显示按键绑定 / 终端能力；watch 进入实时按键诊断
+  /status        — 汇总全部运行状态（模型/接口/思考深度/上下文/轮数/键位/费用）
   /session       — Show session info
   /sessions      — List all sessions
   /clear         — Clear conversation
@@ -329,6 +331,8 @@ const DETAILED_HELP = {
   api:    "/api\n  Show the current API configuration: base URL, key (masked), and model.",
 
   tools:   "/tools\n  List all available tools that cc-node can use.\n  Shows tool names with their short descriptions.\n\n  Tools include: Bash, Read, Edit, Write, Glob, Grep,\n  WebFetch, WebSearch, AskUserQuestion, GitTool",
+
+  status: "/status\n  汇总**当前全部运行状态**——凡是被命令/配置改过的参数都会列出并标注来源。\n\n  分组：\n    进程      — 版本 / PID / 已运行时长 / 工作目录 / Node\n    模型接口  — 模型名 / API Base / Key(脱敏) / 流式 / 权限模式\n    思考深度  — 模式 / 深度(请求值→实际值) / 提供商 / 实际发送的参数\n    上下文    — 窗口大小及来源 / 已用 tokens 与占比 / 压缩触发点 / 自动压缩\n    工具循环  — 轮数上限 / 收尾引导轮次 / 止损机制\n    会话      — 会话 ID / 标题 / 消息数 / turnCount / 自动续接\n    终端键位  — 软键行 / 键位覆盖项数 / 语言\n    费用      — 调用次数 / token（含思考）/ 估算费用\n\n  标注说明：[已改] 表示该值与出厂默认不同；[用户级/项目级配置] 表示来源文件。\n  与 Telegram 的 /status 共用同一实现，两个入口不会漂移。",
 
   session: "/session\n  Show current session information:\n  - Session ID\n  - Session title\n  - Number of messages\n  - Number of tool call turns",
 
@@ -1349,6 +1353,17 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
             console.log(`  ${name}${tag} — ${tool.description.split('\n')[0]}`)
           }
           break
+        case 'status':
+          // 汇总当前**全部**运行状态（与 Telegram /status 共用 buildStatus，单一数据源）
+          console.log(buildStatus({
+            engine, session, config,
+            version: CC_NODE_VERSION,
+            windowSource,
+            cwd: process.cwd(),
+            channels: config.get('channels') || {},
+            defaultChannel: config.get('defaultChannel') || null,
+          }))
+          break
         case 'session':
           console.log(`Session: ${session.id}`)
           console.log(`Title: ${session.title}`)
@@ -1906,6 +1921,14 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
   //  - Telegram 消息会作为 REPL 输入，与 CLI 共享同一个引擎和对话记忆
   // ============================================================
   const tgToken = process.env.CC_NODE_CHANNEL_TELEGRAM_TOKEN || config.get('channels')?.telegram?.token || ''
+  // 运行状态提供者：给 Telegram /status 用（让它报全 model/apiBase/思考/上下文…）。
+  // 与 REPL 的 /status 共用同一份 buildStatus，避免两个入口各拼一套、长期漂移。
+  const statusRuntime = () => ({
+    engine, session, config,
+    version: CC_NODE_VERSION,
+    windowSource,
+    cwd: process.cwd(),
+  })
   // 关键修复: 使用 --with-notify 时，由 startBuiltinListeners 统一启动 Telegram 监听器，
   // 这里不能再独立启动一个，否则同一 token 会有两个 getUpdates 长轮询 → Telegram 报 HTTP 409 Conflict。
   if (tgToken && !cliArgs.withNotify) {
@@ -1920,6 +1943,7 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
           },
         },
       })
+      tgListener.setRuntimeProvider(statusRuntime)
       tgListener.start(async (msg) => {
         // Telegram 消息 → 复用 REPL 引擎处理（共享同一份对话记忆）
         tgChatId = msg.chatId || tgChatId
@@ -2006,7 +2030,10 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
     })
     // 关键：把 startBuiltinListeners 内置监听器的 tgListener 赋给全局 tgListener，
     // 否则 onConfirmTool 的 tgListener?.bot 恒为 false，权限确认不会推送 Telegram。
-    if (builtinNotify?.tgListener) tgListener = builtinNotify.tgListener
+    if (builtinNotify?.tgListener) {
+      tgListener = builtinNotify.tgListener
+      tgListener.setRuntimeProvider(statusRuntime)
+    }
     console.log('📡 Built-in channel listeners started (--with-notify)')
   }
 

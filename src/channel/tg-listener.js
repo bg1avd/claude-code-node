@@ -22,6 +22,7 @@ import { homedir } from 'os'
 import { join, dirname } from 'path'
 import { t, applyMessageLanguage } from '../core/i18n.js'
 import { CC_NODE_VERSION } from '../core/version.js'
+import { buildStatus } from '../core/status.js'
 import { markdownToTelegramHtml, splitMarkdown, RICH_MAX_LEN, CLASSIC_CHUNK } from '../utils/markdown.js'
 
 const TG_MD_ESCAPE_CHARS = /[_*[\]()~`>#+\-=|{}.!]/g
@@ -368,6 +369,11 @@ class ConversationState {
     this._states = new Map()
     this._timeout = 30 * 60 * 1000 // 30分钟无活动自动清理
     this._cleanupTimer = setInterval(() => this._cleanup(), 5 * 60 * 1000)
+    // ⚠️ 必须 unref：这只是"顺带清理过期会话"的辅助定时器，
+    //    不该阻止进程退出。不 unref 的话，任何"import 了 tg-listener 又跑完退出的进程"
+    //    （单测、CLI 子命令、`node -e` 脚本）都会被这个 5 分钟定时器**永久吊住**。
+    //    实测：引入本模块的单测全绿但进程不退出，node --test 报 "Interrupted while running"。
+    this._cleanupTimer.unref?.()
   }
 
   get(chatId) {
@@ -439,7 +445,17 @@ export class TelegramListener {
     this.conversations = new ConversationState()
     this._onMessage = null
     this._handlers = {}
+    // 宿主注入：返回当前运行状态（engine/session/Config/version/windowSource…），
+    // 供 /status 报全（模型/接口/思考/上下文/键位…）。独立 daemon 进程拿不到引擎时为 null，
+    // 此时 /status 退回精简版（只报进程与通道）。
+    this._runtimeProvider = null
   }
+
+  /**
+   * 注入"运行状态提供者" —— 由宿主（cli.js / notify-daemon.js）调用。
+   * @param {() => object} fn 返回 { engine, session, config, version, windowSource, cwd }
+   */
+  setRuntimeProvider(fn) { this._runtimeProvider = typeof fn === 'function' ? fn : null }
 
   /** 注册消息处理器 */
   on(event, handler) {
@@ -738,14 +754,44 @@ export class TelegramListener {
       case '/status': {
         const nodeInfo = await this._findCcNode()
         const chNames = Object.keys(this.config.channels || {})
+        const nodeLine = nodeInfo.running ? t('tg.status.nodeRunning') : t('tg.status.nodeStopped')
+
+        // 能拿到引擎 → 报**全部**设置（模型/接口/思考/上下文/工具循环/键位/费用…）
+        // 拿不到（独立 daemon 进程）→ 退回精简版，只报进程与通道
+        let rt = null
+        try { rt = this._runtimeProvider ? this._runtimeProvider() : null } catch { rt = null }
+        if (rt && rt.engine) {
+          try {
+            return buildStatus({
+              ...rt,
+              version: rt.version || CC_NODE_VERSION,
+              channels: this.config.channels || {},
+              defaultChannel: this.config.defaultChannel || null,
+              extra: ['【通道状态】', `  ${nodeLine}`, `  监听器 PID: ${process.pid}`],
+            })
+          } catch (e) {
+            // 状态汇总失败不能影响 /status 可用性 —— 退精简版并附原因
+            return [
+              t('tg.status.title'), '',
+              t('tg.status.version', { n: CC_NODE_VERSION }),
+              t('tg.status.uptime', { n: Math.floor(process.uptime()) }),
+              t('tg.status.channels', { n: chNames.join(', ') || t('tg.status.none') }),
+              nodeLine,
+              `• PID: ${process.pid}`,
+              `⚠️ 完整状态获取失败: ${e.message}`,
+            ].join('\n')
+          }
+        }
+
         return [
           t('tg.status.title'),
           '',
           t('tg.status.version', { n: CC_NODE_VERSION }),
           t('tg.status.uptime', { n: Math.floor(process.uptime()) }),
           t('tg.status.channels', { n: chNames.join(', ') || t('tg.status.none') }),
-          nodeInfo.running ? t('tg.status.nodeRunning') : t('tg.status.nodeStopped'),
+          nodeLine,
           `• PID: ${process.pid}`,
+          'ℹ️ 本进程未持有引擎（独立 daemon），仅报进程与通道。完整状态请在 REPL 用 /status。',
         ].join('\n')
       }
 
