@@ -102,6 +102,52 @@ export class TokenBudget {
     this.outputTokens = 0
     // 当前窗口来源：'manual' | 'probe' | 'table' | 'fallback'（见 context-window.js）
     this.windowSource = options.windowSource || 'fallback'
+    // ★ 服务端反馈校准系数（v3.6.20）
+    // estimateMessages 是启发式估算（英文 4 字符/token、中文 1.5 字符/token），
+    // 与各家真实 tokenizer 存在系统性偏差。实测一次事故：
+    //   本地估算 719,483 ↔ 服务端实测 986,796（低估 27%）→ 压缩判定失效 → API 400 超窗。
+    // 偏差来源：中文分词比例、JSON 转义膨胀（\n → \\n）、每条消息结构开销等。
+    // 任何"猜比例"的修法都只能对某一家/某种语料有效，因此改为**用服务端真值反向校准**：
+    // 每次收到 usage.prompt_tokens，就与发送前的本地估算求比值，EMA 平滑后作用于后续估算。
+    // 这样无论换模型、换语言、换厂商，估算都会自动收敛到真实值。
+    this.calibrationFactor = Number.isFinite(options.calibrationFactor) && options.calibrationFactor > 0
+      ? options.calibrationFactor
+      : 1
+    this.calibrationSamples = 0
+  }
+
+  /**
+   * 用服务端返回的真实 prompt_tokens 校准本地估算。
+   *
+   * @param {number} actualTokens — 服务端实测（usage.prompt_tokens）
+   * @param {number} estimatedTokens — 发送前本地估算（必须与服务端口径一致：含 system + tools）
+   * @returns {number} 更新后的校准系数
+   */
+  calibrate(actualTokens, estimatedTokens) {
+    if (!(actualTokens > 0) || !(estimatedTokens > 0)) return this.calibrationFactor
+    const ratio = actualTokens / estimatedTokens
+    // 拒绝离谱样本（服务端统计异常 / 估算分母过小），避免把系数带偏。
+    // 上限取 8：强制压缩后分母会变小（messages 只剩几条），此时比值天然偏大——
+    // 若卡在 4 会把**最需要校准的那一次**丢掉（实测 2600/640 ≈ 4.06 被误拒）。
+    // 下限 0.4：服务端一般不会比本地估算小太多，过小说明样本异常。
+    if (!Number.isFinite(ratio) || ratio < 0.5 || ratio > 6) return this.calibrationFactor
+    // 首次直接采用，之后 EMA 平滑（alpha=0.5），避免单次抖动
+    const alpha = this.calibrationSamples === 0 ? 1 : 0.5
+    const next = this.calibrationFactor * (1 - alpha) + ratio * alpha
+    // 夹紧到 [0.5, 3]：真实 tokenizer 与启发式估算的偏差极少超过 2 倍；
+    // 上限留 3 是给「压缩后分母变小」的场景留余量，同时避免过度压缩历史。
+    this.calibrationFactor = Math.min(3, Math.max(0.5, next))
+    this.calibrationSamples++
+    return this.calibrationFactor
+  }
+
+  /**
+   * 应用校准系数后的消息估算（用于压缩判定 / 展示）。
+   * @param {Array} messages
+   * @returns {number}
+   */
+  estimateMessagesCalibrated(messages) {
+    return Math.ceil(this.estimateMessages(messages) * this.calibrationFactor)
   }
 
   /**

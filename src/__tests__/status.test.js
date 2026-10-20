@@ -40,7 +40,14 @@ function makeEngine(overrides = {}) {
       maxTokens: 128000,
       inputTokens: 0,
       reservedForOutput: 8000,
+      calibrationFactor: 1,
+      calibrationSamples: 0,
       estimateMessages: () => 12345,
+      calibrate(actual, estimated) {
+        this.calibrationFactor = actual / estimated
+        this.calibrationSamples++
+        return this.calibrationFactor
+      },
     },
     costTracker: {
       totalApiCalls: 4,
@@ -108,7 +115,18 @@ test('上下文：报窗口大小、来源、已用 tokens 与占比、压缩触
   const s = base(makeEngine())
   assert.match(s, /窗口\s+: 128\.0K \(内置模型表\)/)
   assert.match(s, /已用\s+: 12,345 tokens \(10% of window\)/)
-  assert.match(s, /压缩触发\s+: 108,800 \(85%\)/)
+  // 压缩触发点口径 = (窗口 - 输出预留) × safetyFactor = (131072 - 8000) × 0.85 = 102,000
+  // （旧实现误用 窗口 × ratio = 108,800，忽略了输出预留）
+  assert.match(s, /压缩触发\s+: 102,000 \(85% of 可用 120\.0K\)/)
+  // 校准系数可见（尚未收到服务端 usage 时显示 ×1.000）
+  assert.match(s, /估算校准\s+: ×1\.000/)
+})
+
+test('上下文：校准系数被服务端 usage 修正后会显示实际倍率', () => {
+  const engine = makeEngine()
+  engine.tokenBudget.calibrate(1500, 1000)   // 实际比估算高 50%
+  const s = base(engine)
+  assert.match(s, /估算校准\s+: ×1\.500（服务端 usage 校正 1 次/)
 })
 
 test('工具循环：报轮数上限与止损机制', () => {

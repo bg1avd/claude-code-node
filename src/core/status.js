@@ -148,15 +148,26 @@ export function buildStatus({
   if (engine?.tokenBudget) {
     const tb = engine.tokenBudget
     const win = tb.maxTokens || 0
-    const used = engine.state?.messages ? tb.estimateMessages(engine.state.messages) : 0
+    const used = engine._estimateContextTokens?.(engine.state?.messages)
+      ?? (engine.state?.messages ? tb.estimateMessages(engine.state.messages) : 0)
     const pct = win > 0 ? Math.min(100, Math.round((used / win) * 100)) : 0
     const reserved = Math.max(tb.reservedForOutput || 0, engine._computeMaxOutputTokens?.() || 0)
     L.push('')
     L.push('【上下文】')
     L.push(`  窗口      : ${formatTokens(win)}${windowSource != null ? ` (${windowSourceLabel(windowSource)})` : ''}${mark(config, 'maxBudgetTokens', config?.get?.('maxBudgetTokens'))}`)
     L.push(`  已用      : ${used.toLocaleString()} tokens (${pct}% of window)`)
+    const cf = tb.calibrationFactor || 1
+    if (Math.abs(cf - 1) > 0.01 || (tb.calibrationSamples || 0) > 0) {
+      L.push(`  估算校准  : ×${cf.toFixed(3)}（服务端 usage 校正 ${tb.calibrationSamples || 0} 次；含 system+tools）`)
+    } else {
+      L.push(`  估算校准  : ×1.000（尚未收到服务端 usage，用启发式估算）`)
+    }
     if (reserved > 0) L.push(`  输出预留  : ${reserved.toLocaleString()}`)
-    L.push(`  压缩触发  : ${cfg.autoCompact === false ? '已关闭 (autoCompact=false)' : `${Math.round(win * (cfg.compressSafetyFactor ?? 0.85)).toLocaleString()} (${Math.round((cfg.compressSafetyFactor ?? 0.85) * 100)}%)`}`)
+    // 压缩触发点 = (窗口 - 输出预留) × safetyFactor —— 与 _ensureFitWindow 口径一致
+    // （旧实现按 win × ratio 显示，忽略了输出预留，显示值偏大）
+    const triggerBase = Math.max(1, win - reserved)
+    const sf = cfg.compressSafetyFactor ?? 0.85
+    L.push(`  压缩触发  : ${cfg.autoCompact === false ? '已关闭 (autoCompact=false)' : `${Math.round(triggerBase * sf).toLocaleString()} (${Math.round(sf * 100)}% of 可用 ${formatTokens(triggerBase)})`}`)
     L.push(`  自动压缩  : ${cfg.autoCompact === false ? '关闭' : '开启'}${mark(config, 'autoCompact', cfg.autoCompact)}`)
     if (cfg.maxMessages > 0) L.push(`  条数折叠  : 超过 ${cfg.maxMessages} 条时折叠${mark(config, 'maxMessages', cfg.maxMessages)}`)
     if (cfg.maxOutputTokens > 0) L.push(`  输出上限  : ${formatTokens(cfg.maxOutputTokens)} (手动指定)${mark(config, 'maxOutputTokens', cfg.maxOutputTokens)}`)

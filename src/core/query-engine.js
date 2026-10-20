@@ -15,6 +15,7 @@ import crypto from 'crypto'
 import { UserMessage, AssistantMessage, ToolCall, ToolResult, SessionState } from '../types/index.js'
 import { parseStream, parseNonStreamResponse } from './streaming.js'
 import { compactMessages, trimToWindow, foldHistoryByCount, trimToolResults } from './compact.js'
+import { estimateTokens } from './token-budget.js'
 import { CostTracker } from './cost-tracker.js'
 import { EnhancedPermissionChecker } from '../security/enhanced-permission.js'
 import { isLocalLlmServer, buildAuthHeaders } from '../utils/index.js'
@@ -193,6 +194,70 @@ export class QueryEngine {
    *   因此压缩触发点提前到 hardLimit × SAFETY_FACTOR（默认 85%），给 tokenization
    *   差异留余量，确保实际请求永远 ≤ 模型窗口。
    */
+  /**
+   * 请求固定开销（system prompt + tools schema）的 token 估算 —— 带缓存。
+   *
+   * 为什么必须算它：旧实现 `estimateMessages(state.messages)` **完全不含**
+   * ① 基础 systemPrompt ② 每轮都要发送的 16 个工具定义（name/description/parameters）。
+   * 这两部分每轮都随请求发送、且是固定量（几万 token 级别），漏算会让压缩判定
+   * 系统性偏松 —— 实测事故里这正是"本地估 719k / 服务端实测 987k"偏差的一部分。
+   *
+   * @returns {number}
+   */
+  _staticOverheadTokens() {
+    if (this._staticOverheadCache != null) return this._staticOverheadCache
+    let total = 0
+    // systemPrompt：非小模型模式下 _buildRequest 会单独作为第一条 system 发送
+    if (!this.config.smallModel && this.config.systemPrompt) {
+      total += estimateTokens(this.config.systemPrompt)
+    }
+    // tools schema：_callLLM 每轮都发送 config.tools（除空数组）
+    const tools = this.config.tools
+    if (Array.isArray(tools) && tools.length) {
+      const schema = tools.map(t => ({
+        type: 'function',
+        function: { name: t.name, description: t.description, parameters: t.parameters },
+      }))
+      total += estimateTokens(JSON.stringify(schema))
+    }
+    // 每条消息的结构开销已由 estimateMessageTokens 的 +10 覆盖，这里不再重复
+    this._staticOverheadCache = total
+    return total
+  }
+
+  /**
+   * 估算「本次请求实际会送出的上下文」token —— 压缩判定与展示统一走这里。
+   *
+   * 口径 = (systemPrompt + tools schema + messages) × 服务端校准系数
+   * 校准系数由 TokenBudget.calibrate() 用 usage.prompt_tokens 持续修正，
+   * 因此换模型/换语言/换厂商都会自动收敛（不再依赖写死的字符/token 比例）。
+   *
+   * @param {Array} [messages] — 默认 this.state.messages
+   * @returns {number}
+   */
+  _estimateContextTokens(messages) {
+    const msgs = messages || this.state.messages || []
+    const raw = this._staticOverheadTokens() + (this.tokenBudget?.estimateMessages(msgs) ?? 0)
+    const factor = this.tokenBudget?.calibrationFactor ?? 1
+    return Math.ceil(raw * factor)
+  }
+
+  /**
+   * 压缩判定用的硬上限（窗口 - 输出预留）。
+   * @returns {{ maxTokens:number, reservedForOutput:number, hardLimit:number }}
+   */
+  _windowLimits() {
+    const maxTokens = this.tokenBudget?.maxTokens || 0
+    // 输出预留取 max(配置预留, 实际输出上限)。实际输出由 _computeMaxOutputTokens 决定
+    // (默认窗口 1/16,如 1M 窗口 → 62500)。若只按 reservedForOutput(默认 8192) 预留,
+    // 压缩判定门槛会偏松,导致 messages + completion 实际超窗(实测 986k+62.5k > 1048576)。
+    const reservedForOutput = Math.max(
+      this.tokenBudget?.reservedForOutput || 0,
+      this._computeMaxOutputTokens()
+    )
+    return { maxTokens, reservedForOutput, hardLimit: Math.max(1, maxTokens - reservedForOutput) }
+  }
+
   _ensureFitWindow() {
     if (!this.tokenBudget) return
     // 自动压缩总开关关闭时，整条压缩链（截断/折叠/摘要/裁剪）都不介入。
@@ -224,19 +289,12 @@ export class QueryEngine {
       }
     }
 
-    const maxTokens = this.tokenBudget.maxTokens
-    // 输出预留取 max(配置预留, 实际输出上限)。实际输出由 _computeMaxOutputTokens 决定
-    // (默认窗口 1/16,如 1M 窗口 → 62500)。若只按 reservedForOutput(默认 8192) 预留,
-    // 压缩判定门槛会偏松,导致 messages + completion 实际超窗(实测 986k+62.5k > 1048576)。
-    const reservedForOutput = Math.max(
-      this.tokenBudget.reservedForOutput || 0,
-      this._computeMaxOutputTokens()
-    )
-    const hardLimit = maxTokens - reservedForOutput
+    const { maxTokens, reservedForOutput, hardLimit } = this._windowLimits()
     // 保守触发阈值：估算到可用窗口的 85% 就开始压缩，避免估算偏差导致实际超窗
     const safetyFactor = this.config.compressSafetyFactor ?? 0.85
     const triggerLimit = Math.max(1, Math.floor(hardLimit * safetyFactor))
-    const est = this.tokenBudget.estimateMessages(this.state.messages)
+    // ★ 口径统一：含 systemPrompt + tools schema，并应用服务端校准系数
+    const est = this._estimateContextTokens(this.state.messages)
     if (est <= triggerLimit) return
 
     // 2) 摘要式压缩优先：用实时估算直接决定是否压缩（不再依赖滞后的 usagePercent）
@@ -244,7 +302,7 @@ export class QueryEngine {
     const summarized = compactMessages(this.state.messages, {
       maxTokens: Math.floor(maxTokens * 0.6),
     })
-    const reEst = this.tokenBudget.estimateMessages(summarized)
+    const reEst = this._estimateContextTokens(summarized)
     if (reEst <= triggerLimit) {
       this.state.messages = summarized
       if (this.config.verbose) console.error(`[compact] Context summarized to fit token budget (${est} → ${reEst}, trigger<${triggerLimit})`)
@@ -266,6 +324,122 @@ export class QueryEngine {
         if (summary) console.error('[compact] 被裁剪历史已压缩为摘要保留：\n' + summary)
       }
     }
+  }
+
+  /**
+   * 用一次成功响应的 usage.prompt_tokens 校准本地估算系数。
+   *
+   * @param {object} usage — 厂商返回的 usage
+   * @param {number} rawSendEstimate — 发送前本地估算（含 system+tools，未乘系数）
+   */
+  _calibrateFromUsage(usage, rawSendEstimate) {
+    if (!usage || !this.tokenBudget) return
+    const actual = usage.prompt_tokens ?? usage.input_tokens ?? 0
+    if (!(actual > 0) || !(rawSendEstimate > 0)) return
+    const before = this.tokenBudget.calibrationFactor
+    const after = this.tokenBudget.calibrate(actual, rawSendEstimate)
+    if (this.config.verbose && Math.abs(after - before) > 0.001) {
+      console.error(`[calib] 服务端 ${actual.toLocaleString()} / 本地 ${rawSendEstimate.toLocaleString()} → 系数 ${after.toFixed(3)}`)
+    }
+  }
+
+  /**
+   * 判断错误是否为「上下文超窗」（各厂商文案不同，见下）。
+   * 命中后走 _forceCompactForOverflow() 自愈，而不是把 400 直接抛给用户。
+   */
+  _isContextOverflowError(message) {
+    if (!message) return false
+    return /maximum context length|context[_\s-]?length[_\s-]?exceeded|reduce the length of the (messages|prompt)|prompt is too long|exceeds? the (maximum )?context|too many tokens|context window|上下文.{0,8}(过长|太长|超|溢)|(过长|太长).{0,8}上下文|超出.{0,8}(上下文|最大长度|模型长度)/i
+      .test(String(message))
+  }
+
+  /**
+   * 从厂商报错里解析「服务端实测的输入 token 数」（拿不到返回 0）。
+   *
+   * OpenAI 系典型文案：
+   *   This model's maximum context length is 1048576 tokens. However, you requested
+   *   1049296 tokens (986796 in the messages, 62500 in the completion).
+   * → 优先取 "in the messages"（输入部分），其次取 "requested N tokens"（含输出）。
+   */
+  _parseOverflowActualTokens(message) {
+    if (!message) return 0
+    const s = String(message)
+    const num = (x) => Number(String(x).replace(/[^\d]/g, '')) || 0
+    const inMsg = s.match(/\(\s*([\d,]+)\s+in\s+the\s+messages/i)
+    if (inMsg) return num(inMsg[1])
+    const requested = s.match(/requested\s+([\d,]+)\s+tokens/i)
+    if (requested) return num(requested[1])
+    const anyMsg = s.match(/([\d,]+)\s+tokens?\s+(?:in\s+)?(?:the\s+)?messages/i)
+    if (anyMsg) return num(anyMsg[1])
+    return 0
+  }
+
+  /**
+   * 强制压缩到「安全水位」—— API 已明确报超窗时的自愈动作。
+   *
+   * 与 _ensureFitWindow 的区别：这里**不再判断"需不需要"**，无条件压到
+   * hardLimit 的 50%（给估算误差留一倍余量），并用服务端真值强校一次系数。
+   *
+   * @param {number} [actualInputTokens] — 服务端实测输入 token（0 = 未解析到）
+   * @returns {{ before:number, after:number, target:number }}
+   */
+  _forceCompactForOverflow(actualInputTokens = 0) {
+    const { maxTokens, hardLimit } = this._windowLimits()
+    const before = this._estimateContextTokens(this.state.messages)
+    // 目标水位：硬上限的一半（危机场景宁可多丢，也要保证请求能发出去）
+    const target = Math.max(1000, Math.floor(hardLimit * 0.5))
+
+    // ① 先用服务端真值强校系数（分母用"未经校准的本地估算"，口径含 system+tools）
+    if (this.tokenBudget && actualInputTokens > 0) {
+      const rawEst = this._staticOverheadTokens() + (this.tokenBudget.estimateMessages(this.state.messages) || 0)
+      const factor = this.tokenBudget.calibrate(actualInputTokens, rawEst)
+      if (this.config.verbose) {
+        console.error(`[compact] 校准系数更新为 ${factor.toFixed(3)}（服务端实测 ${actualInputTokens.toLocaleString()} / 本地估算 ${rawEst.toLocaleString()}）`)
+      }
+    }
+    const factor = this.tokenBudget?.calibrationFactor ?? 1
+    // trimToWindow / compactMessages 内部用**未校准**估算，故目标要除以系数
+    const rawTarget = Math.max(200, Math.floor(target / factor))
+
+    // ② 摘要压缩（compactMessages 内部用未校准估算）
+    const summarized = compactMessages(this.state.messages, {
+      maxTokens: rawTarget,
+      keepRecentTurns: 2,   // 危机场景保留更少
+    })
+    let after = this._estimateContextTokens(summarized)
+    // ⚠️ 摘要可能"越压越大"：小窗口下 generateSummary 生成的摘要本身就比被丢弃的
+    //    内容还长（实测 1,207 → 1,724）。这种情况直接放弃摘要，改用滑动窗口裁剪。
+    const summaryHelps = after < before
+    if (summaryHelps) {
+      this.state.messages = summarized
+    } else if (this.config.verbose) {
+      console.error(`[compact] 摘要压缩不划算（${before.toLocaleString()} → ${after.toLocaleString()}），改用滑动窗口裁剪`)
+    }
+    after = this._estimateContextTokens(this.state.messages)
+
+    // ③ 仍超 → 滑动窗口裁剪（先保留摘要，极端情况再放弃摘要）
+    if (after > target) {
+      for (const keepSummary of [true, false]) {
+        const res = trimToWindow(this.state.messages, {
+          tokenBudget: this.tokenBudget,
+          maxTokens,
+          keepSummary,
+          limitOverride: rawTarget,
+        })
+        if (res?.trimmed && Array.isArray(res.messages)) {
+          this.state.messages = res.messages
+          after = this._estimateContextTokens(this.state.messages)
+          if (after <= target) break
+        }
+      }
+    }
+
+    console.error(
+      `[compact] ⚠️ API 报上下文超窗 → 已强制压缩 ` +
+      `(${before.toLocaleString()} → ${after.toLocaleString()} tokens，目标 ≤ ${target.toLocaleString()}` +
+      `${actualInputTokens ? `，服务端实测 ${actualInputTokens.toLocaleString()}` : ''})`
+    )
+    return { before, after, target }
   }
 
   /**
@@ -850,11 +1024,16 @@ export class QueryEngine {
     let lastError = null
     let strippedImagesOnce = false // 图片降级只做一次，防止剥离后仍报同样错误时死循环
     let strippedThinkingOnce = false // 思考参数被拒时剥离重试（同样只做一次）
+    let compactedForOverflow = false // 超窗自愈只做一次，防止压缩后仍超窗时死循环
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         if (this.abortController?.signal?.aborted) {
           throw new Error('请求已取消')
         }
+
+        // 记录「本次实际发送」的本地估算（校准基准；含 system+tools，未乘校准系数）
+        const rawSendEstimate = this._staticOverheadTokens() +
+          (this.tokenBudget?.estimateMessages(messages) ?? 0)
 
         const response = await fetch(url, {
           method: 'POST',
@@ -877,7 +1056,22 @@ export class QueryEngine {
             await new Promise(r => setTimeout(r, waitMs))
             continue
           }
-          throw new Error(`API 错误 ${response.status}: ${errText}`)
+          // ★ 上下文超窗自愈（v3.6.20）
+          // 本地估算是启发式的，必然存在偏差（实测低估 27%）；一旦偏差导致实际请求超窗，
+          // 厂商会回 400 并附上**真实 token 数**。这里不再把 400 甩给用户，而是：
+          //   解析真值 → 强校校准系数 → 强制压缩到安全水位 → 重建请求体 → 重试一次。
+          const apiErr = `API 错误 ${response.status}: ${errText}`
+          if (!compactedForOverflow && this.tokenBudget && this._isContextOverflowError(errText)) {
+            compactedForOverflow = true
+            const actual = this._parseOverflowActualTokens(errText)
+            this._forceCompactForOverflow(actual)
+            // 重建请求体（历史已变），并重算输出上限
+            messages = this._buildRequest(this.state.messages)
+            body.messages = messages
+            body.max_tokens = this._computeMaxOutputTokens()
+            continue
+          }
+          throw new Error(apiErr)
         }
 
         // 流式或非流式处理
@@ -889,6 +1083,7 @@ export class QueryEngine {
           }
           if (this.tokenBudget && result.usage) {
             this.tokenBudget.recordUsage(result.usage)
+            this._calibrateFromUsage(result.usage, rawSendEstimate)
           }
           return result
         } else {
@@ -900,6 +1095,7 @@ export class QueryEngine {
           }
           if (this.tokenBudget && result.usage) {
             this.tokenBudget.recordUsage(result.usage)
+            this._calibrateFromUsage(result.usage, rawSendEstimate)
           }
           return result
         }

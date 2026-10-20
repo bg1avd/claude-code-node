@@ -1254,10 +1254,11 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
           const arg = rest[0] ? rest.join(' ').trim() : ''
           if (!arg) {
             // 无参数：显示当前窗口 + 真实 context 用量
-            // 用实时估算（estimateMessages）反映"当前 context 填充了多少窗口"，
+            // 用实时估算（含 system+tools+校准系数）反映"当前 context 填充了多少窗口"，
             // 而非依赖 usage 上报的 inputTokens——本地网关不返回 usage 时
             // inputTokens 恒为 0，无法反映真实填充情况。
-            const estTokens = engine.tokenBudget.estimateMessages(engine.state.messages)
+            const estTokens = engine._estimateContextTokens?.(engine.state.messages)
+              ?? engine.tokenBudget.estimateMessages(engine.state.messages)
             const windowTokens = engine.tokenBudget.maxTokens
             // 预留取 max(配置预留, 实际输出上限)，与实际请求口径一致
             const reserved = Math.max(
@@ -1499,10 +1500,15 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
         case 'budget': {
           console.log(tokenBudget.format())
           // 追加实时估算的 context 用量（本地网关不返回 usage 时 inputTokens 为 0，无法反映真实填充）
-          const estTokens = engine.tokenBudget.estimateMessages(engine.state.messages)
+          const estTokens = engine._estimateContextTokens?.(engine.state.messages)
+            ?? engine.tokenBudget.estimateMessages(engine.state.messages)
           const winTk = engine.tokenBudget.maxTokens
           const pct = winTk > 0 ? Math.min(100, Math.round((estTokens / winTk) * 100)) : 0
           console.log(`  Context (est): ${estTokens.toLocaleString()} / ${winTk.toLocaleString()} (${pct}% of window)`)
+          const cf = tokenBudget.calibrationFactor || 1
+          if (Math.abs(cf - 1) > 0.01) {
+            console.log(`  估算校准: ×${cf.toFixed(3)}（已用服务端 usage 校正 ${tokenBudget.calibrationSamples || 0} 次）`)
+          }
           console.log(`Context window: ${formatTokens(tokenBudget.maxTokens)} (${windowSourceLabel(windowSource)}) | trigger: ${Math.round((tokenBudget.maxTokens * 0.8)).toLocaleString()} (80%)`)
           break
         }
@@ -1567,24 +1573,38 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
           break
         case 'compact': {
           if (engine.tokenBudget) {
-            // 手动压缩：用实时 token 估算判断是否需要压缩（而非滞后的 usagePercent），
-            // 用户主动触发时总能真正压缩。
-            // 门槛预留取 max(配置预留, 实际输出上限 _computeMaxOutputTokens)，与实际请求口径一致。
-            const reserved = Math.max(
-              engine.tokenBudget.reservedForOutput || 0,
-              engine._computeMaxOutputTokens?.() || 0
-            )
-            const limit = engine.tokenBudget.maxTokens - reserved
-            const est = engine.tokenBudget.estimateMessages(engine.state.messages)
-            if (est > limit) {
+            // 手动压缩：**用户主动敲了命令，就应该真的压缩**。
+            //
+            // v3.6.20 修正：旧实现在「估算 ≤ 上限」时直接回 "no compression needed"，
+            // 而估算是启发式的、可能严重偏低（实测事故：本地估 719k / 服务端实测 987k）。
+            // 结果就是：用户眼看要被超窗卡住、主动敲 /compact，却被告知"不需要压缩"，
+            // 紧接着下一条消息就撞 400。现在改为：
+            //   · 估算已超硬上限 → 直接压（原行为）
+            //   · 估算 ≥ 硬上限 40% → 也压（用户主动要求，且已接近危险区）
+            //   · 极短会话（< 40%）→ 才提示无需压缩
+            const { maxTokens, hardLimit } = engine._windowLimits?.()
+              ?? { maxTokens: engine.tokenBudget.maxTokens, hardLimit: engine.tokenBudget.maxTokens }
+            const est = engine._estimateContextTokens?.(engine.state.messages)
+              ?? engine.tokenBudget.estimateMessages(engine.state.messages)
+            const cf = engine.tokenBudget.calibrationFactor || 1
+            const calibNote = Math.abs(cf - 1) > 0.01 ? `，校准 ×${cf.toFixed(2)}` : ''
+
+            if (est > hardLimit * 0.4) {
+              const before = est
               const messages = compactMessages(engine.state.messages, {
-                maxTokens: Math.floor(engine.tokenBudget.maxTokens * 0.6),
+                maxTokens: Math.floor(maxTokens * 0.5),
                 keepRecentTurns: 4,
               })
               engine.state.messages = messages
-              console.log(`✅ Context compressed (${est} → ${engine.tokenBudget.estimateMessages(messages)} tokens)`)
+              const after = engine._estimateContextTokens?.(messages)
+                ?? engine.tokenBudget.estimateMessages(messages)
+              console.log(`✅ Context compressed (${before.toLocaleString()} → ${after.toLocaleString()} tokens${calibNote})`)
+              // 压缩后仍逼近上限 → 再走一次滑动窗口裁剪兜底
+              if (after > hardLimit * 0.8) {
+                engine._forceCompactForOverflow?.(0)
+              }
             } else {
-              console.log(`ℹ️  Context within window (${est}/${limit} tokens), no compression needed`)
+              console.log(`ℹ️  Context is small (${est.toLocaleString()}/${hardLimit.toLocaleString()} tokens${calibNote}), nothing to compress`)
             }
           } else {
             console.log('Token budget not configured')
