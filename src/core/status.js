@@ -13,6 +13,7 @@
  */
 import { formatTokens, windowSourceLabel } from './context-window.js'
 import { buildThinkingParams, describeThinking } from './thinking-adapter.js'
+import { normalizePermissionMode, PERMISSION_MODES_HELP } from './permission-mode.js'
 
 /** 已知默认值（用于标注"已改"）。与 config.js DEFAULTS 中对外可调的键保持同步。 */
 const KNOWN_DEFAULTS = {
@@ -114,7 +115,13 @@ export function buildStatus({
   L.push(`  API Base  : ${cfg.apiBase || '(未设置)'}${mark(config, 'apiBase', cfg.apiBase)}`)
   L.push(`  API Key   : ${maskKey(cfg.apiKey)}`)
   L.push(`  流式      : ${cfg.noStream ? '关闭 (--no-stream)' : '开启'}`)
-  L.push(`  权限模式  : ${cfg.permissionMode || 'ask'}${mark(config, 'permissionMode', cfg.permissionMode)}`)
+  // 权限模式：只显示合法值（all/ask/deny）；非法值必须明确标出并说明回退行为，
+  // 否则用户会以为配置生效了（v3.6.21 修复的正是这个坑）。
+  const _perm = normalizePermissionMode(cfg.permissionMode)
+  let _permText = _perm.mode
+  if (!_perm.valid) _permText += `  ⚠️ 非法值 ${JSON.stringify(_perm.provided)}，按 ${_perm.mode} 处理（合法值：${PERMISSION_MODES_HELP}）`
+  else if (_perm.legacy) _permText += `  （旧写法 ${JSON.stringify(_perm.provided)} → ${_perm.mode}）`
+  L.push(`  权限模式  : ${_permText}${mark(config, 'permissionMode', _perm.mode)}`)
   if (cfg.smallModel) L.push('  小模型模式: 开启 (每轮清空 LLM 端缓存)')
 
   // ---------- 思考深度 ----------

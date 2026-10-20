@@ -2,10 +2,13 @@
  * 权限检查器
  * 对应原版: src/hooks/toolPermission/ + src/Tool.ts 中的 ToolPermissionContext
  */
+import { normalizePermissionMode } from '../core/permission-mode.js'
 
 export class PermissionChecker {
   constructor(mode = 'ask') {
-    this.mode = mode // 'always-allow' | 'ask' | 'deny'
+    // 对外只认 all / ask / deny（旧值 always-allow 兼容映射为 all）
+    this.mode = normalizePermissionMode(mode).mode // 'all' | 'ask' | 'deny'
+    this.rawMode = mode
     this.alwaysAllow = new Set()
     this.alwaysDeny = new Set()
     this.askRules = new Set()
@@ -16,7 +19,7 @@ export class PermissionChecker {
    * 检查工具调用是否被允许
    */
   async check(toolName, input = {}) {
-    if (this.mode === 'always-allow' || this.sessionAllowAll) return true
+    if (this.mode === 'all' || this.sessionAllowAll) return true
     if (this.mode === 'deny') return false
 
     if (this.alwaysAllow.has(toolName)) return true

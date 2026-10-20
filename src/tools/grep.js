@@ -117,5 +117,5 @@ Usage:
 
     return result
   },
-  'always-allow'
+  'all'
 )

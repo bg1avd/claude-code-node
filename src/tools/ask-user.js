@@ -44,5 +44,5 @@ Use this when you need clarification or user input to proceed.`,
     // 优先级 3：非 CLI 模式 — 返回提示信息，不阻塞
     return `[AskUserQuestion: ${input.question} (no interactive terminal available)]`
   },
-  'always-allow'
+  'all'
 )

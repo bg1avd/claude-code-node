@@ -85,7 +85,7 @@ export class ToolDef {
   description
   parameters // JSON Schema
   handler
-  permissionLevel // 'always-allow' | 'ask' | 'deny'
+  permissionLevel // 'all' | 'ask' | 'deny'
 
   constructor(name, description, parameters, handler, permissionLevel = 'ask') {
     this.name = name

@@ -21,6 +21,7 @@ import { loadMcpToolsFromConfig, closeMcpTools } from '../mcp/loadTools.js'
 import { loadCustomTools } from '../tools/loadCustomTools.js'
 import { SessionManager } from './session.js'
 import { Config } from './config.js'
+import { normalizePermissionMode, permissionModeWarning, PERMISSION_MODES_HELP } from './permission-mode.js'
 import { TokenBudget } from './token-budget.js'
 import { ChannelManager } from '../channel/index.js'
 import { CostTracker } from './cost-tracker.js'
@@ -379,10 +380,13 @@ function parseArgs(argv) {
     // 注意：必须默认空串！若硬编码具体模型名会遮蔽 config.get('model')（优先级链失效）
     model: '',
     systemPrompt: '',
-    permissionMode: 'ask',
+    // 同理必须空串：写死 'ask' 会让 config 里的 permissionMode **永远失效**
+    // （v3.6.21 修的正是这个 —— 用户改了配置却始终显示 ask）
+    permissionMode: '',
     maxTurns: null,          // 未指定 -> 由 config.maxTurns 决定（默认 0 = 不限制）
     verbose: false,
-    apiBase: 'https://api.deepseek.com/v1',
+    // 同理必须空串：写死默认地址会遮蔽 config 里的 apiBase
+    apiBase: '',
     resume: null,
     noStream: false,
     maxMessages: 0,
@@ -423,7 +427,7 @@ function parseArgs(argv) {
 Options:
   -m, --model NAME          Model to use
   -s, --system-prompt TEXT  System prompt（优先级: -s > config systemPrompt > 内置默认；config 的 preferences.* 会自动追加为补充提示）
-  -p, --permission-mode     Permission mode: ask|always-allow|deny
+  -p, --permission-mode     Tool permission: all | ask | deny (default: ask)
   -t, --max-turns N         Max tool loop turns (default: 0 = unlimited)
   --api-base URL            API base URL
   --api-key ***             API key (or set LLM_API_KEY env)
@@ -640,7 +644,10 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
   if (dreamContext) {
     systemPrompt = `${systemPrompt}\n\n${dreamContext}`
   }
-  const permissionMode = cliArgs.permissionMode || config.get('permissionMode')
+  // 权限模式：对外只认 all / ask / deny（旧值 always-allow 自动兼容并提示）。
+  // 非法值回退 ask 并明确告警 —— 绝不静默降级（v3.6.21）。
+  const _permInfo = normalizePermissionMode(cliArgs.permissionMode || config.get('permissionMode'))
+  const permissionMode = _permInfo.mode
   // 0 = 不限制，是合法值 -> 必须用 ?? 而不是 ||（否则 0 会被当成未设置）
   const maxTurns = cliArgs.maxTurns != null ? cliArgs.maxTurns : (config.get('maxTurns') ?? 0)
   let apiKey = cliArgs.apiKey || config.get('apiKey') || ''
@@ -2072,6 +2079,11 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
     // 无论 text 还是 reasoning，都实时推送到 Telegram（节流）
     tgThinkingPush(text)
   }
+
+  // 配置校验告警（权限模式非法值 / 疑似写错的配置键）— 启动时一次性说清楚，绝不静默
+  const _permWarn = permissionModeWarning(_permInfo)
+  if (_permWarn) console.log(_permWarn)
+  for (const w of config.suspiciousKeys()) console.log(w)
 
   console.log(buildBanner({ model, permissionMode, session, maxTokens: tokenBudget.maxTokens }))
   console.log(`Model: ${model} | Permission: ${permissionMode} | Tools: ${registry.getNames().join(', ')}`)

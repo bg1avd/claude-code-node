@@ -38,6 +38,10 @@ const DEFAULTS = {
   // 单次请求内工具循环轮数上限：0 = 不限制（默认）
   maxTurns: 0,
   maxBudgetTokens: 1_000_000,
+  // 工具调用权限：all | ask | deny（只有这三个；写别的会告警并回退 ask）
+  //   all  — 自动允许全部（仍受安全策略约束：命令黑名单、路径/SSRF 检查）
+  //   ask  — 每次工具调用需确认（默认）
+  //   deny — 全部拒绝
   permissionMode: 'ask',
   verbose: false,
   apiKey: '',
@@ -122,6 +126,53 @@ const DEFAULTS = {
   mcp: {
     servers: {},
   },
+}
+
+/**
+ * 配置自说明 —— 写进配置文件模板的 `description` 段。
+ *
+ * 为什么要有它：用户改配置时**不应去翻 README 或猜键名/取值**。
+ * 每一项都写成「取值 / 默认 / 示例」，配置文件自己就是说明书。
+ * `description` 是纯文档，加载器忽略；真正生效的是与它同级的键。
+ */
+const CONFIG_DESCRIPTION_ZH = {
+  _readme: '本段是配置说明（加载器忽略它），真正生效的是与它同级的各个键。每项格式为「取值 / 默认 / 示例」。',
+  identity: '可选。本目录 AI 的角色与行为准则（自由文本，可多段，用 ## 分节）。默认空 = 只用机器级基线（~/.claude-code/config.json 的 identity）。',
+  systemPrompt: '可选。填了 = 整体替换内置默认提示词（一般别动）。',
+  permissionMode: '工具调用权限。取值只有三个：all = 自动允许全部（仍受安全策略约束：命令黑名单、路径/SSRF 检查）；ask = 每次确认（默认）；deny = 全部拒绝。写其它值会告警并回退 ask。示例："permissionMode": "all"',
+  thinking: '思考深度。mode = auto | off | on（默认 auto）；effort = none | minimal | low | medium | high | xhigh | max（按厂商裁剪：如 Kimi 只认 low/high/max）；budgetTokens > 0 时改用 token 预算。示例：{"mode": "on", "effort": "high"}。运行时命令：/thinking',
+  maxTurns: '单次请求内的工具循环上限。0 = 不限制（默认）；> 0 时到 80% 会提醒模型收尾。真卡住由「无进展检测」兜底。运行时命令：/max-turns',
+  maxBudgetTokens: '上下文窗口大小（tokens）。0 = 按模型自动探测；也可写 128000 或 "1m" / "128k"。运行时命令：/window',
+  autoContinue: '启动时自动续接上一次会话。默认 true；false = 每次全新会话。',
+  autoCompact: '接近窗口上限时自动压缩上下文。默认 true。',
+  softkeys: '输入区下方的软键提示行。默认 true；false = 关闭；动作名数组 = 只显示指定动作。',
+  keybindings: '按键绑定覆盖（动作 → 键列表）。数组 = 替换默认绑定；null 或 [] = 解绑。默认：Enter = 折行、Ctrl+S = 发送。想恢复 Enter 发送：{"submit": ["enter"], "newline": ["ctrl+j", "alt+enter"]}。运行时命令：/keys',
+  model: '模型名。默认 deepseek-flash。运行时命令：/model',
+  apiBase: 'OpenAI 兼容接口地址。示例：https://api.deepseek.com/v1',
+  apiKey: '接口密钥。建议放在用户级配置 ~/.claude-code/config.json，不要提交进 git。',
+  channels: '消息通道（telegram / qqbot 等）。',
+  mcp: 'MCP 服务器（外部工具）。示例：{"servers": {"search": {"type": "http", "url": "http://127.0.0.1:7397/mcp"}}}',
+  preferences: '追加到系统提示的用户偏好，例如 {"thinking_language": "中文"}。',
+}
+
+const CONFIG_DESCRIPTION_EN = {
+  _readme: 'This section documents the config (the loader ignores it). The keys beside it are what actually take effect. Format: values / default / example.',
+  identity: 'Optional. Role and behavior rules for the AI in this directory (free text, may use "## " sections). Empty = use only the machine-level baseline (~/.claude-code/config.json "identity").',
+  systemPrompt: 'Optional. If set, fully replaces the built-in default system prompt (usually leave untouched).',
+  permissionMode: 'Tool permission. Exactly three values: all = allow everything (safety checks still apply: command blocklist, path/SSRF checks); ask = confirm every call (default); deny = reject everything. Any other value triggers a warning and falls back to ask. Example: "permissionMode": "all"',
+  thinking: 'Reasoning depth. mode = auto | off | on (default auto); effort = none | minimal | low | medium | high | xhigh | max (clamped per provider, e.g. Kimi only accepts low/high/max); budgetTokens > 0 switches to a token budget. Example: {"mode": "on", "effort": "high"}. Runtime: /thinking',
+  maxTurns: 'Max tool-loop turns per request. 0 = unlimited (default); when > 0 the model is nudged to wrap up at 80%. Real stalls are caught by no-progress detection. Runtime: /max-turns',
+  maxBudgetTokens: 'Context window size in tokens. 0 = auto-detect from the model; also accepts 128000 or "1m" / "128k". Runtime: /window',
+  autoContinue: 'Automatically resume the previous session on startup. Default true; false = always start a new session.',
+  autoCompact: 'Automatically compress context near the window limit. Default true.',
+  softkeys: 'Soft-key hint line below the input area. Default true; false = off; array of action names = show only those.',
+  keybindings: 'Key binding overrides (action -> keys). An array replaces the default binding; null or [] unbinds. Defaults: Enter = newline, Ctrl+S = submit. To restore Enter-to-send: {"submit": ["enter"], "newline": ["ctrl+j", "alt+enter"]}. Runtime: /keys',
+  model: 'Model name. Default: deepseek-flash. Runtime: /model',
+  apiBase: 'OpenAI-compatible endpoint, e.g. https://api.deepseek.com/v1',
+  apiKey: 'API key. Prefer the user-level config ~/.claude-code/config.json; never commit it to git.',
+  channels: 'Messaging channels (telegram / qqbot, ...).',
+  mcp: 'MCP servers (external tools). Example: {"servers": {"search": {"type": "http", "url": "http://127.0.0.1:7397/mcp"}}}',
+  preferences: 'User preferences appended to the system prompt, e.g. {"thinking_language": "Chinese"}.',
 }
 
 export class Config {
@@ -247,17 +298,11 @@ export class Config {
     const zh = /zh|中文|chinese|\bcn\b/i.test(String(language || ''))
     const template = zh
       ? {
-          description: {
-            identity: '可选。本目录 AI 扮演的角色与行为准则（自由文本，可多段，用 ## 分节）。留空 = 只用机器级基线（~/.claude-code/config.json 的 identity）。',
-            systemPrompt: '可选。填了 = 整体替换内置默认提示词（一般别动）。',
-          },
+          description: CONFIG_DESCRIPTION_ZH,
           identity: '',
         }
       : {
-          description: {
-            identity: 'Optional. The role & behavior rules the AI plays in this directory (free text; may use "## " sections). Empty = use only the machine-level baseline (~/.claude-code/config.json "identity").',
-            systemPrompt: 'Optional. If set, fully replaces the built-in default system prompt (usually leave untouched).',
-          },
+          description: CONFIG_DESCRIPTION_EN,
           identity: '',
         }
 
@@ -321,9 +366,46 @@ export class Config {
     return current
   }
 
+  /**
+   * 找出「写错了的顶层配置键」并给出提示。
+   *
+   * 背景（v3.6.21）：配置文件里的未知键此前被完全静默忽略 ——
+   * 用户写 `"permission": "all"`（少了 Mode）、以为权限已放开，实际毫无效果且无任何提示。
+   * 这里在启动时把这类键逐个报出来，并对相近的已知键给出猜测。
+   *
+   * @returns {string[]} 每个元素是一行可直接打印的告警（无问题则返回空数组）
+   */
+  suspiciousKeys() {
+    const KNOWN = new Set([
+      ...Object.keys(DEFAULTS),
+      // 未出现在 DEFAULTS 里但合法/由模板生成的键
+      'identity', 'systemPrompt', 'description',
+      'channels', 'defaultChannel', 'mcp', 'preferences', 'tools',
+      'scheduler', 'web', 'notify', 'tui', 'providers',
+    ])
+    const LEVEL_LABEL = {
+      user: '用户级 ~/.claude-code/config.json',
+      project: '项目级 .claude-code/config.json',
+    }
+    const out = []
+    for (const [level, data] of Object.entries(this._raw || {})) {
+      if (!data || typeof data !== 'object' || Array.isArray(data)) continue
+      for (const key of Object.keys(data)) {
+        if (KNOWN.has(key)) continue
+        const suggestion = _nearestConfigKey(key, KNOWN)
+        const where = LEVEL_LABEL[level] || level
+        out.push(
+          suggestion
+            ? `⚠️  配置键 "${key}"（${where}）未被识别 → 是否想写 "${suggestion}"？当前该键不生效。`
+            : `⚠️  配置键 "${key}"（${where}）未被识别，当前不生效。可用键见 README「配置项」。`
+        )
+      }
+    }
+    return out
+  }
+
   /** 设置配置值 */
-  set(key, value) {
-    const parts = key.split('.')
+  set(key, value) {    const parts = key.split('.')
     let current = this.data
     for (let i = 0; i < parts.length - 1; i++) {
       if (current[parts[i]] == null) current[parts[i]] = {}
@@ -356,4 +438,77 @@ export class Config {
   toJSON() {
     return { ...this.data }
   }
+}
+
+// ============================================================
+// 配置键拼写校验（供 Config#suspiciousKeys 使用）
+// ============================================================
+
+/** 编辑距离（Levenshtein），仅用于短键名，长度都很小 */
+function _levenshtein(a, b) {
+  if (a === b) return 0
+  const m = a.length
+  const n = b.length
+  if (!m) return n
+  if (!n) return m
+  let prev = Array.from({ length: n + 1 }, (_, j) => j)
+  let cur = new Array(n + 1)
+  for (let i = 1; i <= m; i++) {
+    cur[0] = i
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+    }
+    const t = prev
+    prev = cur
+    cur = t
+  }
+  return prev[n]
+}
+
+/** 最长公共前缀长度 */
+function _commonPrefixLen(a, b) {
+  const n = Math.min(a.length, b.length)
+  let i = 0
+  while (i < n && a[i] === b[i]) i++
+  return i
+}
+
+/**
+ * 为一个「写错的配置键」猜测最可能的正确键名。
+ * 规则（从严到宽，命中即返回）：
+ *   1) 互为前缀（permission → permissionMode）
+ *   2) 编辑距离 ≤ 2（modle → model）
+ *   3) 公共前缀 ≥ 5 且 ≥ 两个词较短者长度的 60%（permissionLevel → permissionMode）
+ * @returns {string|null}
+ */
+function _nearestConfigKey(key, knownSet) {
+  const k = String(key).toLowerCase()
+  let best = null
+  let bestScore = Infinity
+
+  for (const cand of knownSet) {
+    const c = String(cand).toLowerCase()
+    if (c === k) return cand
+
+    // 1) 互为前缀
+    if (c.startsWith(k) || k.startsWith(c)) {
+      const score = Math.abs(c.length - k.length)
+      if (score < bestScore) { bestScore = score; best = cand }
+      continue
+    }
+
+    // 2) 编辑距离
+    const dist = _levenshtein(k, c)
+    if (dist <= 2 && dist < bestScore) { bestScore = dist; best = cand; continue }
+
+    // 3) 长公共前缀
+    const cp = _commonPrefixLen(k, c)
+    const shorter = Math.min(k.length, c.length)
+    if (cp >= 5 && shorter > 0 && cp / shorter >= 0.6) {
+      const score = 3 + (shorter - cp) // 劣于规则 1/2
+      if (score < bestScore) { bestScore = score; best = cand }
+    }
+  }
+  return best
 }

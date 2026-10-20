@@ -101,5 +101,5 @@ Usage:
       return `[Error reading file: ${err.message}]`
     }
   },
-  'always-allow'
+  'all'
 )

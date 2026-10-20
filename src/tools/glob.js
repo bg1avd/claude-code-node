@@ -109,5 +109,5 @@ Usage:
 
     return matches.join('\n')
   },
-  'always-allow'
+  'all'
 )

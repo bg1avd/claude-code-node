@@ -1,5 +1,50 @@
 # CHANGELOG
 
+## 3.6.21
+
+### 🐛 权限开关：只认 `all | ask | deny`，写错立刻被告知（不再让人猜）
+
+**用户的指控（完全成立）**：
+
+> 你弹出什么提示就应该写什么开关，写别的就是让人猜。
+> 你让人选的就 all，还有 ask 之类的，就以这个为开关，写别的就是错的。
+
+交互提示里一直写着 `a = 本会话全部允许`、`/allow all`，但配置里却要求写
+`always-allow` —— 同一个概念两个名字，用户改了配置也不生效，只能靠猜。
+
+### 根因（三层，全部实测确认）
+
+1. **默认值遮蔽（最致命）**：`parseArgs()` 里 `permissionMode: 'ask'` 是硬编码默认值，
+   而取值逻辑是 `cliArgs.permissionMode || config.get('permissionMode')` ——
+   非空默认值让 **config 里的 permissionMode 永远失效**。
+   → 这就是"我明明改了配置，`/status` 还是 ask"的真正原因。
+   （同一处 `apiBase: 'https://api.deepseek.com/v1'` 也有同样问题：配置里的 apiBase 被遮蔽。）
+2. **非法值静默降级**：写 `all` / `allow` / `auto` 时，权限检查器不匹配任何分支，
+   直接落到 ask 分支 —— **不报错、不提示**，用户以为已开启。
+3. **未知键静默忽略**：写成 `"permission": "all"`（少了 Mode）时，配置里这个键
+   从头到尾没人看 —— 同样没有任何提示。
+
+### 修复
+
+- **开关收敛为三个值**：`all` / `ask` / `deny`（与交互提示、`/allow all` 完全一致）
+- **默认值遮蔽修复**：`permissionMode` 与 `apiBase` 的 CLI 默认值改为空串，
+  config 值重新生效
+- **非法值绝不静默**：回退 `ask` 并在启动时告警，列出合法值：
+  `⚠️ permissionMode="allow" 无效，已回退为 "ask"。合法值：all | ask | deny`
+- **旧值兼容**：`always-allow`（3.6.20 及以前）仍可用，但会提示改成 `all`
+- **配置键拼写校验**：未知顶层键启动时逐个报出，相近的给出建议
+  `⚠️ 配置键 "permission" 未被识别 → 是否想写 "permissionMode"？`
+- **`/status`**：只显示合法值；非法值标注 `⚠️ 非法值 "x"，按 ask 处理`
+- **配置模板自带说明**：新建项目配置的 `description` 段完整写明每个开关的
+  「取值 / 默认 / 示例」（permissionMode / thinking / maxTurns / maxBudgetTokens /
+  keybindings / softkeys / autoContinue / autoCompact …），配置文件自己就是说明书
+- 工具默认权限级别、README、mermaid 流程图、`--help` 全部统一为 `all`
+
+### 测试
+
+新增 13 例（552 总用例全绿）：合法值 / 大小写归一化 / 旧值 legacy / 六种非法值 /
+检查器行为（all 放行、ask 要求确认、非法回退）/ 键名拼写建议 / 模板自说明。
+
 ## 3.6.20
 
 ### 🐛 上下文超窗（API 400）自愈 + 估算校准

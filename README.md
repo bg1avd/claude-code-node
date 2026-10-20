@@ -93,9 +93,18 @@ printf '{"jsonrpc":"2.0","id":1,"method":"initialize"}\n' | cc-node --stdio
 
 | 模式 | 说明 |
 |------|------|
-| `ask` | 每次工具调用需确认（安全，推荐） |
-| `always-allow` | 自动允许所有工具调用（仍受安全策略约束） |
+| `all` | 自动允许所有工具调用（仍受安全策略约束：命令黑名单、路径/SSRF 检查） |
+| `ask` | 每次工具调用需确认（安全，推荐，默认） |
 | `deny` | 拒绝所有工具调用 |
+
+配置写法（**只有这三个值**，写别的会被告警并回退 `ask`）：
+
+```json
+{ "permissionMode": "all" }
+```
+
+> 与交互提示里的用词一致：确认时回 `a`（本会话全部允许）、`/allow all`。
+> `always-allow` 是 3.6.20 及以前的旧写法，仍可用，但会提示建议改成 `all`。
 
 [![npm version](https://img.shields.io/npm/v/@raolin2025/claude-code-node.svg)](https://www.npmjs.com/package/@raolin2025/claude-code-node) [![GitHub](https://img.shields.io/badge/GitHub-bg1avd%2Fclaude--code--node-blue)](https://github.com/bg1avd/claude-code-node) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ---
@@ -235,16 +244,16 @@ cc-node --api-base http://127.0.0.1:18080/v1 --model ./local-model.gguf \
 | 工具 | 说明 | 权限级别 | 安全检查 |
 |------|------|---------|---------|
 | **Bash** | 执行 shell 命令 | `ask` | ✅ 命令安全扫描 |
-| **Read** | 读取文件 | `always-allow` | ✅ 路径安全检查 |
+| **Read** | 读取文件 | `all` | ✅ 路径安全检查 |
 | **Edit** | 精确文本替换编辑 | `ask` | ✅ 写入路径安全 |
 | **Write** | 创建/覆盖文件 | `ask` | ✅ 写入路径安全 |
-| **Glob** | 文件模式搜索 | `always-allow` | — |
-| **Grep** | 内容搜索（rg/grep） | `always-allow` | — |
+| **Glob** | 文件模式搜索 | `all` | — |
+| **Grep** | 内容搜索（rg/grep） | `all` | — |
 | **WebFetch** | 抓取网页内容（安全管道 + Jina 兜底） | `ask` | ✅ SSRF + 重定向 + 脱敏 |
 | **WebSearch** | 网页搜索 | `ask` | 需 API Key；可改接配套的免 Key 搜索 MCP「[mcp-search-server](https://github.com/bg1avd/mcp-search-server)」 |
 | **GitTool** | GitHub PR 自动化（审查/合并/评论） | `high` | ✅ 预检查 |
 | **NpmPublish** | npm 发布一键工具（版本/打包/发布） | `ask` | ✅ token 校验 |
-| **AskUserQuestion** | 向用户提问 | `always-allow` | — |
+| **AskUserQuestion** | 向用户提问 | `all` | — |
 
 [![npm version](https://img.shields.io/npm/v/@raolin2025/claude-code-node.svg)](https://www.npmjs.com/package/@raolin2025/claude-code-node) [![GitHub](https://img.shields.io/badge/GitHub-bg1avd%2Fclaude--code--node-blue)](https://github.com/bg1avd/claude-code-node) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ---
@@ -318,7 +327,7 @@ graph TD
     D -->|ALLOW 规则| E[执行工具]
     D -->|无匹配| F{权限模式}
     F -->|ask| G[请求用户确认]
-    F -->|always-allow| E
+    F -->|all| E
     F -->|deny| C
     C --> H[审计日志]
     E --> H

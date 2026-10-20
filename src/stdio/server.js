@@ -400,7 +400,7 @@ export class StdioServer {
         apiKey,
         systemPrompt: this.config.systemPrompt,
         maxTurns: this.config.maxTurns,
-        permissionMode: 'always-allow', // 安全底线仍检查；执行确认由客户端负责
+        permissionMode: 'all', // 安全底线仍检查；执行确认由客户端负责
         tools: this._buildTools(),
         verbose: false,
         costTracker: new CostTracker({ model: this.config.model }),

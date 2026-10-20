@@ -7,6 +7,7 @@ import { join } from 'path'
 import { checkBashSafety } from './bash-guard.js'
 import { checkPathSafety, checkWritePathSafety } from './path-guard.js'
 import { checkUrlSafety } from './ssrf-guard.js'
+import { normalizePermissionMode } from '../core/permission-mode.js'
 
 const PERMISSIONS_FILE = '.claude-code/permissions.json'
 const AUDIT_LOG_FILE = '.claude-code/audit.log'
@@ -71,7 +72,10 @@ export class PermissionRule {
  */
 export class EnhancedPermissionChecker {
   constructor(mode = 'ask', options = {}) {
-    this.mode = mode
+    // 对外只认 all / ask / deny（旧值 always-allow 兼容映射为 all）。
+    // 非法值统一回退 ask —— 与 /status 显示、启动告警保持一致。
+    this.mode = normalizePermissionMode(mode).mode
+    this.rawMode = mode
     this.rules = [] // PermissionRule 列表
     this.auditLog = [] // 审计日志
     this.cwd = options.cwd || process.cwd()
@@ -155,7 +159,7 @@ export class EnhancedPermissionChecker {
       return { allowed: false, reason: '全局拒绝模式' }
     }
 
-    if (this.mode === 'always-allow') {
+    if (this.mode === 'all') {
       const securityResult = await this._securityCheck(toolName, input)
       if (!securityResult.safe) {
         this._log(toolName, input, false, securityResult.reason)
