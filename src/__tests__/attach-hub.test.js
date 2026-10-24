@@ -101,8 +101,30 @@ test('未 attach 前不能操作：先 attach 是硬约束', () => {
   hub.dispose()
 })
 
-test('回合串行：忙时输入排队，turn/end 后按 FIFO 自动执行', async () => {
-  const { hub, bus, engine, submitted } = makeHub({ running: true })
+test('回合串行：忙时输入排队，内核空闲后按 FIFO 依次执行（不并发、不丢失）', async () => {
+  // v4.1.1 修正：这条测试原来断言"发一次 turn/end 只消化一条"。
+  // 那个假设把 bug 固定成了契约 —— turn/end 广播时 engine.state.isRunning
+  // 仍是 true（它在 processMessage 的 finally 里才置 false），旧实现同步 drain
+  // 必然命中 _isBusy() 早退，队列从此没人管。
+  // 现在 drain 挂在 status:idle（以及 turn/end 的延迟兜底）上，队列**一定能被消化**。
+  // 这里改为一并验证真正的意图：不并发、不丢、按序。
+  let eng = null
+  let concurrent = 0
+  let maxConcurrent = 0
+  const { hub, bus, engine, submitted } = makeHub({
+    running: true,
+    onSubmit: async (text) => {
+      concurrent++
+      maxConcurrent = Math.max(maxConcurrent, concurrent)
+      eng.state.isRunning = true          // 与 processMessage 一致：执行期间忙
+      await wait(20)
+      eng.state.isRunning = false         // 与 finally 一致：结束时先置闲
+      bus.emit('status', { state: 'idle' })   // 再广播 idle
+      concurrent--
+    },
+  })
+  eng = engine
+
   const s = new FakeSocket()
   hub.addClient(s)
   s.feed({ type: 'attach', role: 'controller' })
@@ -114,14 +136,12 @@ test('回合串行：忙时输入排队，turn/end 后按 FIFO 自动执行', as
 
   // 内核忙完
   engine.state.isRunning = false
-  bus.emit('turn/end', { reqId: 'r1', text: 'ok' })
-  await wait(30)
-  assert.deepEqual(submitted.map(x => x.text), ['第一条'], '只应启动队首一条')
+  bus.emit('status', { state: 'idle' })
+  await wait(120)
 
-  // 第一回合结束 → 第二条继续
-  bus.emit('turn/end', { reqId: 'r2', text: 'ok' })
-  await wait(30)
-  assert.deepEqual(submitted.map(x => x.text), ['第一条', '第二条'])
+  assert.deepEqual(submitted.map(x => x.text), ['第一条', '第二条'], '两条都应按序执行完')
+  assert.equal(hub.queue.length, 0, '队列应被消化干净')
+  assert.equal(maxConcurrent, 1, '绝不并发执行')
   hub.dispose()
 })
 

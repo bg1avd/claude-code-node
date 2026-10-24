@@ -1,5 +1,58 @@
 # CHANGELOG
 
+## 4.1.1
+
+> 修复 v4.1.0 socket 协议里 **4 个 P0 / 7 个 P1 / 7 个 P2** 缺陷。
+> 全部来自接入方（cc-node-mobile）的审核报告 —— 他们在真机上逐条复现过，
+> 我们逐条复现、修掉、并补上回归测试。无破坏性变更。
+
+### 🔴 P0：接入前必须修的四条
+
+| # | 缺陷 | 后果 | 修复 |
+|:--|:--|:--|:--|
+| P0-1 | **排队消息永不执行** | 手机连发两条，第二条显示"已排队第 1 位"后**永远没有下文**，堆到 20 条报"队列已满"。用户以为 AI 死了 | 根因是 `turn/end` 广播时 `state.isRunning` 仍为 `true`（它在 `processMessage` 的 `finally` 里才置 `false`），同步 drain 必然早退且无人再触发。改为挂到 `status:idle`（`turn/end` 兜底）+ 延迟调度 + 失败兜底重试 |
+| P0-2 | **单行 1MB 直接断连接** | 图片只能走 base64 data URL（膨胀 33%），一张截图就撞线 → socket closed。客户端得重连重发还猜不到原因 | 上限提到 **8MB**（与 IPC 8MB 对齐），超限**只丢该行、保留连接**，回 `error.code = LINE_TOO_LONG`；分块到达的超长行进入丢弃模式直到下一个 `\n` |
+| P0-3 | **发一次 `user_input` 就永久降级 legacy** | 已 attach 的连接会静默失去 streaming / 工具事件 / 确认请求，表现为"偶发无流式"，极难排查 | `user_input` 只在**未 attach** 时设 `legacy`；已 attach 的连接按 `input` 处理 |
+| P0-4 | **没有"新建会话"协议** | 客户端只能发文本 `/clear`（被迫记内核命令语法）；且 `/clear`、`/cd`、`/resume` 都不广播，其他视图以为还在旧会话 | 新增 `session_new`；抽出 `createNewSession()` 与终端 `/clear` 共用；`/clear` `/cd` `/resume` 统一广播 `session/loaded`（带 `reason`） |
+
+### 🟠 P1
+
+- **忙时静默丢弃**：attach 来源撞上终端新回合时，旧行为是 `console.log` 后 `return`（消息凭空消失）。现在抛 `CC_NODE_BUSY`，由 hub 放回队首等空闲重试
+- **confirm 兜底卡终端**：新增 `confirmable`（桥可声明"我是无 UI 的常驻进程，别派确认给我"），`hasConfirmController()` 只算愿意应答的视图；超时按设计定则「放弃而非放行」自动拒绝并通知所有视图；终端 `rl.question` 路径补超时（不再永久挂起 + 吃掉用户下一条输入）
+- **`command/output` 未文档化** → 补进协议表与语义表
+- **`attached` 缺上下文** → 补 `cwd` / `model` / `permissionMode` / `sessionTitle`，以及 `confirmable` / `replaySize` / `maxLine` / `queued`
+- **`input.reqId` 被吞** → 透传到 `turn/start.reqId`，并回在 `queued.clientReqId`
+- **没有"读某个会话的完整消息"协议** → 新增 `session_messages`（读会话文件，不受内存 20 回合限制）。用新增的 `SessionManager.read()`，**不会**像 `load()` 那样把内核当前会话切走
+- **`/cd` 不广播** → 已广播（注：报告里"会话库会自动指向新目录"的前提不成立，`sessionsDir` 默认是绝对路径，变的是"当前会话"）
+
+### 🟡 P2
+
+- **断线补齐窗口量化**：200 条，写进文档并由 `attached.replaySize` 告知客户端
+- **`_send` 无背压**：`write() === false` 时暂停并等 `drain`；积压超 8MB 摘掉该视图
+- **会话标题是死时间戳**：首条用户消息自动生成可读标题（显式命名的不覆盖，过短输入不采用）。手机端只有一个会话库，靠时间戳根本找不到对话
+- **FAQ `existsSync` 勘误**：Windows named pipe 存在时 `existsSync` 实际返回 `true`；正确说法是"可以粗判，但探活必须用 `connect()`"
+- **5.1 示例代码误判**：忙时会把 `queued` 当回复返回空串 → 示例改为跳过 `queued`/`notice`/`status`
+- **legacy 客户端事件集合未写明** → 文档明确：只有 `reply` / `error`
+- **调度器未暴露** → 新增 `scheduler_list` → `scheduler/list`，以及 `schedule/triggered` / `schedule/finished` 事件（走 EventBus，带 `seq`）。没有调度器时回 `available: false`（不假装空列表）
+
+### 🐛 顺带修掉的两个真问题（冒烟才发现）
+
+- **请求失败被广播成全局错误**：某个视图触发的命令在无 TTY 环境报 `readline was closed`，结果**每个在线视图**都收到一条与自己无关的 `error`。改为只回给发起者
+- **`showPrompt()` 把绘制失败算成请求失败**：非 TTY / stdin 已 EOF 时 `rl.prompt()` 会抛 `readline was closed`，把整个请求判成"执行失败"。现在 attach 来源跳过终端提示符，且绘制失败不影响请求
+
+### 🧪 测试
+
+新增 25 条 `attach-protocol-audit.test.js`，每个用例对应报告里的一个缺陷编号。
+修正 1 条把旧 bug 固化成契约的测试（"turn/end 只消化一条"）。
+全套 **628** 条通过。
+
+### 📄 文档
+
+`docs/BRIDGE_MIGRATION.md`：协议表补 8 条消息/字段、语义表补 6 行、新增 6.5 节（定时任务能力边界）、
+修正 3 处与实现不符的描述、`/attach` 交互命令补 `/new` `/messages` `/schedules`。
+
+---
+
 ## 4.1.0
 
 > 新能力：**一个内核、N 个视图**。终端、Telegram、`cc-node attach` 现在共享同一个引擎、

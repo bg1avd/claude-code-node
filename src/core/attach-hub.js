@@ -22,29 +22,53 @@
  *
  * 客户端 → 服务端协议
  * -------------------
- *   { type:'attach', role:'viewer'|'controller', sinceSeq?:number }
+ *   { type:'attach', role:'viewer'|'controller', sinceSeq?:number, confirmable?:boolean }
  *   { type:'input',  reqId?:string, text:string, images?:string[] }
  *   { type:'abort' }
  *   { type:'confirm', id:string, answer:'y'|'n'|'a' }
  *   { type:'session_list' }
+ *   { type:'session_load', sessionId:string }
+ *   { type:'session_new',  title?:string }
+ *   { type:'session_messages', sessionId?:string, limit?:number, before?:string }
+ *   { type:'turn_history', limit?:number }
+ *   { type:'scheduler_list' }
  *   { type:'ping' }
  *   { type:'user_input', text }          // 阶段 1 兼容
  *
  * 服务端 → 客户端：EventBus 事件原样转发（NDJSON），另有
- *   { type:'attached', pid, running, session }
+ *   { type:'attached', pid, role, running, session, sessionTitle, cwd, model,
+ *     permissionMode, confirmable, lastSeq, historyAvailable, replaySize, maxLine }
  *   { type:'sessions', list }
+ *   { type:'session/messages', sessionId, messages, total, truncated }
+ *   { type:'scheduler/list', tasks }
+ *   { type:'command/output', text }
  *   { type:'error', text }
- *   { type:'queued', position }
+ *   { type:'queued', position, clientReqId }
  */
 
-import { EventBus } from '../core/event-bus.js'
+import { EventBus } from './event-bus.js'
 
 /** stream 事件合批窗口（毫秒）—— 逐 token 直发会把 socket 打爆 */
 const STREAM_FLUSH_MS = 16
 /** 队列上限：单人产品够用，防止远程刷屏把内核拖死 */
 const MAX_QUEUE = 20
-/** 单行协议上限 */
-const MAX_LINE = 1024 * 1024
+/**
+ * 单行协议上限。
+ *
+ * 为什么是 8MB 而不是 1MB：图片只能以 base64 data URL 内嵌（手机/远端的模型服务
+ * 访问不到 127.0.0.1），base64 会膨胀 33%。1MB 上限等于原图只剩 ~750KB，
+ * 一张截图或两张图同时发就会撞线 —— 而撞线的旧行为是**直接断连接**，
+ * 客户端只能重连重发，还猜不到原因。这里与 cli.js 的 IPC_BUFFER_MAX 对齐。
+ */
+const MAX_LINE = 8 * 1024 * 1024
+/**
+ * 单个视图的积压上限。
+ * socket.write() 返回 false 表示对端不读了；继续无限堆积会把内核内存拖爆。
+ * 超过这个量就认定该视图已死，摘掉它（内核不受影响）。
+ */
+const MAX_OUTBUF = 8 * 1024 * 1024
+/** 排队输入撞上"宿主又忙了"时的重试间隔 */
+const RETRY_MS = 300
 
 export class AttachHub {
   /**
@@ -52,25 +76,39 @@ export class AttachHub {
    * @param {EventBus} opts.bus
    * @param {object} opts.engine
    * @param {object} [opts.sessionManager]
-   * @param {(text:string, images:string[])=>Promise<any>} opts.onSubmit 提交用户输入的入口
+   * @param {(text:string, images:string[], reqId?:string)=>Promise<any>} opts.onSubmit 提交用户输入的入口
    * @param {()=>void} [opts.onAbort]
+   * @param {(id:string)=>Promise<{ok:boolean,id?:string,title?:string,cwd?:string,error?:string}>} [opts.onLoadSession]
+   * @param {(title?:string)=>Promise<{ok:boolean,...}>} [opts.onNewSession]
+   * @param {(q:{sessionId?:string,limit?:number,before?:string})=>Promise<object>} [opts.onSessionMessages]
+   * @param {()=>object} [opts.getContext] 当前运行上下文：cwd / model / permissionMode / sessionTitle / sessionId
+   * @param {()=>object[]} [opts.getSchedules] 定时任务列表（供 scheduler_list）
    * @param {(msg:string)=>void} [opts.log]
    */
-  constructor({ bus, engine, sessionManager, onSubmit, onAbort, onLoadSession, log = () => {} }) {
+  constructor({
+    bus, engine, sessionManager, onSubmit, onAbort, onLoadSession,
+    onNewSession, onSessionMessages, getContext, getSchedules, log = () => {},
+  }) {
     this.bus = bus
     this.engine = engine
     this.sessionManager = sessionManager
     this.onSubmit = onSubmit
     this.onAbort = onAbort
     this.onLoadSession = onLoadSession || null
+    this.onNewSession = onNewSession || null
+    this.onSessionMessages = onSessionMessages || null
+    this.getContext = getContext || (() => ({}))
+    this.getSchedules = getSchedules || null
     this.log = log
 
-    /** @type {Set<{socket,role,seq,closed,buf,flushTimer}>} */
+    /** @type {Set<object>} */
     this.clients = new Set()
     /** 排队中的输入 */
     this.queue = []
     /** 确认请求注册表：confirmId → { resolve, timer } */
     this._pendingConfirms = new Map()
+    this._drainTimer = null
+    this._retryTimer = null
     this._disposed = false
 
     this._unsub = this.bus.subscribe((ev) => this._onBusEvent(ev), { name: 'attach-hub' })
@@ -86,15 +124,23 @@ export class AttachHub {
       socket,
       role: 'viewer',        // 默认只读：未 attach 前不给任何特权
       attached: false,
+      legacy: false,
+      confirmable: true,     // 无 UI 的桥可显式声明 false（别把确认派给我）
       seq: 0,
       buffer: '',
+      discarding: false,     // 超长行丢弃中（等下一个换行再恢复）
       streamBuf: [],
       flushTimer: null,
+      outBuf: [],            // 背压期间积压的行
+      outBytes: 0,
+      backlogged: false,
+      flushing: false,
       closed: false,
     }
     this.clients.add(client)
 
     socket.on('data', (data) => this._onData(client, data))
+    socket.on('drain', () => this._onDrain(client))
     socket.on('error', () => this.removeClient(client))
     socket.on('close', () => this.removeClient(client))
 
@@ -105,20 +151,40 @@ export class AttachHub {
     if (!client || client.closed) return
     client.closed = true
     if (client.flushTimer) { clearTimeout(client.flushTimer); client.flushTimer = null }
+    client.outBuf = []
+    client.outBytes = 0
     this.clients.delete(client)
     try { client.socket.destroy() } catch {}
     this.log(`[attach] 客户端断开（剩余 ${this.clients.size}）`)
   }
 
-  /** 是否有可操作的视图在线（决定远程确认是否接管） */
+  /** 是否有可操作的视图在线 */
   hasController() {
     for (const c of this.clients) if (c.attached && c.role === 'controller' && !c.closed) return true
+    return false
+  }
+
+  /**
+   * 是否有**愿意接收确认请求**的视图在线。
+   *
+   * 与 hasController() 分开的原因（审计 P1-2）：
+   * 手机端的桥是常驻守护进程，"有 controller 在线"恒为真，但它可能根本没有 UI
+   * 能把确认推给用户。旧逻辑因此让每个工具确认都先空等 60 秒，然后落到终端
+   * rl.question（无超时）—— 人不在电脑前就永久挂起，还会吃掉用户回座后的第一条输入。
+   * 桥只要在 attach 时声明 confirmable:false，就不会再被算进来。
+   */
+  hasConfirmController() {
+    for (const c of this.clients) {
+      if (c.attached && !c.closed && c.role === 'controller' && c.confirmable !== false) return true
+    }
     return false
   }
 
   dispose() {
     this._disposed = true
     this._unsub?.()
+    if (this._drainTimer) { clearTimeout(this._drainTimer); this._drainTimer = null }
+    if (this._retryTimer) { clearTimeout(this._retryTimer); this._retryTimer = null }
     for (const c of [...this.clients]) this.removeClient(c)
     for (const [, p] of this._pendingConfirms) { clearTimeout(p.timer); p.resolve(null) }
     this._pendingConfirms.clear()
@@ -128,19 +194,56 @@ export class AttachHub {
   // 协议：客户端 → 服务端
   // ----------------------------------------------------------
 
+  /**
+   * 收数据：按行切分。
+   *
+   * 关键改动（审计 P0-2）：超长行**只丢该行、保留连接**。
+   * 旧实现是"buffer 超限就断连接"，而 base64 图片很容易超过 1MB，
+   * 结果是一张截图就让手机端掉线 —— 客户端只看到 socket closed，
+   * 既不知道原因也不知道该重发什么。
+   */
   _onData(client, data) {
-    client.buffer += data.toString()
-    if (client.buffer.length > MAX_LINE) {
-      // 无换行的超长数据 → 协议异常，断开即可（绝不无界累积）
-      this._send(client, { type: 'error', text: `单行超过 ${MAX_LINE} 字符，连接已关闭` })
-      this.removeClient(client)
-      return
+    let text = data.toString()
+
+    // 丢弃模式：上一块数据里有一行超长且还没见到换行，继续扔到下一个换行为止
+    if (client.discarding) {
+      const nl = text.indexOf('\n')
+      if (nl < 0) return              // 整块都属于那条被丢弃的超长行
+      client.discarding = false
+      text = text.slice(nl + 1)
+      if (!text) return
     }
-    const lines = client.buffer.split('\n')
-    client.buffer = lines.pop()
-    for (const line of lines) {
+
+    client.buffer += text
+
+    let nl
+    while ((nl = client.buffer.indexOf('\n')) >= 0) {
+      const line = client.buffer.slice(0, nl)
+      client.buffer = client.buffer.slice(nl + 1)
       if (!line.trim()) continue
+      if (line.length > MAX_LINE) {
+        this._send(client, {
+          type: 'error',
+          text: `单行超过 ${MAX_LINE} 字符，已丢弃该行（连接保留）`,
+          code: 'LINE_TOO_LONG',
+          dropped: line.length,
+        })
+        continue
+      }
       this._handleLine(client, line)
+    }
+
+    // 还没有换行就已经超限 → 这一行注定超长，丢弃模式开始（绝不无界累积）
+    if (client.buffer.length > MAX_LINE) {
+      const dropped = client.buffer.length
+      client.buffer = ''
+      client.discarding = true
+      this._send(client, {
+        type: 'error',
+        text: `单行超过 ${MAX_LINE} 字符，已丢弃该行（连接保留）`,
+        code: 'LINE_TOO_LONG',
+        dropped,
+      })
     }
   }
 
@@ -170,7 +273,7 @@ export class AttachHub {
         this._sendSessions(client)
         return
 
-      // 只读操作：viewer 也能补正文（它不需要任何特权）
+      // 以下都是只读操作：viewer 也能用（不需要任何特权）
       case 'turn_history':
         this._send(client, {
           type: 'turn/history',
@@ -178,12 +281,26 @@ export class AttachHub {
         })
         return
 
+      case 'session_messages':
+        this._sendSessionMessages(client, msg)
+        return
+
+      case 'scheduler_list':
+        this._sendSchedules(client, msg)
+        return
+
       // 阶段 1 兼容：老客户端（cc-notify / 已有桥）发 user_input 时**不会** attach，
       // 也不认事件流。它期待的是 {type:'reply', text}。这条路径必须原样保留，
       // 否则升级内核会静默打断所有既有接入方。
+      //
+      // 但已 attach 的连接**绝不能**因此被降级（审计 P0-3）：
+      // 一旦 client.legacy=true，_onBusEvent 会吞掉它所有的事件流，只在
+      // turn/end 时回一条 reply —— 表现为"偶发无流式"，几乎无法排查。
+      // 所以这里 break 落到下面的角色检查，把 user_input 当作 input 处理。
       case 'user_input':
+        if (client.attached) break
         client.legacy = true
-        this._handleInput(client, msg.text, msg.images)
+        this._handleInput(client, msg.text, msg.images, msg.reqId)
         return
     }
 
@@ -193,16 +310,17 @@ export class AttachHub {
       return
     }
     if (client.role !== 'controller') {
-      this._send(client, { type: 'error', text: '当前为只读视图（viewer），不能发送输入/中断/确认' })
+      this._send(client, {
+        type: 'error',
+        text: '当前为只读视图（viewer），不能发送输入/中断/确认/切换或新建会话',
+      })
       return
     }
 
     switch (msg.type) {
       case 'input':
-        this._handleInput(client, msg.text, msg.images)
-        return
-      case 'user_input':   // 阶段 1 兼容：一问一答，回复走 turn/end
-        this._handleInput(client, msg.text, msg.images)
+      case 'user_input':   // 已 attach 的连接用老格式发东西：按 input 处理，不降级
+        this._handleInput(client, msg.text, msg.images, msg.reqId)
         return
       case 'abort':
         this.onAbort?.()
@@ -214,6 +332,9 @@ export class AttachHub {
       case 'session_load':
         this._handleSessionLoad(client, msg)
         return
+      case 'session_new':
+        this._handleSessionNew(client, msg)
+        return
       default:
         this._send(client, { type: 'error', text: `未知消息类型: ${msg.type}` })
     }
@@ -224,16 +345,28 @@ export class AttachHub {
     client.role = role
     client.attached = true
     client.legacy = false   // 同一连接先走 user_input 后又 attach：切到事件流
+    client.confirmable = msg.confirmable !== false
     client.seq = Number(msg.sinceSeq) || 0
 
+    const ctx = this._context()
     this._send(client, {
       type: 'attached',
       pid: process.pid,
       role,
       running: !!this.engine?.state?.isRunning,
-      session: this.sessionManager?.currentSession?.id || null,
+      // v4.1.1：把"我现在在跟谁说话"必需的信息一次给全（审计 P1-4）。
+      // 迁移后 cwd 完全由内核决定（不再由桥的 config 控制），客户端没法自己推断。
+      session: ctx.sessionId,
+      sessionTitle: ctx.sessionTitle,
+      cwd: ctx.cwd,
+      model: ctx.model,
+      permissionMode: ctx.permissionMode,
+      confirmable: client.confirmable,
       lastSeq: this.bus.lastSeq,
       historyAvailable: this.bus.turns.length,
+      replaySize: this.bus.replaySize,
+      maxLine: MAX_LINE,
+      queued: this.queue.length,
     })
 
     // 断线补齐：把客户端没见过的结构性事件发过去。
@@ -246,7 +379,7 @@ export class AttachHub {
         this._send(client, {
           type: 'notice',
           text: `事件序号已滚出缓冲（请求从 ${client.seq} 补，最老只剩 ${oldest.seq}）：` +
-                `结构性事件只能补可用部分；正文请用 turn_history 拉取最近回合`,
+                `结构性事件只能补可用部分；正文请用 turn_history / session_messages 拉取`,
         })
       }
       for (const ev of this.bus.replay) {
@@ -265,31 +398,59 @@ export class AttachHub {
     this.log(`[attach] ${role} 接入（客户端数 ${this.clients.size}）`)
   }
 
-  _handleInput(client, text, images) {
+  _context() {
+    let c = {}
+    try { c = this.getContext() || {} } catch { c = {} }
+    return {
+      sessionId: c.sessionId ?? (this.sessionManager?.currentSession?.id || null),
+      sessionTitle: c.sessionTitle ?? (this.sessionManager?.currentSession?.title || null),
+      cwd: c.cwd ?? null,
+      model: c.model ?? null,
+      permissionMode: c.permissionMode ?? null,
+    }
+  }
+
+  _handleInput(client, text, images, reqId) {
     if (!text || typeof text !== 'string') {
       this._send(client, { type: 'error', text: 'input 缺少 text' })
       return
     }
+    const clientReqId = typeof reqId === 'string' && reqId ? reqId : null
     // 回合串行：忙就排队，空闲立刻执行
     if (this._isBusy() || this.queue.length > 0) {
       if (this.queue.length >= MAX_QUEUE) {
         this._send(client, { type: 'error', text: `队列已满（${MAX_QUEUE} 条），请稍后再发` })
         return
       }
-      this.queue.push({ text, images: Array.isArray(images) ? images : [] })
-      this._send(client, { type: 'queued', position: this.queue.length })
+      this.queue.push({ text, images: Array.isArray(images) ? images : [], reqId: clientReqId, client })
+      this._send(client, { type: 'queued', position: this.queue.length, clientReqId })
       return
     }
-    this._runInput(text, images)
+    this._runInput(text, images, clientReqId, client)
   }
 
-  async _runInput(text, images) {
+  async _runInput(text, images, reqId, origin = null) {
     try {
-      await this.onSubmit(text, Array.isArray(images) ? images : [])
+      // reqId 透传（审计 P1-5）：客户端自己的消息 ID 会一路带到 turn/start.reqId，
+      // 否则客户端收到 queued / turn/start 时无法判断"这是不是我那条"，两条连续
+      // 排队时只能靠时间猜哪段回答属于哪个气泡。
+      await this.onSubmit(text, Array.isArray(images) ? images : [], reqId)
     } catch (e) {
-      for (const c of this.clients) {
-        this._send(c, { type: 'error', text: `执行失败: ${e?.message || e}` })
+      // 竞态：hub 判定空闲，但宿主（终端）刚好开了新回合。
+      // 旧行为是 processInputLine 直接 return → 消息凭空消失，客户端零反馈。
+      // 现在放回队首，等内核真正空闲再执行。
+      if (e?.code === 'CC_NODE_BUSY') {
+        this.queue.unshift({ text, images: Array.isArray(images) ? images : [], reqId, client: origin })
+        this._scheduleRetry()
+        return
       }
+      // 执行失败是"这条请求的应答"，不是内核的全局事实：
+      // 只回给发起它的那个视图。广播给所有人会让别的视图收到与自己无关的错误
+      // （实测过：某个视图触发的命令在无 TTY 环境下报 readline closed，
+      //   结果每个在线视图都收到一条莫名其妙的 error）。
+      // origin 为空 = 队列里那条的发起者已断开，没人可回，只记日志。
+      if (origin) this._send(origin, { type: 'error', text: `执行失败: ${e?.message || e}`, reqId })
+      else this.log(`[attach] 排队输入执行失败（发起者已断开）: ${e?.message || e}`)
     }
   }
 
@@ -327,10 +488,39 @@ export class AttachHub {
         this._send(client, { type: 'error', text: r?.error || '切换会话失败' })
         return
       }
-      this.bus.emit('session/loaded', { id: r.id, title: r.title, cwd: r.cwd || null })
+      this.bus.emit('session/loaded', { id: r.id, title: r.title, cwd: r.cwd || null, reason: 'load' })
       this.bus.emit('notice', { text: `会话已切换：${r.title || r.id}` })
     } catch (e) {
       this._send(client, { type: 'error', text: `切换会话失败: ${e?.message || e}` })
+    }
+  }
+
+  /**
+   * 新建会话（controller 专属）。
+   *
+   * 为什么要一条协议而不是让客户端发文本 `/clear`（审计 P0-4）：
+   * 那等于强制所有接入方去记内核的内部命令语法，而"新建会话"是手机上三个
+   * 必备按钮之一。协议化之后，App 不需要知道任何 `/命令`。
+   */
+  async _handleSessionNew(client, msg) {
+    if (!this.onNewSession) {
+      this._send(client, { type: 'error', text: '本内核不支持新建会话' })
+      return
+    }
+    if (this._isBusy()) {
+      this._send(client, { type: 'error', text: '当前有回合在跑，先 abort 再新建会话' })
+      return
+    }
+    try {
+      const r = await this.onNewSession(typeof msg.title === 'string' ? msg.title : '')
+      if (!r || !r.ok) {
+        this._send(client, { type: 'error', text: r?.error || '新建会话失败' })
+        return
+      }
+      this.bus.emit('session/loaded', { id: r.id, title: r.title, cwd: r.cwd || null, reason: 'new' })
+      this.bus.emit('notice', { text: `已新建会话：${r.title || r.id}` })
+    } catch (e) {
+      this._send(client, { type: 'error', text: `新建会话失败: ${e?.message || e}` })
     }
   }
 
@@ -350,6 +540,25 @@ export class AttachHub {
     }
   }
 
+  /**
+   * 广播"某个定时任务被触发/执行完成"（审计 P2-7）。
+   *
+   * 走 EventBus 而不是直接写 socket：这样它也有 seq，断线重连能按序补齐，
+   * 且和内核其他事实保持同一条时间线。
+   */
+  notifyScheduleEvent(kind, task, extra = {}) {
+    if (this._disposed) return
+    const t = task || {}
+    this.bus.emit(kind, {
+      taskId: t.id ?? null,
+      taskKind: t.kind ?? null,
+      status: extra.status ?? null,
+      text: t.action?.text ?? null,
+      cmd: t.action?.cmd ?? null,
+      at: Date.now(),
+    })
+  }
+
   // ----------------------------------------------------------
   // 确认：先答先赢
   // ----------------------------------------------------------
@@ -367,6 +576,7 @@ export class AttachHub {
         this._pendingConfirms.delete(confirmId)
         resolve(null)
       }, timeoutMs)
+      timer.unref?.()
       this._pendingConfirms.set(confirmId, { resolve, timer })
     })
   }
@@ -417,8 +627,20 @@ export class AttachHub {
       }
     }
 
-    // 回合结束 → 消化排队输入（在广播之后执行，让视图先看到结束态）
-    if (ev.type === 'turn/end') this._drainQueue()
+    // 回合结束 → 消化排队输入。
+    //
+    // ⚠️ 这里必须用**延迟调度**，绝不能在 turn/end 的同一个调用栈里直接 drain：
+    // processMessage 是这么写的 ——
+    //     bus.emit('turn/end', ...)     ← 此刻 state.isRunning 仍是 true
+    //     return result
+    //     finally { this.state.isRunning = false; bus.emit('status', {state:'idle'}) }
+    // 所以同步 drain 必然命中 _isBusy() 早退，而之后又没有任何东西再触发它
+    // → 排队的消息永久躺在队列里（这正是 v4.1.0 的排队死信 bug）。
+    //
+    // 真正的触发点是 status:idle（此时 isRunning 已为 false）；turn/end 留作
+    // 兜底（宿主可能不发 status）。两者都走 setTimeout(0)，错开当前调用栈。
+    if (ev.type === 'turn/end') this._scheduleDrain()
+    else if (ev.type === 'status' && ev.state === 'idle') this._scheduleDrain()
   }
 
   _scheduleFlush(client) {
@@ -428,6 +650,7 @@ export class AttachHub {
       if (client.closed) return
       this._flushStream(client)
     }, STREAM_FLUSH_MS)
+    client.flushTimer.unref?.()
   }
 
   /** 立即把该客户端缓冲的 stream 增量合并发出（幂等） */
@@ -452,15 +675,43 @@ export class AttachHub {
     for (const ev of merged) this._send(client, ev)
   }
 
-  _drainQueue() {
+  /** 延迟到当前调用栈之后再消化队列（幂等） */
+  _scheduleDrain() {
+    if (this._disposed || this._drainTimer) return
     if (!this.queue.length) return
-    if (this._isBusy()) return
+    this._drainTimer = setTimeout(() => {
+      this._drainTimer = null
+      this._drainQueue()
+    }, 0)
+    this._drainTimer.unref?.()
+  }
+
+  _scheduleRetry() {
+    if (this._disposed || this._retryTimer) return
+    this._retryTimer = setTimeout(() => {
+      this._retryTimer = null
+      this._drainQueue()
+    }, RETRY_MS)
+    this._retryTimer.unref?.()
+  }
+
+  _drainQueue() {
+    if (this._disposed) return
+    if (!this.queue.length) return
+    if (this._isBusy()) {
+      // 还在忙：等 status:idle（正常路径）。同时挂一个兜底重试，
+      // 以防某个宿主既不 emit turn/end 也不 emit status（否则队列永久卡住）。
+      this._scheduleRetry()
+      return
+    }
     const next = this.queue.shift()
     // 让出事件循环：turn/end 的广播要先把"结束态"送到视图，再开下一回合
-    setTimeout(() => {
-      if (this._isBusy()) { this.queue.unshift(next); return }
-      this._runInput(next.text, next.images)
-    }, 0)
+    Promise.resolve(this._runInput(next.text, next.images, next.reqId, next.client))
+      .finally(() => {
+        // 队里还有 → 接着消化。不能只依赖 status:idle：命令类输入
+        // （/status 之类）根本不产生回合，也就不会有 idle 事件。
+        if (this.queue.length) this._scheduleDrain()
+      })
   }
 
   _isBusy() {
@@ -479,13 +730,121 @@ export class AttachHub {
       .catch((e) => this._send(client, { type: 'error', text: `读取会话列表失败: ${e.message}` }))
   }
 
+  /**
+   * 读取某个会话的完整消息（审计 P1-6）。
+   *
+   * 为什么必须由内核提供而不是客户端自己读文件：桥可能跑在另一台机器上，
+   * 客户端也可能刚重装、本地什么都没有。turn_history 只覆盖最近 20 个回合
+   * （内存环形缓冲），更早的历史只有会话文件里有。
+   */
+  _sendSessionMessages(client, msg) {
+    if (!this.onSessionMessages) {
+      this._send(client, { type: 'error', text: '本内核不支持读取会话消息' })
+      return
+    }
+    const q = {
+      sessionId: msg.sessionId || this.sessionManager?.currentSession?.id || null,
+      limit: Number.isFinite(msg.limit) ? msg.limit : 200,
+      before: msg.before || null,
+    }
+    Promise.resolve()
+      .then(() => this.onSessionMessages(q))
+      .then((r) => {
+        this._send(client, {
+          type: 'session/messages',
+          sessionId: r?.sessionId ?? q.sessionId,
+          title: r?.title ?? null,
+          messages: Array.isArray(r?.messages) ? r.messages : [],
+          total: r?.total ?? 0,
+          truncated: !!r?.truncated,
+          error: r?.error || null,
+        })
+      })
+      .catch((e) => this._send(client, { type: 'error', text: `读取会话消息失败: ${e?.message || e}` }))
+  }
+
+  /** 定时任务列表（审计 P2-7：文档承诺"客户端可见"，协议层必须有对应消息） */
+  _sendSchedules(client, msg) {
+    if (!this.getSchedules) {
+      this._send(client, { type: 'scheduler/list', available: false, tasks: [] })
+      return
+    }
+    Promise.resolve()
+      .then(() => this.getSchedules())
+      .then((tasks) => {
+        // null = 宿主没有调度器（不能假装"有，只是空的"，那会让客户端以为任务被删光了）
+        if (tasks == null) {
+          this._send(client, { type: 'scheduler/list', available: false, tasks: [] })
+          return
+        }
+        this._send(client, {
+          type: 'scheduler/list',
+          available: true,
+          tasks: Array.isArray(tasks) ? tasks : [],
+        })
+      })
+      .catch((e) => this._send(client, { type: 'error', text: `读取定时任务失败: ${e?.message || e}` }))
+  }
+
+  /**
+   * 写一行 NDJSON。
+   *
+   * 背压处理（审计 P2-2）：socket.write() 返回 false 表示对端读得比我们写得慢。
+   * 旧实现完全忽略返回值，长 tool/result 突发时会一路往内核内存里堆。
+   * 现在的策略：
+   *   · 背压期间把后续行放进 outBuf，等 'drain' 再冲刷；
+   *   · 积压超过 MAX_OUTBUF 视为死视图，摘掉它（内核继续跑）。
+   */
   _send(client, obj) {
     if (!client || client.closed) return
+    let line
     try {
-      client.socket.write(JSON.stringify(obj) + '\n')
+      line = JSON.stringify(obj) + '\n'
+    } catch {
+      return
+    }
+
+    if (client.backlogged) {
+      client.outBuf.push(line)
+      client.outBytes += line.length
+      if (client.outBytes > MAX_OUTBUF) {
+        this.log(`[attach] 视图输出积压超过 ${MAX_OUTBUF} 字节（对端不读），摘除该视图`)
+        this.removeClient(client)
+      }
+      return
+    }
+
+    try {
+      if (client.socket.write(line) === false) client.backlogged = true
     } catch {
       // 视图写失败 = 这个视图没了；摘掉它，内核继续跑
       this.removeClient(client)
+    }
+  }
+
+  _onDrain(client) {
+    if (!client || client.closed) return
+    client.backlogged = false
+    this._flushOut(client)
+  }
+
+  _flushOut(client) {
+    if (client.flushing || client.closed) return
+    client.flushing = true
+    try {
+      while (client.outBuf.length) {
+        const line = client.outBuf.shift()
+        client.outBytes -= line.length
+        if (client.socket.write(line) === false) {
+          client.backlogged = true
+          return
+        }
+      }
+      client.backlogged = false
+    } catch {
+      this.removeClient(client)
+    } finally {
+      client.flushing = false
     }
   }
 
@@ -493,6 +852,7 @@ export class AttachHub {
     return {
       clients: this.clients.size,
       controllers: [...this.clients].filter(c => c.attached && c.role === 'controller').length,
+      confirmable: [...this.clients].filter(c => c.attached && c.role === 'controller' && c.confirmable !== false).length,
       queued: this.queue.length,
       pendingConfirms: this._pendingConfirms.size,
     }

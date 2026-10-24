@@ -11,6 +11,28 @@ import { randomBytes } from 'crypto'
 // 与 src/stdio/server.js 的会话目录一致，也与 config.DEFAULTS.sessionsDir 一致。
 const DEFAULT_SESSIONS_DIR = join(homedir(), '.cc-node', 'sessions')
 
+/** 旧版自动标题的形态：`Session 2026-10-24T08:07:39`（纯时间戳，列表里无法分辨） */
+const AUTO_TITLE_RE = /^Session \d{4}-\d{2}-\d{2}T[\d:.]+$/
+
+/**
+ * 从首条用户消息里提炼会话标题。
+ *
+ * 为什么需要：自动标题原本是 `Session <ISO 时间戳>`，会话列表里一屏全是
+ * 长得一样的行。手机端只有一个会话库、又看不到终端，靠时间戳根本找不到
+ * 想要的对话。这里用首条 user 消息做标题，成本最低、信息量最大。
+ */
+function deriveTitle(content, max = 40) {
+  const s = String(content ?? '')
+    .replace(/```[\s\S]*?```/g, ' ')        // 去掉代码块（占了标题位置又不可读）
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')  // 图片 markdown
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/[#>*`_~]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!s) return ''
+  return s.length > max ? s.slice(0, max) + '…' : s
+}
+
 export class SessionManager {
   constructor(options = {}) {
     this.sessionsDir = options.sessionsDir || resolve(process.cwd(), DEFAULT_SESSIONS_DIR)
@@ -38,6 +60,9 @@ export class SessionManager {
     const session = {
       id,
       title: title || `Session ${new Date().toISOString().slice(0, 19)}`,
+      // 标题是自动生成的（时间戳占位）→ 允许首条用户消息把它改写成可读标题。
+      // 显式命名过的会话永远不动。
+      titleAuto: !title,
       cwd: meta.cwd || process.cwd(),
       created: new Date().toISOString(),
       updated: new Date().toISOString(),
@@ -81,9 +106,26 @@ export class SessionManager {
     }
   }
 
+  /**
+   * 只读地取一个会话（**不改变 currentSession**）。
+   *
+   * 为什么单独加：load() 会把 currentSession 指针切走 —— 那是"用户要求切换"的语义。
+   * 而远程视图拉取某个会话的历史只是**看**，绝不能顺手把内核的当前上下文换掉。
+   * @returns {Promise<object|null>} 会话对象；不存在返回 null
+   */
+  async read(sessionId) {
+    if (!sessionId) return null
+    try {
+      const data = await readFile(join(this.sessionsDir, `${sessionId}.json`), 'utf-8')
+      return JSON.parse(data)
+    } catch (err) {
+      if (err.code === 'ENOENT') return null
+      throw err
+    }
+  }
+
   /** 列出所有会话 */
-  async list() {
-    await this.ensureDir()
+  async list() {    await this.ensureDir()
     const files = await readdir(this.sessionsDir)
     const sessions = []
     for (const file of files) {
@@ -162,6 +204,21 @@ export class SessionManager {
     }
 
     this.currentSession.messages.push(entry)
+
+    // 首条用户消息 → 把时间戳标题换成可读标题（只改一次；显式命名过的永不覆盖）
+    if (message.role === 'user') {
+      const cur = this.currentSession
+      const auto = cur.titleAuto === true || AUTO_TITLE_RE.test(cur.title || '')
+      if (auto) {
+        const t = deriveTitle(entry.content)
+        // 太短的输入（"hi"、"1"、"y"）当标题没有任何区分度，等下一句
+        if (t.length >= 4) {
+          cur.title = t
+          cur.titleAuto = false
+        }
+      }
+    }
+
     await this.save(this.currentSession)
     return this.currentSession
   }

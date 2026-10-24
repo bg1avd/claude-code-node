@@ -189,6 +189,19 @@ export class EventBus {
   get lastSeq() { return this.seq }
 
   /**
+   * 清空「最近回合正文」归档。
+   *
+   * 什么时候必须调用：**切换 / 新建会话**之后。
+   * turn_history 的全部意义是"补这个会话最近说了什么"，如果不清，
+   * 移动端切到新会话后拉历史会拿到上一个会话的正文 —— 上下文串台，
+   * 比没有历史更糟。
+   */
+  clearTurnHistory() {
+    this.turns = []
+    this.currentTurn = null
+  }
+
+  /**
    * 取最近若干回合的原文（断线重连/主动补正文用）。
    * @param {number} [limit=5] 最多返回几条（从旧到新）
    */

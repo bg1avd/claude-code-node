@@ -923,7 +923,7 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
     bus: engine.bus,
     engine,
     sessionManager,
-    onSubmit: (text, images) => processInputLine(text, 'attach', null, images),
+    onSubmit: (text, images, reqId) => processInputLine(text, 'attach', null, images, { reqId }),
     onAbort: () => engine.abort(),
     // 远程切换会话：与终端 /resume 走同一个函数，保证两边上下文永远一致。
     // 终端不是 socket 订阅者，所以这里额外打印一行，让本机用户知道上下文被换了。
@@ -932,6 +932,60 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
       if (r.ok) console.log(`\n🔁 会话已切换（来自远程视图）：${r.title} (${r.id})\n`)
       else console.log(`\n⚠️  远程切换会话失败：${r.error}\n`)
       return r
+    },
+    // 远程新建会话：与终端 /clear 同一个函数（否则两条路径迟早不一致）
+    onNewSession: async (title) => {
+      const r = await createNewSession(title)
+      if (r.ok) console.log(`\n🆕 已新建会话（来自远程视图）：${r.title} (${r.id})\n`)
+      else console.log(`\n⚠️  远程新建会话失败：${r.error}\n`)
+      return r
+    },
+    // 读取某个会话的完整消息（turn_history 只覆盖最近 20 个回合，更早的只有文件里有）
+    onSessionMessages: async ({ sessionId, limit, before }) => {
+      const id = sessionId || sessionManager.currentSession?.id
+      if (!id) return { sessionId: null, messages: [], total: 0, error: '没有当前会话' }
+      // 用 read() 而不是 load()：拉历史只是"看"，绝不能把内核当前会话切走
+      const data = await sessionManager.read(id)
+      if (!data) return { sessionId: id, messages: [], total: 0, error: `会话不存在: ${id}` }
+      const all = Array.isArray(data.messages) ? data.messages : []
+      let end = all.length
+      if (before) {
+        const idx = all.findIndex((m, i) => m?.timestamp === before)
+        if (idx >= 0) end = idx
+      }
+      const n = Math.max(1, Math.min(Number(limit) || 200, 2000))
+      const slice = all.slice(Math.max(0, end - n), end)
+      return {
+        sessionId: data.id,
+        title: data.title,
+        messages: slice,
+        total: all.length,
+        truncated: end - n > 0,
+      }
+    },
+    // "我现在在跟谁说话" —— attach 握手时一次性给全（审计 P1-4）
+    getContext: () => ({
+      sessionId: sessionManager.currentSession?.id || null,
+      sessionTitle: sessionManager.currentSession?.title || null,
+      cwd: process.cwd(),
+      // 用运行时的 model（/model 切换过就会变），config 里的可能还是启动时的旧值
+      model: model || config.get('model') || null,
+      permissionMode: engine.permissionChecker?.mode || null,
+    }),
+    // 定时任务对客户端可见（审计 P2-7）：没有调度器时返回 available:false
+    getSchedules: () => {
+      const sch = getGlobalScheduler()
+      if (!sch) return null
+      return sch.list().map(task => ({
+        id: task.id,
+        kind: task.kind,
+        status: task.status,
+        dueDesc: task.dueDesc,
+        channel: task.channel,
+        text: (task.action?.text || '').slice(0, 200),
+        cmd: task.action?.cmd ? String(task.action.cmd).slice(0, 200) : null,
+        nextRun: task.dueAt ?? null,
+      }))
     },
     log: verbose ? (m) => console.error(m) : () => {},
   })
@@ -992,7 +1046,12 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
 
   // 显示提示符
   function showPrompt() {
-    inputCtrl.showPrompt()
+    // attach 来源不需要终端提示符（远程视图有自己的输入行）。
+    // 更重要的是：非 TTY / stdin 已 EOF 的嵌入场景下 rl.prompt() 会抛
+    // "readline was closed" —— 那只是**绘制**失败，绝不能让它把整个请求
+    // 判成"执行失败"回给视图（实测踩过：一个 /status 让所有视图收到 error）。
+    if (currentSource === 'attach') return
+    try { inputCtrl.showPrompt() } catch { /* 绘制失败不影响请求本身 */ }
   }
 
   // 单行问题收集（权限确认 / /models 选择 / AskUserQuestion）
@@ -1248,7 +1307,37 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
     if (llmDiff.length) {
       console.log(`   ℹ️  新项目的 ${llmDiff.join('/')} 与当前运行的不同；本次不切换（用 /model 或重启生效）`)
     }
+    // 广播会话变更：/cd 会新建会话（新 cwd、新上下文），客户端显示的
+    // session id / title 必须跟着刷新，否则远程视图一直以为还在旧会话里。
+    // 注意：会话库目录本身**不随 /cd 变化**（config.sessionsDir 默认是
+    // ~/.cc-node/sessions 这个绝对路径），所以历史列表不会换一批 ——
+    // 变的是"当前会话"。(审计 P1-7 关于 sessionsDir 会变的前提不成立。)
+    engine.bus?.clearTurnHistory()
+    engine.bus?.emit('session/loaded', {
+      id: session.id, title: session.title, cwd: abs, reason: 'cd',
+    })
     return true
+  }
+
+  /**
+   * 新建一个空会话 —— 终端 `/clear` 与 socket `session_new` 共用。
+   *
+   * 为什么必须共用：新建会话会**同时清掉终端和所有 attach 视图的上下文**。
+   * 两条路各写一份，迟早出现"手机新建了、电脑还停在旧会话"的分裂
+   * （和 loadSessionById 是同一个理由）。
+   *
+   * @param {string} [title]
+   * @returns {Promise<{ok:boolean, id?:string, title?:string, cwd?:string, error?:string}>}
+   */
+  async function createNewSession(title = '') {
+    if (engine.state.isRunning) {
+      return { ok: false, error: '当前有任务在跑，先停止再新建会话' }
+    }
+    engine.reset()
+    // 回合正文归档属于"上一个会话"，不清会让新会话的 turn_history 拿到旧正文
+    engine.bus?.clearTurnHistory()
+    session = await sessionManager.create(title || '', { cwd: process.cwd() })
+    return { ok: true, id: session.id, title: session.title, cwd: session.cwd }
   }
 
   /**
@@ -1282,6 +1371,8 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
     if (engine.tokenBudget && loaded.state?.budgetUsed != null) {
       engine.tokenBudget.used = loaded.state.budgetUsed
     }
+    // 换了会话，上一段对话的回合正文不该继续出现在 turn_history 里
+    engine.bus?.clearTurnHistory()
     // 认领并落盘：老会话可能没有 cwd，load() 已补成当前目录，持久化后
     // 它才能参与「按目录自动续接」的候选集（也顺带把它顶到最新）。
     try { await sessionManager.save(loaded) } catch { /* 落盘失败不影响本次续接 */ }
@@ -1289,7 +1380,7 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
     return { ok: true, id: loaded.id, title: loaded.title, cwd: loaded.cwd }
   }
 
-  async function processInputLine(input, source = 'cli', tgChatId = null, images = []) {
+  async function processInputLine(input, source = 'cli', tgChatId = null, images = [], opts = {}) {
     const trimmed = input.trim()
     if (!trimmed) { showPrompt(); return }
 
@@ -1681,6 +1772,8 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
             console.log(`   想在那个目录继续：/cd ${r.cwd} --keep（换目录但保留刚加载的上下文）`)
           }
           console.log(`\n💡 Tip: Use /sessions to list, /resume <id> to switch.`)
+          // 广播：远程视图的会话显示也跟着换（终端切换 = 全局切换）
+          engine.bus?.emit('session/loaded', { id: r.id, title: r.title, cwd: r.cwd, reason: 'resume' })
           break
         }
         case 'dream': {
@@ -1756,11 +1849,14 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
           }
           break
         }
-        case 'clear':
-          engine.reset()
-          session = await sessionManager.create()
+        case 'clear': {
+          const r = await createNewSession()
+          if (!r.ok) { console.log(`❌ ${r.error}`); break }
           console.log('Conversation cleared')
+          // 必须广播：否则其他视图（终端/另一台手机）各自以为还在旧会话里
+          engine.bus?.emit('session/loaded', { id: r.id, title: r.title, cwd: r.cwd, reason: 'clear' })
           break
+        }
         case 'stop':
           // 停止当前正在运行的 AI 工作（如卡死 / 长时间无响应时）。
           // AskUserQuestion 已改为异步发问（不挂起），无需在此取消 pending 等待。
@@ -1982,6 +2078,7 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
     // 发送到引擎 — 引擎忙(如正在处理上一条消息)时:
     //   - Telegram 消息 → 排队(不再丢弃),空闲后按 FIFO 自动执行(§十三.2)
     //   - CLI 输入 → 提示忙(用户在屏幕前,提示符天然互斥)
+    //   - attach 输入 → 抛 CC_NODE_BUSY 交回 AttachHub 队列（见下）
     if (engine.state.isRunning) {
       const busyMsg = t('tg.busy')
       console.log(busyMsg)
@@ -1992,6 +2089,16 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
           tgQueue.push({ input, tgChatId, images })
           await sendTelegram(`⏳ 已排队(第 ${tgQueue.length} 位),当前任务处理完自动执行`, tgChatId || null).catch(() => {})
         }
+        return
+      }
+      if (source === 'attach') {
+        // 竞态：AttachHub 判定空闲 → 交给这里 → 终端刚好开了新回合。
+        // 旧行为是 console.log 之后 return —— 消息凭空消失，手机端没有任何反馈
+        // （审计 P1-1）。这里显式抛一个可识别的错误码，让 hub 把它放回队首、
+        // 等内核真正空闲再执行，语义与"排队"一致：不丢、不乱序。
+        const e = new Error(busyMsg)
+        e.code = 'CC_NODE_BUSY'
+        throw e
       }
       return
     }
@@ -2001,7 +2108,9 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
       // 有 Telegram 通道时，流式推送思维链到当前回复目标，避免远程"以为没回应"
       const streamTarget = (source === 'telegram') ? (tgChatId || null) : (tgListener?.bot ? tgChatId || null : null)
       if (streamTarget) tgThinkingStart(streamTarget)
-      const result = await processInput(input, images)
+      // opts.reqId / opts.source 一路带到 turn/start：
+      // socket 客户端因此能把自己的消息气泡与 turn/start.reqId 对齐。
+      const result = await processInput(input, images, { reqId: opts.reqId, source })
       // 处理结束，清掉思维链流（最终回复随后发送）
       tgThinkingEnd()
       console.log()
@@ -2178,13 +2287,26 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
       // 这里只等"第一个应答"（先答先赢）。
       // 为什么不同时开终端 rl.question 竞速：readline 的 question 无法安全取消，
       // 未被消费的回调会把用户下一条正常输入吃掉。因此策略明确——谁在线谁答。
-      if (meta.confirmId && attachHub?.hasController()) {
+      //
+      // 但"在线"必须是**愿意应答**的在线（hasConfirmController）：手机端的桥是常驻
+      // 守护进程，如果只按 hasController 判断，它会在没有任何 UI 能应答的情况下
+      // 让每个确认都先空等 60 秒（审计 P1-2）。桥可以 attach 时声明 confirmable:false。
+      const remoteConfirmable = !!attachHub?.hasConfirmController()
+      if (meta.confirmId && remoteConfirmable) {
         const r = await attachHub.waitConfirm(meta.confirmId, { timeoutMs: confirmTimeoutMs })
         if (r) {
           if (r.raw === 'a') engine.permissionChecker.allowAllForSession()
           return { answer: r.answer, by: r.by }
         }
-        // 超时无人应答 → 继续走下面的本地/远程兜底逻辑
+        // 超时无人应答。
+        // 设计定则 §17.5.1「放弃而非放行」：既然确认已经派给了远程视图，就不能在
+        // 超时后再悄悄落到终端 rl.question —— 那会让一个无人在场的终端永久挂起，
+        // 且用户回座后打的第一句话会被当成 y/n 吃掉。这里直接拒绝，并告知所有视图。
+        attachHub?.echo(`⏱️  工具确认超时（${Math.round(confirmTimeoutMs / 1000)}s 无人应答），已自动拒绝: ${toolName}`)
+        engine.bus?.emit('confirm/resolved', {
+          reqId: engine._currentReqId, id: meta.confirmId, answer: 'n', by: 'timeout',
+        })
+        return { answer: false, by: 'timeout' }
       }
 
       // Telegram 远程模式：把权限确认推送到 Telegram，等待远程用户回复 y/n/a
@@ -2206,15 +2328,31 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
         })
       }
 
-      // 本地 CLI：用终端交互确认
+      // 本地 CLI：用终端交互确认。
+      // 加超时是必要的（审计 P1-2）：人不在电脑前时，无超时的 rl.question 会把
+      // 整个引擎永久挂住 —— 一个等待键盘的 Promise 永远不会 settle。
+      // 注意 readline 的 question 无法取消，超时后迟到的回调由 answered 标志丢弃。
       return new Promise((resolve) => {
+        let answered = false
+        const finish = (val) => {
+          if (answered) return
+          answered = true
+          clearTimeout(timer)
+          resolve(val)
+        }
+        const timer = setTimeout(() => {
+          if (answered) return
+          console.log(`\n⏱️  工具确认超时（${Math.round(confirmTimeoutMs / 1000)}s），已自动拒绝: ${toolName}`)
+          finish(false)
+        }, confirmTimeoutMs)
+        timer.unref?.()
         rl.question(`\n⚠️  Allow tool "${toolName}"?\n   Input: ${snippet}\n   (y/N/a) a=all session `, (answer) => {
-          const a = answer.toLowerCase()
+          const a = (answer || '').toLowerCase()
           if (a === 'a') {
             engine.permissionChecker.allowAllForSession()
-            resolve(true)
+            finish(true)
           } else {
-            resolve(a === 'y')
+            finish(a === 'y')
           }
         })
       })
@@ -2305,6 +2443,10 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
     confirmTimeoutMs: config.get('scheduler')?.confirmTimeoutMs,
     mode: config.get('scheduler')?.mode || 'internal',   // internal | telegram(外部 /tick 心跳驱动)
     verbose: verbose || cliArgs.debug,
+    // 定时任务对远程视图可见（审计 P2-7）：文档承诺"客户端可见"，协议层必须有事件。
+    // 走 attachHub → EventBus，与内核其他事实同一条 seq 时间线。
+    onFire: (task) => { try { attachHub?.notifyScheduleEvent('schedule/triggered', task, { status: 'running' }) } catch {} },
+    onDone: (task, r) => { try { attachHub?.notifyScheduleEvent('schedule/finished', task, { status: r?.ok ? 'done' : 'failed' }) } catch {} },
     tgSend: async (text, chatId) => {
       if (tgListener?.bot) await sendTelegram(text, chatId)
       else console.log(`[schedule 通知] ${text}`)          // 无 TG 通道时降级到终端
@@ -2400,8 +2542,8 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
   showPrompt()
 
   // REPL 消息处理包装（留作扩展点）
-  async function processInput(input, images = []) {
-    return engine.processMessage(input, images)
+  async function processInput(input, images = [], opts = {}) {
+    return engine.processMessage(input, images, opts)
   }
 }
 

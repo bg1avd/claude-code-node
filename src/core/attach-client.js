@@ -69,7 +69,10 @@ cc-node attach — 接入正在运行的 cc-node（同一份上下文）
 交互命令:
   /sessions           列出会话
   /resume <id>        切换会话（会同时改变终端那边的上下文）
+  /new                新建会话（等于终端 /clear，会清掉所有视图的上下文）
+  /messages [n]       读当前会话的完整消息（默认 200 条，来自会话文件）
   /history [n]        补最近 n 个回合的正文（断线重连后有用，默认 5）
+  /schedules          查看定时任务
   /abort 或 Ctrl+C    中断当前回合
   /quit 或 Ctrl+D     退出
 `
@@ -155,10 +158,14 @@ export async function runAttach(argv = []) {
         case 'attached':
           busy = !!ev.running
           write(C.dim(`✓ 已接入 cc-node (pid ${ev.pid}) · ${ev.role === 'controller' ? '可输入' : '只读'} · ` +
-            `session ${String(ev.session || 'new').slice(0, 8)}\n`))
+            `session ${String(ev.sessionTitle || ev.session || 'new').slice(0, 24)}\n`))
+          if (ev.cwd || ev.model || ev.permissionMode) {
+            write(C.dim(`  ${ev.cwd || '?'} · ${ev.model || '?'} · 权限 ${ev.permissionMode || '?'}\n`))
+          }
           if (busy) write(C.dim('  （当前有回合在跑，会从此刻开始显示进度）\n'))
+          if (ev.queued) write(C.dim(`  （有 ${ev.queued} 条排队的输入将按序执行）\n`))
           write(C.dim('  输入消息回车发送 · Ctrl+C 中断回合 · Ctrl+D 或 /quit 退出\n'))
-          write(C.dim('  /sessions 会话列表 · /resume <id> 切换 · /history [n] 补最近回合正文\n\n'))
+          write(C.dim('  /sessions 会话列表 · /resume <id> 切换 · /new 新建 · /history [n] 补回合正文 · /schedules 定时任务\n\n'))
           prompt()
           return
 
@@ -231,16 +238,63 @@ export async function runAttach(argv = []) {
         case 'sessions':
           write(C.bold('\n会话列表:\n'))
           for (const s of ev.list || []) {
-            write(`  ${String(s.id).slice(0, 8)}  ${s.title || '(无标题)'}  ${C.dim(s.updatedAt || '')}\n`)
+            write(`  ${String(s.id).slice(0, 8)}  ${s.title || '(无标题)'}  ${C.dim(s.updatedAt || s.updated || '')}\n`)
           }
-          write(C.dim('  切换：/resume <id>\n'))
+          write(C.dim('  切换：/resume <id> · 新建：/new\n'))
+          prompt()
           return
 
-        case 'session/loaded':
-          write(C.green(`\n🔁 会话已切换: ${ev.title || ev.id}\n`))
+        case 'session/messages': {
+          const list = ev.messages || []
+          if (ev.error) { write(C.red(`\n✗ ${ev.error}\n`)); prompt(); return }
+          write(C.bold(`\n会话 ${String(ev.sessionId || '').slice(0, 8)} 共 ${ev.total} 条消息` +
+            `${ev.truncated ? '（已截断）' : ''}:\n`))
+          for (const m of list) {
+            const role = m.role === 'user' ? C.cyan('你') : C.green('AI')
+            const ts = (m.timestamp || '').slice(11, 19)
+            write(`\n${role} ${C.dim(ts)}\n${String(m.content ?? '').slice(0, 4000)}\n`)
+          }
+          prompt()
+          return
+        }
+
+        case 'scheduler/list': {
+          if (ev.available === false) {
+            write(C.dim('\n（本内核没有调度器）\n'))
+            prompt()
+            return
+          }
+          const list = ev.tasks || []
+          if (!list.length) { write(C.dim('\n（没有待办定时任务）\n')); prompt(); return }
+          write(C.bold(`\n待办 ${list.length} 条:\n`))
+          for (const t of list) {
+            const flag = t.status === 'running' ? '🏃 执行中' : '⏳'
+            write(`  ${t.id}  [${t.kind}] ${flag}  ${t.dueDesc || ''}\n`)
+            if (t.text) write(C.dim(`        ${String(t.text).slice(0, 60)}\n`))
+            if (t.cmd) write(C.dim(`        $ ${String(t.cmd).slice(0, 60)}\n`))
+          }
+          prompt()
+          return
+        }
+
+        case 'schedule/triggered':
+          write(C.dim(`\n⏰ 定时任务触发: ${ev.taskId}${ev.cmd ? ` (${String(ev.cmd).slice(0, 60)})` : ''}\n`))
+          return
+
+        case 'schedule/finished':
+          write(C.dim(`⏰ 定时任务结束: ${ev.taskId} → ${ev.status}\n`))
+          return
+
+        case 'session/loaded': {
+          const label = {
+            new: '🆕 已新建会话', clear: '🧹 会话已清空', cd: '📂 已切换项目',
+            resume: '🔁 会话已切换', load: '🔁 会话已切换',
+          }[ev.reason] || '🔁 会话已变更'
+          write(C.green(`\n${label}: ${ev.title || ev.id}\n`))
           if (ev.cwd) write(C.dim(`   目录: ${ev.cwd}\n`))
           prompt()
           return
+        }
 
         case 'turn/history': {
           const list = ev.turns || []
@@ -311,6 +365,19 @@ export async function runAttach(argv = []) {
       if (text === '/history' || text.startsWith('/history ')) {
         const n = Number(text.split(/\s+/)[1]) || 5
         sock.write(JSON.stringify({ type: 'turn_history', limit: n }) + '\n')
+        return
+      }
+      if (text === '/new') {
+        sock.write(JSON.stringify({ type: 'session_new' }) + '\n')
+        return
+      }
+      if (text === '/schedules' || text === '/schedule') {
+        sock.write(JSON.stringify({ type: 'scheduler_list' }) + '\n')
+        return
+      }
+      if (text === '/messages' || text.startsWith('/messages ')) {
+        const n = Number(text.split(/\s+/)[1]) || 200
+        sock.write(JSON.stringify({ type: 'session_messages', limit: n }) + '\n')
         return
       }
 

@@ -146,6 +146,8 @@ export function createScheduler({
   runPrompt = null,    // async (text, task) => void — prompt 任务执行(走主循环)
   runExec = null,      // async (task) => {ok, error, exitCode, stdout, stderr} — exec 任务执行
   engineBusy = null,   // () => boolean — 引擎忙?(忙则任务延后,见 §十三)
+  onFire = null,       // (task) => void — 任务开始执行（供远程视图广播 schedule/triggered）
+  onDone = null,       // (task, {ok, error}) => void — 任务执行结束（供远程视图广播）
   mode = 'internal',   // internal: 内置 timer;telegram: 只靠外部 /tick 心跳
   verbose = false,
 } = {}) {
@@ -373,6 +375,8 @@ export function createScheduler({
     let ok = false
     let error = ''
     let audit = null          // exec 审计记录(供 execute 统一落盘,无论 runExec 实现)
+    // 通知订阅者"任务开跑了"——远程视图靠这条知道定时任务真的在动（审计 P2-7）
+    try { onFire?.(t) } catch { /* 广播失败不影响执行 */ }
     try {
       if (t.action?.type === 'exec') {
         // exec 超时(设计 §P0-3):整个执行(含脚本内拉起+等待)总预算
@@ -433,6 +437,9 @@ export function createScheduler({
         }))
       }
       finish(t, 'failed', { lastError: msg })
+    } finally {
+      // 结束广播（无论成功/失败/重试）—— 远程视图据此把"🏃 执行中"收回
+      try { onDone?.(t, { ok, error }) } catch { /* 广播失败不影响调度 */ }
     }
   }
 

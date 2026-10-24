@@ -154,8 +154,14 @@ export class QueryEngine {
    * 主入口 — 处理用户消息
    * @param {string} userInput 文本
    * @param {string[]} [images] 图片 URL（data URL / http），视觉模型用
+   * @param {object} [opts]
+   * @param {string} [opts.reqId] 外部指定的回合 ID（socket 接入方自带的消息 ID）。
+   *   为什么不总是自己生成：远程视图发消息后会收到 `queued` 和 `turn/start`，
+   *   如果 reqId 由内核重新生成，客户端无法判断"这条开始事件对应我哪一条输入"，
+   *   连续两条排队时只能靠时间猜 —— 气泡会挂错。
+   * @param {string} [opts.source] 输入来源（cli / telegram / attach），随 turn/start 广播
    */
-  async processMessage(userInput, images = []) {
+  async processMessage(userInput, images = [], opts = {}) {
     if (this.state.isRunning) {
       throw new Error('引擎正在运行中，请等待当前回合完成')
     }
@@ -172,8 +178,9 @@ export class QueryEngine {
     this._ensureFitWindow()
 
     // 回合开始 —— 所有视图（终端/Telegram/socket attach）从这里知道"内核忙起来了"
-    const reqId = this._currentReqId = newReqId()
-    this.bus?.emit('turn/start', { reqId, source: this.config.source || null })
+    // reqId 优先用调用方给的（socket 客户端的消息 ID），没有才自己生成。
+    const reqId = this._currentReqId = (opts.reqId || newReqId())
+    this.bus?.emit('turn/start', { reqId, source: opts.source || this.config.source || null })
     this.bus?.emit('status', { state: 'running' })
 
     try {
