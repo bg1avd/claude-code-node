@@ -40,6 +40,14 @@
 - **请求失败被广播成全局错误**：某个视图触发的命令在无 TTY 环境报 `readline was closed`，结果**每个在线视图**都收到一条与自己无关的 `error`。改为只回给发起者
 - **`showPrompt()` 把绘制失败算成请求失败**：非 TTY / stdin 已 EOF 时 `rl.prompt()` 会抛 `readline was closed`，把整个请求判成"执行失败"。现在 attach 来源跳过终端提示符，且绘制失败不影响请求
 
+### ⚠️ 一个只在 Node 20 暴露的坑（CI 抓到）
+
+`waitConfirm` 的超时定时器一开始加了 `unref()`（"别阻止进程退出"的惯性写法）。
+Node 24 上没事，**Node 20 上会让事件循环失去唯一的活源** —— 测试直接挂住，
+后续 19 个用例被连带取消。确认超时是"必须触发"的语义，不能 unref；同理
+`_scheduleDrain` / `_scheduleRetry` / `_scheduleFlush` 的短定时器也一并去掉了。
+（`dispose()` 会清理，不会拖住退出。）
+
 ### 🧪 测试
 
 新增 25 条 `attach-protocol-audit.test.js`，每个用例对应报告里的一个缺陷编号。

@@ -576,7 +576,10 @@ export class AttachHub {
         this._pendingConfirms.delete(confirmId)
         resolve(null)
       }, timeoutMs)
-      timer.unref?.()
+      // 注意：这里**不能** unref。
+      // 确认超时是"必须触发"的语义（超时即拒绝），unref 的 timer 在没有其他
+      // 事件源时不会把事件循环撑住 —— Node 20 上实测会直接挂住（测试里表现为
+      // 整份用例被 cancelled）。dispose() 会清理它，不会拖住进程退出。
       this._pendingConfirms.set(confirmId, { resolve, timer })
     })
   }
@@ -650,7 +653,6 @@ export class AttachHub {
       if (client.closed) return
       this._flushStream(client)
     }, STREAM_FLUSH_MS)
-    client.flushTimer.unref?.()
   }
 
   /** 立即把该客户端缓冲的 stream 增量合并发出（幂等） */
@@ -683,7 +685,6 @@ export class AttachHub {
       this._drainTimer = null
       this._drainQueue()
     }, 0)
-    this._drainTimer.unref?.()
   }
 
   _scheduleRetry() {
@@ -692,7 +693,6 @@ export class AttachHub {
       this._retryTimer = null
       this._drainQueue()
     }, RETRY_MS)
-    this._retryTimer.unref?.()
   }
 
   _drainQueue() {

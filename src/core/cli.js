@@ -2345,7 +2345,6 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
           console.log(`\n⏱️  工具确认超时（${Math.round(confirmTimeoutMs / 1000)}s），已自动拒绝: ${toolName}`)
           finish(false)
         }, confirmTimeoutMs)
-        timer.unref?.()
         rl.question(`\n⚠️  Allow tool "${toolName}"?\n   Input: ${snippet}\n   (y/N/a) a=all session `, (answer) => {
           const a = (answer || '').toLowerCase()
           if (a === 'a') {
