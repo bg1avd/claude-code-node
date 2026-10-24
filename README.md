@@ -124,7 +124,69 @@ printf '{"jsonrpc":"2.0","id":1,"method":"initialize"}\n' | cc-node --stdio
 | `/config KEY` | 查看配置（支持点号路径如 `tools.bash.timeout`） |
 | `/budget` | 查看 Token 预算使用情况 |
 | `/window [N]` | 查看/设置上下文窗口（如 `/window 128k`、`/window auto`） |
+| `/cd PATH` | **切换项目**（封存梦境 + 清上下文 + 重载配置），见下节 |
 | `/exit` `/quit` | 退出（Ctrl+C 也可以） |
+
+### 🔄 多项目切换（`/cd`）
+
+一个 cc-node 进程只有**一份上下文**。`/cd` 不是"换个工作目录"，而是**另起一档**（软重启）：
+
+```bash
+/cd ~/projects/alpha        # 切换到 alpha 项目
+/cd .. --keep               # 只换目录，保留当前上下文（旧行为）
+```
+
+切换时依次做六件事：
+
+| 步骤 | 做什么 | 为什么 |
+|:--|:--|:--|
+| ① 封存梦境 | 把当前会话沉淀成一条梦境记录 | `/cd` 会清上下文，**先存再清** → 记忆不丢 |
+| ② 重载配置 | `config.reload()`：先回默认值，再叠加用户级 + 新项目级 | 避免上个项目的键残留（`identity` / `mcp` 串项目） |
+| ③ 清空上下文 | `engine.reset()` | 新项目不该带着旧项目的假设 |
+| ④ 重载工具 | 项目级 `.claude-code/tools/` + 项目级 `mcp.servers` | 工具表跟着项目走（旧 MCP 会被断开卸载） |
+| ⑤ 重建身份 | 系统提示词按新项目的 `identity` / `preferences` / 本项目梦境重算 | 换项目 = 换角色 |
+| ⑥ 新建会话 | 标题形如 `alpha · 2026-10-24 14:30` | 历史会话列表里一眼可辨 |
+
+**刻意不切换**：`model` / `apiBase` / `apiKey`。
+换项目不该悄悄换 LLM 源（可能意外烧钱）。若新项目配置里与当前运行的不同，会打印提示，
+真要切换请用 `/model` 或重启。
+
+**安全护栏**：
+
+- 有任务在跑时拒绝切换（先 `/stop`）
+- 目录不存在 / 不是目录 / 已在目标目录 → 明确报错，**不做任何动作**
+- 会话太短（未达梦境门槛）→ 跳过封存并说明原因，不会静默
+
+> `--keep` 保留的是 v3.6.x 的旧行为：只改 `process.cwd()` 与工具的相对路径基准，
+> 不重载配置、不换身份、不清上下文。
+
+### 🔁 启动时续接「本目录」的会话
+
+`autoContinue`（默认开启）现在**只在当前目录内**挑最新的会话续接，不再跨目录：
+
+| 情况 | 行为 |
+|:--|:--|
+| 本目录有历史会话 | 续接其中最新的一条 |
+| 本目录没有 | 新建空会话（**不会**回退到别的项目的对话） |
+| 其它目录有会话 | 只提示条数，不自动加载 |
+| 旧版会话（无目录标记） | 不参与自动续接，可用 `/sessions` 查看、`/resume <id>` 手动加载 |
+
+理由：启动 cc-node 的那个目录通常就是"今天要工作的项目"。跨目录续接会出现
+「在 A 项目目录启动、上下文却是 B 项目的对话」，与 `/cd` 的「一个项目一份上下文」冲突。
+
+`/sessions` 里 `★` 标记当前目录的会话：
+
+```
+★ session-1792824511299-… — dirA · 2026-10-24 14:48 (0 msgs, …)
+  session-1792824512322-… — dirB · 2026-10-24 14:48 (0 msgs, …)  [/tmp/ccdir/dirB]
+```
+
+用 `/resume` 加载别的目录的会话时不会自动切目录，但会给出一条可执行的出路：
+
+```
+ℹ️  该会话属于 /tmp/ccdir/dirB；当前目录是 /tmp/ccdir/dirA（未自动切换）
+   想在那个目录继续：/cd /tmp/ccdir/dirB --keep（换目录但保留刚加载的上下文）
+```
 
 [![npm version](https://img.shields.io/npm/v/@raolin2025/claude-code-node.svg)](https://www.npmjs.com/package/@raolin2025/claude-code-node) [![GitHub](https://img.shields.io/badge/GitHub-bg1avd%2Fclaude--code--node-blue)](https://github.com/bg1avd/claude-code-node) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ---

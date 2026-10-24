@@ -22,14 +22,23 @@ export class SessionManager {
     await mkdir(this.sessionsDir, { recursive: true, mode: 0o700 })
   }
 
-  /** 创建新会话 */
-  async create(title = '') {
+  /**
+   * 创建新会话
+   *
+   * @param {string} [title] 会话标题
+   * @param {object} [meta]
+   * @param {string} [meta.cwd] 会话归属目录（默认 process.cwd()）。
+   *   记它是为了让「启动时续接上一次会话」能按**当前目录**挑，
+   *   而不是把别的项目的对话续接进来（一个项目一份上下文）。
+   */
+  async create(title = '', meta = {}) {
     await this.ensureDir()
     // M4 fix: 使用 crypto.randomBytes 生成不可预测的会话 ID
     const id = `session-${Date.now()}-${randomBytes(8).toString('hex')}`
     const session = {
       id,
       title: title || `Session ${new Date().toISOString().slice(0, 19)}`,
+      cwd: meta.cwd || process.cwd(),
       created: new Date().toISOString(),
       updated: new Date().toISOString(),
       messages: [],
@@ -43,6 +52,10 @@ export class SessionManager {
   /** 保存会话（v1.1: 文件权限 0600，防止其他用户读取敏感对话内容） */
   async save(session) {
     await this.ensureDir()
+    // v4.0.0 兜底：会话必须有归属目录。缺失时视为"当前目录"——
+    // 老会话被 /resume 加载后继续用、或由 stdio 侧创建时，都会在这里被补齐，
+    // 之后就能参与「按目录自动续接」。
+    if (!session.cwd) session.cwd = process.cwd()
     session.updated = new Date().toISOString()
     const filePath = join(this.sessionsDir, `${session.id}.json`)
     await writeFile(filePath, JSON.stringify(session, null, 2), { encoding: 'utf-8', mode: 0o600 })
@@ -55,6 +68,9 @@ export class SessionManager {
     try {
       const data = await readFile(filePath, 'utf-8')
       const session = JSON.parse(data)
+      // v4.0.0：老会话没有 cwd。被显式加载 = 用户"要在当前目录继续它"，
+      // 就地认领（下次 save 会落盘），这样它也能进入「按目录自动续接」的候选集。
+      if (!session.cwd) session.cwd = process.cwd()
       this.currentSession = session
       return session
     } catch (err) {
@@ -78,6 +94,8 @@ export class SessionManager {
         sessions.push({
           id: session.id,
           title: session.title,
+          // 会话归属目录（4.0.0 起记录；更早的会话没有这个字段 → undefined）
+          cwd: session.cwd || '',
           created: session.created,
           updated: session.updated,
           messageCount: session.messages?.length || 0,
@@ -87,6 +105,16 @@ export class SessionManager {
     // 按更新时间倒序
     sessions.sort((a, b) => new Date(b.updated) - new Date(a.updated))
     return sessions
+  }
+
+  /**
+   * 列出某个目录下的会话（按 updated 倒序）。
+   * 供「启动时续接本项目的上一次会话」使用 —— 一个项目一份上下文。
+   * @param {string} [cwd] 默认当前工作目录
+   */
+  async listForCwd(cwd = process.cwd()) {
+    const all = await this.list()
+    return all.filter(s => s.cwd === cwd)
   }
 
   /** 删除会话 */

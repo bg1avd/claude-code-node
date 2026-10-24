@@ -13,8 +13,8 @@ import {
 } from './terminal-caps.js'
 import { createScheduler, setGlobalScheduler, getGlobalScheduler } from './scheduler.js'
 import { createServer as createNetServer } from 'net'
-import { writeFileSync, unlinkSync, existsSync, mkdirSync, readFileSync, chmodSync } from 'fs'
-import { join } from 'path'
+import { writeFileSync, unlinkSync, existsSync, mkdirSync, readFileSync, chmodSync, statSync } from 'fs'
+import { join, resolve, basename } from 'path'
 import { QueryEngine, QueryEngineConfig } from './query-engine.js'
 import { createDefaultRegistry } from '../tools/index.js'
 import { loadMcpToolsFromConfig, closeMcpTools } from '../mcp/loadTools.js'
@@ -295,7 +295,8 @@ Commands:
   /channel CMD   — Manage notification channels (list|send|test)
   /cost          — Show API cost report
   /compact       — Manually compact conversation context
-  /cd PATH       — Change working directory
+  /cd PATH       — Switch project (archive dream + clear context + reload config)
+  /cd PATH --keep — Change working directory only (keep context)
   /allow [tool|all|reset] — Allow tools for this session (default: all)
   /allow all   — automatically allow all subsequent tools
   /allow reset — reset to ask mode
@@ -363,7 +364,7 @@ const DETAILED_HELP = {
 
   dream:   "/dream [方向|save|clear]\n  梦境（跨会话长期记忆）。\n  (no arg)   — 列出全部梦境\n  <方向>     — 检索该方向的记忆（如 /dream http 客户端）\n  save       — 立即把「当前会话」沉淀为一条梦境（不必等退出）\n  clear      — 清空所有梦境\n\n  梦境在启动时自动注入系统提示（想起上次做到哪）；退出时也会自动沉淀一次。",
 
-  cd:      "/cd <path>\n  Change the working directory of cc-node.\n  Affects all subsequent tool executions (Bash, Read, Write, etc.).\n\n  Without path: show the current working directory.\n\n  Example: /cd /home/yourname/projects\n  Example: /cd ..",
+  cd:      "/cd <path> [--keep]\n  切换项目（软重启）。一个 cc-node 进程只有一份上下文，换项目=另起一档：\n   ① 封存当前项目的梦境（不丢记忆）\n   ② 重载项目级配置（identity / systemPrompt / mcp / 权限）\n   ③ 清空对话上下文\n   ④ 重载工具（项目级 tools 目录 + 项目级 MCP）\n   ⑤ 新建会话（标题带项目名）\n\n  --keep     只换工作目录，保留当前上下文（v3.6.x 的旧行为）\n  (no path)  显示当前目录与用法\n\n  不切换 model / apiBase / apiKey —— 换项目不该悄悄换 LLM 源，\n  如与当前运行的不同会给出提示，请用 /model 或重启生效。\n\n  Example: /cd ~/projects/alpha\n  Example: /cd .. --keep",
 
   allow:   "/allow [tool|all|reset]\n  Manage tool permissions for this session.\n\n  Options:\n    <tool>   — allow a specific tool (e.g. Bash, Write, Read)\n    all      — automatically allow ALL remaining tools for this session\n    reset    — reset to ask mode (ask for each tool)\n    (no arg) — same as /allow all\n\n  When asked to confirm a tool, you can also type:\n    y — allow this once\n    a — allow all for the rest of the session\n\n  Example: /allow Bash\n  Example: /allow all\n  Example: /allow reset",
 
@@ -607,7 +608,9 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
   } catch { /* 梦境读取失败不阻塞启动 */ }
 
   // 身份（Identity）—— 首次从「无项目配置的目录」启动时，生成带自说明的模板。
-  // 只在**启动**路径建；运行时 /cd 不建（关联项目不换角色、也不落文件）。
+  // 只在**启动**路径建；/cd 切项目时**不建**（不在别人项目里凭空落文件）。
+  // 注意：/cd 仍然会**重载**已有配置（identity / systemPrompt / mcp / 权限），
+  // 也就是"换角色"确实会发生，只是不生成新文件 —— 见 switchProject()。
   try {
     if (await config.ensureProjectTemplate(process.cwd(), { language: config.get('language') })) {
       console.log(`🪪 已生成本目录配置模板：${join(process.cwd(), '.claude-code', 'config.json')}`)
@@ -615,35 +618,49 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
   } catch { /* 生成失败不阻塞启动 */ }
 
   // 系统提示词优先级：CLI -s 参数 > config.json 顶层 systemPrompt > 内置默认
-  let systemPrompt = cliArgs.systemPrompt || config.get('systemPrompt') || DEFAULT_SYSTEM_PROMPT
+  /**
+   * 组装系统提示词。身份层级（由低到高）：
+   *   内置默认 → 机器级 identity → 目录级 identity → preferences → 梦境
+   *
+   * ⚠️ 启动路径与 /cd 切项目路径**共用这一份逻辑**，任何一处改动都要考虑两边，
+   *    否则"切项目后身份/偏好/梦境不刷新"这类漂移 bug 会反复出现。
+   *
+   * @param {object} [opts]
+   * @param {string} [opts.dreamCtx] 注入尾部的梦境上下文（空串 = 本次不带梦境）
+   */
+  function composeSystemPrompt({ dreamCtx = '' } = {}) {
+    let sp = cliArgs.systemPrompt || config.get('systemPrompt') || DEFAULT_SYSTEM_PROMPT
 
-  // 身份（Identity）：机器级基线 + 目录级角色，**叠加**（非覆盖）。
-  // 必须分层从原始配置读（getRaw）——get() 是"高层覆盖低层"，拿不到两层。
-  const _idStr = (v) => (typeof v === 'string' ? v.trim() : '')
-  const _identities = [
-    _idStr(config.getRaw && config.getRaw('user', 'identity')),
-    _idStr(config.getRaw && config.getRaw('project', 'identity')),
-  ].filter(Boolean)
-  if (_identities.length) {
-    systemPrompt += `\n\n[身份 / Identity]\n${_identities.join('\n\n')}`
-  }
-
-  // config.json 的 preferences.* 全量注入为补充系统提示（个人偏好，不改核心操作规则）。
-  // 例: "preferences": { "thinking_language": "中文", "note": "所有思维链用中文输出" }
-  // 每个字符串键值变成一行 "- key: value"，空对象/无字符串值时零影响。
-  const _prefs = config.get('preferences')
-  if (_prefs && typeof _prefs === 'object' && !Array.isArray(_prefs)) {
-    const _prefLines = Object.entries(_prefs)
-      .filter(([, v]) => typeof v === 'string' && v.trim())
-      .map(([k, v]) => `- ${k}: ${v.trim()}`)
-    if (_prefLines.length > 0) {
-      systemPrompt += `\n\n[用户偏好 / User preferences — 必须遵守]\n${_prefLines.join('\n')}`
+    // 身份（Identity）：机器级基线 + 目录级角色，**叠加**（非覆盖）。
+    // 必须分层从原始配置读（getRaw）——get() 是"高层覆盖低层"，拿不到两层。
+    const _idStr = (v) => (typeof v === 'string' ? v.trim() : '')
+    const _identities = [
+      _idStr(config.getRaw && config.getRaw('user', 'identity')),
+      _idStr(config.getRaw && config.getRaw('project', 'identity')),
+    ].filter(Boolean)
+    if (_identities.length) {
+      sp += `\n\n[身份 / Identity]\n${_identities.join('\n\n')}`
     }
+
+    // config.json 的 preferences.* 全量注入为补充系统提示（个人偏好，不改核心操作规则）。
+    // 例: "preferences": { "thinking_language": "中文", "note": "所有思维链用中文输出" }
+    // 每个字符串键值变成一行 "- key: value"，空对象/无字符串值时零影响。
+    const _prefs = config.get('preferences')
+    if (_prefs && typeof _prefs === 'object' && !Array.isArray(_prefs)) {
+      const _prefLines = Object.entries(_prefs)
+        .filter(([, v]) => typeof v === 'string' && v.trim())
+        .map(([k, v]) => `- ${k}: ${v.trim()}`)
+      if (_prefLines.length > 0) {
+        sp += `\n\n[用户偏好 / User preferences — 必须遵守]\n${_prefLines.join('\n')}`
+      }
+    }
+    if (dreamCtx) {
+      sp = `${sp}\n\n${dreamCtx}`
+    }
+    return sp
   }
-  // 梦境放最后（身份层级：内置默认 → 机器级 identity → 目录级 identity → preferences → 梦境）
-  if (dreamContext) {
-    systemPrompt = `${systemPrompt}\n\n${dreamContext}`
-  }
+
+  let systemPrompt = composeSystemPrompt({ dreamCtx: dreamContext })
   // 权限模式：对外只认 all / ask / deny（旧值 always-allow 自动兼容并提示）。
   // 非法值回退 ask 并明确告警 —— 绝不静默降级（v3.6.21）。
   const _permInfo = normalizePermissionMode(cliArgs.permissionMode || config.get('permissionMode'))
@@ -653,70 +670,118 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
   let apiKey = cliArgs.apiKey || config.get('apiKey') || ''
 
   const registry = createDefaultRegistry()
+  // 内置工具名快照 —— /cd 切项目时用它区分「内置」与「随项目动态加载」，只清后者。
+  const builtinToolNames = new Set(registry.getNames())
   const sessionManager = new SessionManager({ sessionsDir: config.get('sessionsDir') })
 
-  // B 通用接线：把 config.json 里 mcp.servers 配置的 MCP 服务器的工具接入运行时工具表。
-  // 未配置 mcp.servers 时零影响；某个 MCP 连不上会告警并跳过，绝不阻塞/崩溃。
-  // 需要在 engineConfig 使用 registry.getAll() 之前完成（异步网络连接）。
+  // 「随项目变化」的工具接线（MCP + 自定义工具目录）。
+  // 抽成函数的原因：/cd 切项目时工具表也必须跟着换（项目级 tools 目录、项目级 MCP 配置）。
+  // 未配置时零影响；某个 MCP 连不上会告警并跳过，绝不阻塞/崩溃。
   let mcpRegistryHandle = null
-  const mcpConfig = config.get && (config.get('mcp') || {})
-  if (mcpConfig && mcpConfig.servers && Object.keys(mcpConfig.servers).length > 0) {
-    const _mcp = await loadMcpToolsFromConfig(config, {
-      log: (m) => { if (verbose) console.error(m) },
-    })
-    mcpRegistryHandle = _mcp.registry
-    if (Array.isArray(_mcp.tools)) {
-      for (const t of _mcp.tools) registry.register(t)
-    }
-    // 退出时尽量断开已连的 MCP（HTTP 连接幂等无害；stdio 会结束子进程）。
-    // process exit 是同步的，close 为 fire-and-forget，不阻塞退出。
-    process.once('exit', () => {
-      if (mcpRegistryHandle) closeMcpTools(mcpRegistryHandle).catch(() => {})
-    })
-  }
+  // 退出时尽量断开已连的 MCP（HTTP 连接幂等无害；stdio 会结束子进程）。
+  // 只注册一次，引用的始终是变量本身 —— /cd 换过 handle 后关的也是最新那个。
+  process.once('exit', () => {
+    if (mcpRegistryHandle) closeMcpTools(mcpRegistryHandle).catch(() => {})
+  })
 
-  // 自定义工具接线：机器级 ~/.cc-node/tools/ + 项目级 <cwd>/.claude-code/tools/ + config.tools.customDirs。
-  // 目录式约定：<dir>/<工具名>/index.js（+ README.md）。best-effort，单个失败只告警跳过、不阻塞启动。
-  // 冲突优先级：内置/MCP > 项目级 > 机器级（同名自定义工具已在 loader 内按优先级去重）。
-  {
+  /**
+   * 加载动态工具：① MCP 服务器 ② 自定义工具目录（机器级 + 项目级）。
+   * 会先清掉上一轮动态注册的工具与 MCP 连接，保留全部内置工具。
+   * @returns {Promise<{mcpCount:number, customCount:number}>}
+   */
+  async function loadDynamicTools() {
+    // 清上一轮（内置工具绝不动 —— builtinToolNames 是启动时的快照）
+    for (const name of Array.from(registry.getNames())) {
+      if (!builtinToolNames.has(name)) registry.unregister(name)
+    }
+    if (mcpRegistryHandle) {
+      try { await closeMcpTools(mcpRegistryHandle) } catch { /* 断开失败不影响后续 */ }
+      mcpRegistryHandle = null
+    }
+
+    // ① MCP：config.json 的 mcp.servers
+    let mcpCount = 0
+    const mcpConfig = config.get && (config.get('mcp') || {})
+    if (mcpConfig && mcpConfig.servers && Object.keys(mcpConfig.servers).length > 0) {
+      try {
+        const _mcp = await loadMcpToolsFromConfig(config, {
+          log: (m) => { if (verbose) console.error(m) },
+        })
+        mcpRegistryHandle = _mcp.registry
+        if (Array.isArray(_mcp.tools)) {
+          for (const t of _mcp.tools) registry.register(t)
+          mcpCount = _mcp.tools.length
+        }
+      } catch (e) {
+        console.error(`⚠️  MCP 加载失败（已跳过）：${e.message}`)
+      }
+    }
+
+    // ② 自定义工具：机器级 ~/.cc-node/tools/ + 项目级 <cwd>/.claude-code/tools/ + config.tools.customDirs。
+    // 目录式约定：<dir>/<工具名>/index.js（+ README.md）。best-effort，单个失败只告警跳过。
+    // 冲突优先级：内置/MCP > 项目级 > 机器级（同名自定义工具已在 loader 内按优先级去重）。
+    let customCount = 0
     const { tools: customTools, errors: customToolErrors } = await loadCustomTools({
       cwd: process.cwd(),
       extraDirs: config.get('tools.customDirs') || [],
       log: (m) => { if (verbose) console.error(m) },
     })
-    let customRegistered = 0
     for (const t of customTools) {
       if (registry.has(t.name)) {
         console.error(`⚠️  自定义工具 "${t.name}" 与内置/MCP 工具同名，已跳过（保留内置/MCP；来源 ${t._source || 'custom'}）`)
         continue
       }
       registry.register(t)
-      customRegistered++
+      customCount++
     }
-    if (customRegistered > 0) {
-      console.log(`🔧 已加载 ${customRegistered} 个自定义工具（机器级 ~/.cc-node/tools/ + 项目级 .claude-code/tools/）`)
+    if (customCount > 0) {
+      console.log(`🔧 已加载 ${customCount} 个自定义工具（机器级 ~/.cc-node/tools/ + 项目级 .claude-code/tools/）`)
     }
-    if (customToolErrors.length > 0) {
-      for (const e of customToolErrors) {
-        console.error(`⚠️  自定义工具加载失败：${e.file || e.dir} — ${e.error?.message || e.error}`)
-      }
+    for (const e of customToolErrors) {
+      console.error(`⚠️  自定义工具加载失败：${e.file || e.dir} — ${e.error?.message || e.error}`)
     }
+    return { mcpCount, customCount }
   }
+
+  await loadDynamicTools()
 
   let session
   if (cliArgs.resume) {
     session = await sessionManager.load(cliArgs.resume)
     if (!session) { console.error(`Session not found: ${cliArgs.resume}`); process.exit(1) }
   } else if (cliArgs.noContinue ? false : config.get('autoContinue') !== false) {
-    // 自动续接「上一次会话」：取会话目录里最新的一条（list 已按 updated 倒序）。
-    // 等价默认 --resume last。用 /clear 或 --no-continue 可改为全新会话。
-    let latest = null
-    try { latest = (await sessionManager.list())[0] || null } catch { /* 目录为空/不可读 → 新建 */ }
-    if (latest) {
-      session = await sessionManager.load(latest.id)
-      console.log(`🔁 已续接上一次会话：${session.title}（${session.messages?.length || 0} 条消息） · 用 /clear 开始新会话`)
+    // 自动续接「上一次会话」——**只在当前目录内找**（v4.0.0）。
+    //
+    // 为什么按目录：启动 cc-node 的那个目录通常就是"今天要工作的项目"。
+    // 跨目录续接会出现"在 A 项目目录启动，上下文却是 B 项目的对话"，
+    // 与 /cd 的「一个项目一份上下文」语义冲突，也容易串项目判断。
+    //
+    // 本目录没有会话时：新建一个空会话（**不**回退到其它目录），
+    // 但会说明全局还有多少条其它目录的会话 —— 避免用户以为历史丢了。
+    // 老会话（v4.0.0 之前创建、没有 cwd 字段）不参与自动续接，但仍可用
+    // /sessions 查看、/resume <id> 手动加载。
+    let picked = null
+    let otherDirs = 0
+    let legacyCount = 0
+    try {
+      const all = await sessionManager.list()
+      const here = all.filter(s => s.cwd === process.cwd())
+      picked = here[0] || null
+      otherDirs = all.filter(s => s.cwd && s.cwd !== process.cwd()).length
+      legacyCount = all.filter(s => !s.cwd).length
+    } catch { /* 目录为空/不可读 → 新建 */ }
+
+    if (picked) {
+      session = await sessionManager.load(picked.id)
+      console.log(`🔁 已续接本目录上一次会话：${session.title}（${session.messages?.length || 0} 条消息） · 用 /clear 开始新会话`)
     } else {
       session = await sessionManager.create()
+      const extra = []
+      if (otherDirs > 0) extra.push(`其它目录 ${otherDirs} 条`)
+      if (legacyCount > 0) extra.push(`旧版无目录标记 ${legacyCount} 条`)
+      if (extra.length > 0) {
+        console.log(`🆕 本目录尚无会话，已新建 · 另有 ${extra.join('、')}（/sessions 查看 · /resume <id> 加载）`)
+      }
     }
   } else {
     session = await sessionManager.create()
@@ -1015,6 +1080,143 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
       }
     } catch { /* 清理失败不阻断切换 */ }
     return removed
+  }
+
+  // ============================================================
+  // 项目切换 — /cd 的"软重启"语义
+  //
+  // 一个 cc-node 进程 = 一份上下文。换项目不是"换个目录"，而是"另起一档"：
+  //   封存当前项目梦境 → 重载项目配置 → 换目录 → 清上下文 → 重载工具 → 新会话
+  //
+  // 为什么必须先封存梦境：/cd 会清空上下文，若直接清掉，这段工作就永远进不了记忆。
+  // 先 sleep() 沉淀，语义就从"丢失"变成"封存后开新档"。
+  //
+  // 刻意不做（边界明确，避免意外）：
+  //   · 不切 model / apiBase / apiKey —— 换项目不该悄悄换 LLM 源（可能烧钱）。
+  //     检测到差异只提示，真要切换用 /model 或重启。
+  //   · 不换会话库 —— 全局一个会话库（一个上下文哲学），用标题区分项目。
+  //
+  // @param {string} targetDir 目标目录（相对/绝对均可）
+  // @param {object} [opts]
+  // @param {boolean} [opts.keep] true = 旧行为（只换目录，保留上下文与身份）
+  // @returns {Promise<boolean>} 是否切换成功
+  // ============================================================
+  async function switchProject(targetDir, { keep = false } = {}) {
+    // ① 校验 —— 全部通过才动手，尽量原子
+    if (engine.state.isRunning) {
+      console.log('⚠️  当前有任务在跑，先 /stop 再切项目')
+      return false
+    }
+    if (!targetDir || !String(targetDir).trim()) {
+      console.log('用法：/cd <path>          切换项目（封存梦境 + 清上下文 + 重载配置）')
+      console.log('      /cd <path> --keep   只换目录，保留当前上下文（旧行为）')
+      return false
+    }
+    const abs = resolve(process.cwd(), String(targetDir).trim())
+    try {
+      if (!statSync(abs).isDirectory()) {
+        console.log(`❌ 不是目录：${abs}`)
+        return false
+      }
+    } catch (e) {
+      console.log(`❌ 目录不存在或不可访问：${abs}（${e.code || e.message}）`)
+      return false
+    }
+    const prevDir = process.cwd()
+    if (abs === prevDir) {
+      console.log(`📂 已在此项目：${abs}`)
+      return false
+    }
+    const prevName = basename(prevDir)
+    const prevMessages = session?.messages || []
+    const prevPermMode = engine.permissionChecker?.mode
+
+    // ② 封存梦境（keep 模式不封存：上下文还在，不该提前切档）
+    let dreamSaved = null
+    if (!keep && prevMessages.length > 0) {
+      try {
+        dreamSaved = await dreamManager.sleep(
+          prevMessages,
+          { project: prevName, title: session?.title, turnCount: engine.state.turnCount },
+          { mainSummarizer: buildMainSummarizer(engine, apiKey) },
+        )
+      } catch { /* 封存失败不阻塞切换 */ }
+    }
+
+    // ③ keep 模式：v3.6.x 的旧行为 —— 只换工作目录，不动配置/身份/上下文/工具
+    if (keep) {
+      process.chdir(abs)
+      engine.config.cwd = abs
+      if (engine.permissionChecker) {
+        engine.permissionChecker.cwd = abs
+        engine.permissionChecker.projectDir = abs
+      }
+      console.log(`📂 ${abs}（已换目录，保留上下文与身份；要连带重载项目配置请去掉 --keep）`)
+      return true
+    }
+
+    // ④ 换目录 + **重置式**重载配置
+    // 必须用 config.reload() 而不是 config.load()：后者是累加合并，
+    // 会让「上一个项目有、新项目没有」的键残留（实测：MCP 不卸载、identity 串项目）。
+    process.chdir(abs)
+    let cfgWarn = ''
+    try {
+      await config.reload(abs)
+    } catch (e) {
+      cfgWarn = e.message
+    }
+    const newPermMode = normalizePermissionMode(config.get('permissionMode')).mode
+
+    // ⑤ 应用到引擎：cwd + 权限
+    engine.config.cwd = abs
+    if (engine.permissionChecker) {
+      engine.permissionChecker.cwd = abs
+      engine.permissionChecker.projectDir = abs
+      engine.permissionChecker.mode = newPermMode
+    }
+    engine.config.permissionMode = newPermMode
+
+    // ⑤ 清上下文（新的一档）
+    engine.reset()
+    engine.config.permissionMode = newPermMode
+    if (engine.permissionChecker) {
+      engine.permissionChecker.mode = newPermMode
+      try { engine.permissionChecker.resetSessionAllow() } catch {}
+    }
+
+    // ⑥ 重载动态工具（项目级 tools 目录 / MCP 配置跟着走）
+    const dt = await loadDynamicTools()
+    engine.config.tools = registry.getAll()
+
+    // ⑦ 本项目梦境 → 重建系统提示（身份 / 偏好 / 目录说明全部刷新）
+    let dreamCtx2 = ''
+    try { dreamCtx2 = (await dreamManager.wake(config.get('dreamWakeRecent') || 3)) || '' } catch {}
+    systemPrompt = composeSystemPrompt({ dreamCtx: dreamCtx2 })
+    engine.config.systemPrompt = systemPrompt
+
+    // ⑧ 新会话（标题带项目名，历史列表里一眼可辨；cwd 显式记录，供下次启动按目录续接）
+    const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ')
+    session = await sessionManager.create(`${basename(abs)} · ${stamp}`, { cwd: abs })
+
+    // ⑨ 摘要 + 边界提示
+    console.log(`📂 已切换到项目：${abs}`)
+    console.log(`   身份/偏好已重载 · 工具 ${registry.getNames().length} 个（MCP ${dt.mcpCount} / 自定义 ${dt.customCount}）`)
+    console.log(`   上下文已清空 · 新会话「${session.title}」`)
+    if (newPermMode !== prevPermMode) console.log(`   Permission: ${prevPermMode} → ${newPermMode}`)
+    if (dreamSaved) console.log(`   💭 上一个项目（${prevName}）的记忆已封存`)
+    else if (prevMessages.length > 0) console.log('   （上个会话太短，未达梦境门槛，未生成记忆）')
+    if (dreamCtx2) console.log('   💭 已载入本项目的过往记忆')
+    if (cfgWarn) console.log(`   ⚠️  项目配置加载失败：${cfgWarn}`)
+    // 决不悄悄换 LLM 源
+    const wantBase = config.get('apiBase') || ''
+    const wantModel = config.get('model') || ''
+    const llmDiff = []
+    if (wantBase && wantBase !== apiBase) llmDiff.push('apiBase')
+    if (wantModel && wantModel !== model) llmDiff.push('model')
+    if (llmDiff.length) {
+      console.log(`   ℹ️  新项目的 ${llmDiff.join('/')} 与当前运行的不同；本次不切换（用 /model 或重启生效）`)
+    }
+    return true
   }
 
   async function processInputLine(input, source = 'cli', tgChatId = null, images = []) {
@@ -1414,6 +1616,14 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
             engine.tokenBudget.used = loaded.state.budgetUsed
           }
           console.log(`✅ Resumed session: ${loaded.title} (${loaded.id})`)
+          // 认领并落盘：老会话可能没有 cwd，load() 已补成当前目录，这里持久化，
+          // 让它此后能参与「按目录自动续接」的候选集（也顺带把它顶到最新）。
+          try { await sessionManager.save(loaded) } catch { /* 落盘失败不影响本次续接 */ }
+          // 跨目录加载：不自动切目录（意外切走太危险），只提示一条可执行的出路。
+          if (loaded.cwd && loaded.cwd !== process.cwd()) {
+            console.log(`ℹ️  该会话属于 ${loaded.cwd}；当前目录是 ${process.cwd()}（未自动切换）`)
+            console.log(`   想在那个目录继续：/cd ${loaded.cwd} --keep（换目录但保留刚加载的上下文）`)
+          }
           console.log(`\n💡 Tip: Use /sessions to list, /resume <id> to switch.`)
           break
         }
@@ -1478,7 +1688,16 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
         case 'sessions': {
           const sessions = await sessionManager.list()
           if (sessions.length === 0) console.log('No sessions found')
-          else for (const s of sessions) console.log(`  ${s.id} — ${s.title} (${s.messageCount} msgs, ${s.updated})`)
+          else {
+            const here = process.cwd()
+            for (const s of sessions) {
+              // ★ = 当前目录会话（启动时自动续接的就是这一批里的最新一条）
+              const mark = s.cwd === here ? '★' : ' '
+              const where = s.cwd === here ? '' : (s.cwd ? `  [${s.cwd}]` : '  [旧版·无目录标记]')
+              console.log(`${mark} ${s.id} — ${s.title} (${s.messageCount} msgs, ${s.updated})${where}`)
+            }
+            console.log(`  ★ = 本目录（${here}）会话 · 启动时自动续接其中最新一条 · /resume <id> 可加载任意一条`)
+          }
           break
         }
         case 'clear':
@@ -1563,21 +1782,21 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
         case 'cost':
           console.log(engine.costTracker.formatReport())
           break
-        case 'cd':
-          if (rest.length === 0) {
+        case 'cd': {
+          // v4.0.0: /cd 从"只换工作目录"升级为"项目切换软重启"。
+          // 语义：封存当前项目梦境 → 重载项目级配置 → 清空上下文 → 重载工具 → 新建会话。
+          // 需要旧行为（只换目录、保留上下文）时加 --keep。
+          const keepCtx = rest.includes('--keep')
+          const target = rest.filter(w => w !== '--keep').join(' ').trim()
+          if (!target) {
             console.log(`Current directory: ${process.cwd()}`)
+            console.log('  切换项目：/cd <path>          （封存梦境 + 清上下文 + 重载配置）')
+            console.log('  仅换目录：/cd <path> --keep   （保留当前上下文，旧行为）')
           } else {
-            const target = rest.join(' ')
-            try {
-              process.chdir(target)
-              const newCwd = process.cwd()
-              engine.config.cwd = newCwd
-              console.log(`📂 ${newCwd}`)
-            } catch (err) {
-              console.log(`❌ ${err.message}`)
-            }
+            await switchProject(target, { keep: keepCtx })
           }
           break
+        }
         case 'compact': {
           if (engine.tokenBudget) {
             // 手动压缩：**用户主动敲了命令，就应该真的压缩**。
@@ -1883,7 +2102,11 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
   inputCtrl.start()
 
   // 将 readline 兼容对象注入引擎配置，用于 ask 模式确认和 AskUserQuestion 工具
-  if (permissionMode === 'ask') {
+  // v4.0.0: 改为**无条件注册**（原先用 `if (permissionMode === 'ask')` 包住）。
+  // 原因：/cd 切项目后权限模式可能从 all 变成 ask，若启动时是 all 则永远没注册确认回调，
+  // 新项目里工具会被静默拒绝。onConfirmTool 只在 permissionChecker 判定"需要确认"时被调用
+  // （见 query-engine.js)，非 ask 模式下根本不会触发，因此无条件注册是安全的。
+  {
     engine.config.onConfirmTool = async (toolName, input) => {
       // 如果已经启用会话全局自动允许，直接通过
       if (engine.permissionChecker.sessionAllowAll) return true

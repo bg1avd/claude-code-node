@@ -203,6 +203,25 @@ export class Config {
     if (projectDir) await this.loadFromProject(projectDir)
   }
 
+  /**
+   * 重新加载配置（供 /cd 切换项目使用）—— 先重置再叠加。
+   *
+   * 为什么必须单独有这个方法：`_load()` 是**累加合并**
+   * (`this.data = this._deepMerge(this.data, data)`)，直接对已加载的实例再调 load()
+   * 会让「上一个项目有、新项目没有」的键**残留**。
+   * 实测症状：从带 `mcp.servers` 的项目切到不带 mcp 的项目，MCP 工具仍然挂着不卸载。
+   * 同理 identity / systemPrompt / tools.customDirs 等也会串项目。
+   *
+   * @param {string} [projectDir] 项目目录；省略 = 只加载用户级
+   */
+  async reload(projectDir) {
+    this.data = structuredClone(DEFAULTS)
+    this._keySources = {}
+    this._raw = {}
+    this._projectPath = projectDir ? join(projectDir, PROJECT_CONFIG_FILE) : null
+    await this.load(projectDir)
+  }
+
   /** 查询顶层键来自哪个配置源: 'user' | 'project' | null(内置默认) */
   keySource(key) {
     return this._keySources[key.split('.')[0]] || null
@@ -277,7 +296,8 @@ export class Config {
   /**
    * 首次从「无项目配置的目录」启动时，生成一个带 `description` 自说明的配置模板。
    *
-   * - 只在**启动**路径调用；运行时 /cd 不调用（关联项目不换角色、也不落文件）。
+   * - 只在**启动**路径调用；`/cd` 切项目时**不调用**（模板是一次性脚手架，不在别人项目里
+   *   凭空落文件；角色切换由 `reload()` 重载已有配置完成，与是否落文件无关）。
    * - 文件已存在则**不动**（返回 false）。
    * - 说明文案语言跟随机器级 `language`（含 zh/中文 → 中文，否则英文）。
    * - `description` 是纯文档，加载器忽略；真正生效的是同级的 `identity` / `systemPrompt` 等。
