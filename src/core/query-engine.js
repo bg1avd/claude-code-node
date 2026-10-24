@@ -20,6 +20,7 @@ import { CostTracker } from './cost-tracker.js'
 import { EnhancedPermissionChecker } from '../security/enhanced-permission.js'
 import { isLocalLlmServer, buildAuthHeaders } from '../utils/index.js'
 import { buildThinkingParams } from './thinking-adapter.js'
+import { EventBus, newReqId, summarizeToolResult } from './event-bus.js'
 
 /**
  * 收尾引导（v3.6.14）—— 工具循环接近上限时注入的 system 指令。
@@ -118,6 +119,9 @@ export class QueryEngineConfig {
     this.onAskUser = options.onAskUser || null            // AskUserQuestion 工具回调（宿主按来源分流，避免远程死锁）
     this.readline = options.readline || null              // 用于 AskUserQuestion 工具
     this.onDelta = options.onDelta || null                // 流式增量回调 {type:'text'|'reasoning', text}（供 VS Code 扩展等 UI 消费）
+    // 内核事件总线（一个内核、N 个视图）。不传则引擎自建一个，
+    // 这样终端/Telegram/socket 都能直接 `engine.bus.subscribe()` 接入，无需改主循环。
+    this.bus = options.bus || null
     this.configStore = options.configStore || null        // 配置实例（供工具读取 web.fetch.jinaApiKey 等；可选）
     // 思考深度（v3.6.18）：{ mode:'auto'|'off'|'on', effort:'', budgetTokens:0 }
     // 由 thinking-adapter 按 provider 翻译成各家真正接受的参数（见 thinking-adapter.js）
@@ -137,6 +141,9 @@ export class QueryEngine {
       projectDir: this.config.cwd,
     })
     this.abortController = null
+    // 事件总线：调用方未注入就自建一个（多个视图共享同一个实例的前提是注入同一个）
+    this.bus = this.config.bus instanceof EventBus ? this.config.bus : new EventBus()
+    this._currentReqId = null
     this.costTracker = this.config.costTracker || new CostTracker({ model: this.config.model })
     this.tokenBudget = this.config.tokenBudget || null
     // 最近一次 processMessage 是否已通过流式回调/直写把正文输出（供调用方避免重复打印 response）
@@ -164,12 +171,46 @@ export class QueryEngine {
     // 新消息已 push，确保上下文 ≤ 窗口（摘要优先，超窗则从最早消息精确裁剪）
     this._ensureFitWindow()
 
+    // 回合开始 —— 所有视图（终端/Telegram/socket attach）从这里知道"内核忙起来了"
+    const reqId = this._currentReqId = newReqId()
+    this.bus?.emit('turn/start', { reqId, source: this.config.source || null })
+    this.bus?.emit('status', { state: 'running' })
+
     try {
       const result = await this._runToolLoop(userMsg)
+      this.bus?.emit('turn/end', {
+        reqId,
+        text: this._clipEventText(result.response),
+        turns: result.turns,
+        aborted: !!result.aborted,
+      })
       return result
+    } catch (err) {
+      // 异常也要给视图一个收尾事件，否则远程界面会永远停在"正在生成"
+      this.bus?.emit('turn/end', {
+        reqId,
+        text: '',
+        turns: this.state.turnCount,
+        aborted: false,
+        error: err?.message || String(err),
+      })
+      throw err
     } finally {
       this.state.isRunning = false
+      this._currentReqId = null
+      this.bus?.emit('status', { state: 'idle' })
     }
+  }
+
+  /**
+   * turn/end 里携带的完整回答需要限长。
+   * 理由：turn/end 会进 replay 环形缓冲（200 条），若每条都塞几百 KB 回答，
+   * 光缓冲区就能吃掉上百 MB；正文已经由 stream 事件逐段给过了，
+   * 这里只需要"可展示/可落盘"的量。
+   */
+  _clipEventText(text, max = 32000) {
+    const s = text == null ? '' : String(text)
+    return s.length > max ? s.slice(0, max) + '\n…（事件流中已截断）' : s
   }
 
   /**
@@ -779,14 +820,43 @@ export class QueryEngine {
    * 阶段2（串行）：按模型给出的顺序依次执行；中断时为剩余调用补齐占位结果
    */
   async _executeToolCalls(toolCalls) {
+    const reqId = this._currentReqId
     // 阶段1：串行安全检查
     const approved = []
     for (const tc of toolCalls) {
       const permResult = await this.permissionChecker.check(tc.name, tc.input)
       if (!permResult.allowed) {
         if (permResult.requiresConfirmation && this.config.onConfirmTool) {
-          const confirmed = await this.config.onConfirmTool(tc.name, tc.input)
-          if (!confirmed) {
+          // 确认请求进事件总线：任何视图（终端 / Telegram / attach）都能应答。
+          // 「先答先赢」—— 谁先回应谁的结果生效，其余视图收到 confirm/resolved 收尾。
+          const confirmId = newReqId('c')
+          const snippet = summarizeToolResult(tc.input, 200)
+          this.bus?.emit('confirm/request', {
+            reqId, id: confirmId, tool: tc.name,
+            question: `允许执行工具「${tc.name}」吗？`,
+            snippet,
+          })
+          let verdict = false
+          let answeredBy = null
+          try {
+            // 第三个参数是给宿主的上下文：confirmId 用于让远程视图"应答同一条请求"，
+            // 不带它的话 attach 端根本无从对应（只能靠猜）。
+            const answer = await this.config.onConfirmTool(tc.name, tc.input, { confirmId, reqId })
+            // 兼容两种返回：布尔（旧）或 { answer, by }（新，便于标出谁答的）
+            if (answer && typeof answer === 'object') {
+              verdict = !!answer.answer
+              answeredBy = answer.by || null
+            } else {
+              verdict = !!answer
+            }
+          } finally {
+            this.bus?.emit('confirm/resolved', {
+              reqId, id: confirmId,
+              answer: verdict ? 'y' : 'n',
+              by: answeredBy,
+            })
+          }
+          if (!verdict) {
             approved.push({ tc, error: '用户未确认' })
             continue
           }
@@ -821,6 +891,12 @@ export class QueryEngine {
         const r = new ToolResult(item.tc.id, item.error, true)
         r.toolName = item.tc.name
         results.push(r)
+        // 未获批准 / 工具不存在 / 已被中断：同样给视图一个明确结局，
+        // 否则远程界面会看到 turn/end 里凭空少了一个工具的结果。
+        this.bus?.emit('tool/result', {
+          reqId, id: item.tc.id, name: item.tc.name, ok: false,
+          skipped: true, summary: item.error,
+        })
         continue
       }
       const { tc, tool } = item
@@ -837,6 +913,11 @@ export class QueryEngine {
       }
 
       tc.status = 'running'
+      // 工具开始/结束都进事件总线：远程视图才能显示"正在跑什么"
+      this.bus?.emit('tool/call', {
+        reqId, id: tc.id, name: tc.name,
+        input: summarizeToolResult(tc.input, 500),
+      })
       try {
         const content = await tool.handler(tc.input, {
           cwd: this.config.cwd,
@@ -848,11 +929,19 @@ export class QueryEngine {
         const r = new ToolResult(tc.id, typeof content === 'string' ? content : JSON.stringify(content), false)
         r.toolName = tc.name
         results.push(r)
+        this.bus?.emit('tool/result', {
+          reqId, id: tc.id, name: tc.name, ok: true,
+          summary: summarizeToolResult(content),
+        })
       } catch (err) {
         tc.status = 'error'
         const r = new ToolResult(tc.id, `工具执行错误: ${err.message}`, true)
         r.toolName = tc.name
         results.push(r)
+        this.bus?.emit('tool/result', {
+          reqId, id: tc.id, name: tc.name, ok: false,
+          summary: summarizeToolResult(`工具执行错误: ${err.message}`),
+        })
       }
     }
     return results
@@ -1198,7 +1287,10 @@ export class QueryEngine {
         if (event.type === 'text') {
           // 记录已流式输出正文（供调用方避免重复打印最终 response）
           if (event.text) this.lastStreamed = true
-          // 实时输出（有 onDelta 回调时交给调用方，如 VS Code 扩展；否则写终端）
+          // ① 事件总线：所有视图（终端/TG/socket）统一从这里拿增量
+          this.bus?.emit('stream', { reqId: this._currentReqId, kind: 'text', text: event.text })
+          // ② 兼容旧 onDelta 回调（VS Code 扩展等既有接入方）
+          // 实时输出（有 onDelta 回调时交给调用方；否则写终端）
           // 终端直写前剥离 ANSI：工具输出里的颜色序列（npm warning 黄色等）若被
           // 截断/复述后只有开启无复位，终端颜色会永久卡死（整屏变黄）
           if (typeof this.config.onDelta === 'function') {
@@ -1209,6 +1301,7 @@ export class QueryEngine {
           currentText += event.text
         } else if (event.type === 'reasoning') {
           // 推理内容（thinking）同样支持回调；无 onDelta 时在终端展示思维链
+          this.bus?.emit('stream', { reqId: this._currentReqId, kind: 'reasoning', text: event.text })
           if (typeof this.config.onDelta === 'function') {
             this.config.onDelta({ type: 'reasoning', text: event.text })
           } else if (this.config.verbose) {

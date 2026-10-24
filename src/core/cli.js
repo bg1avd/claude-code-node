@@ -16,6 +16,7 @@ import { createServer as createNetServer } from 'net'
 import { writeFileSync, unlinkSync, existsSync, mkdirSync, readFileSync, chmodSync, statSync } from 'fs'
 import { join, resolve, basename } from 'path'
 import { QueryEngine, QueryEngineConfig } from './query-engine.js'
+import { AttachHub } from './attach-hub.js'
 import { createDefaultRegistry } from '../tools/index.js'
 import { loadMcpToolsFromConfig, closeMcpTools } from '../mcp/loadTools.js'
 import { loadCustomTools } from '../tools/loadCustomTools.js'
@@ -53,7 +54,7 @@ import { fetchViaSocks5 } from '../channel/tg-proxy.js'
  * 启动 Unix socket 服务器
  * cc-notify 通过此 socket 转发消息给已运行的 cc-node
  */
-function startSocketServer(engine, session, sessionManager, channelManager, verbose) {
+function startSocketServer(engine, session, sessionManager, channelManager, verbose, hub = null) {
   mkdirSync(SOCK_DIR, { recursive: true })
 
   // v1.1 修复: 安全清理残留 socket — 检查 PID 文件确认进程已死
@@ -77,6 +78,11 @@ function startSocketServer(engine, session, sessionManager, channelManager, verb
   }
 
   const server = createNetServer((client) => {
+    // P0（一个内核、N 个视图）：有 AttachHub 时由它接管协议 ——
+    // attach / input / abort / confirm 都走事件总线，客户端看到的是同一份上下文。
+    if (hub) { hub.addClient(client); return }
+
+    // 无 hub 时保留阶段 1 的一问一答协议（老桥直接对接仍然可用）
     // v1.1: socket 连接来源验证 — 只允许同用户连接
     // Unix socket 本身通过文件系统权限保护
     let buffer = ''
@@ -904,8 +910,34 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
     process.exit(0)
   }
 
+  // ============================================================
+  // P0：内核事件总线接入中枢（一个内核、N 个视图）
+  //
+  // 从这里开始，终端 / Telegram / socket attach 是**平级的订阅者**：
+  // 它们看到的是同一个引擎、同一份 state.messages、同一个正在跑的回合。
+  // attach 发来的输入统一走 processInputLine —— 复用命令分发、忙时排队、
+  // 落盘、TG 镜像这一整套既有语义，避免出现"第二条执行路径"。
+  // （processInputLine 是函数声明，已提升到 main 作用域顶部，此处可安全引用）
+  // ============================================================
+  const attachHub = new AttachHub({
+    bus: engine.bus,
+    engine,
+    sessionManager,
+    onSubmit: (text, images) => processInputLine(text, 'attach', null, images),
+    onAbort: () => engine.abort(),
+    // 远程切换会话：与终端 /resume 走同一个函数，保证两边上下文永远一致。
+    // 终端不是 socket 订阅者，所以这里额外打印一行，让本机用户知道上下文被换了。
+    onLoadSession: async (id) => {
+      const r = await loadSessionById(id)
+      if (r.ok) console.log(`\n🔁 会话已切换（来自远程视图）：${r.title} (${r.id})\n`)
+      else console.log(`\n⚠️  远程切换会话失败：${r.error}\n`)
+      return r
+    },
+    log: verbose ? (m) => console.error(m) : () => {},
+  })
+
   // REPL 模式 — 启动 Unix socket 让 cc-notify 能发现
-  startSocketServer(engine, session, sessionManager, channelManager, verbose)
+  startSocketServer(engine, session, sessionManager, channelManager, verbose, attachHub)
 
   // ============================================================
   // REPL 输入处理 — 多行输入（读取完整输入再处理）
@@ -1219,6 +1251,44 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
     return true
   }
 
+  /**
+   * 加载一个已保存的会话 —— `/resume` 与 socket `session_load` 共用同一套逻辑。
+   *
+   * 为什么必须共用：切换会话会**同时改变终端和所有 attach 视图**的上下文
+   * （这就是"一个内核"的必然结果）。两条路径各写一份，迟早出现
+   * "终端切了、远程还停在旧会话"的分裂。
+   *
+   * @param {string} sessionId 完整会话 ID（索引解析由调用方负责）
+   * @returns {Promise<{ok:boolean, id?:string, title?:string, cwd?:string, error?:string}>}
+   */
+  async function loadSessionById(sessionId) {
+    if (engine.state.isRunning) {
+      return { ok: false, error: '当前有任务在跑，先停止再切换会话' }
+    }
+    const loaded = await sessionManager.load(sessionId)
+    if (!loaded) return { ok: false, error: `会话不存在: ${sessionId}` }
+
+    session.id = loaded.id
+    session.title = loaded.title
+    session.messages = loaded.messages
+    session.state = loaded.state || {}
+    engine.state.messages = loaded.messages.map(m => ({
+      role: m.role,
+      content: m.content,
+      toolCalls: m.toolCalls,
+      toolCallId: m.toolCallId,
+    }))
+    engine.state.turnCount = loaded.state?.turnCount || 0
+    if (engine.tokenBudget && loaded.state?.budgetUsed != null) {
+      engine.tokenBudget.used = loaded.state.budgetUsed
+    }
+    // 认领并落盘：老会话可能没有 cwd，load() 已补成当前目录，持久化后
+    // 它才能参与「按目录自动续接」的候选集（也顺带把它顶到最新）。
+    try { await sessionManager.save(loaded) } catch { /* 落盘失败不影响本次续接 */ }
+
+    return { ok: true, id: loaded.id, title: loaded.title, cwd: loaded.cwd }
+  }
+
   async function processInputLine(input, source = 'cli', tgChatId = null, images = []) {
     const trimmed = input.trim()
     if (!trimmed) { showPrompt(); return }
@@ -1276,11 +1346,14 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
     if (trimmed.startsWith('/')) {
       // 用户输入了命令，取消可能存在的"等待模型选择"状态
       pendingModelSelect = false
-      // 来自 Telegram 的命令：捕获 console 输出并回发到 Telegram
+      // 来自远程视图的命令：捕获 console 输出并回发到对应视图
+      //   · Telegram → 回发消息
+      //   · attach   → 回发 command/output 事件（否则远程发 /status 什么都看不到）
       const isTgCmd = source === 'telegram' && tgListener?.bot
+      const isAttachCmd = source === 'attach'
       let tgOut = ''
       const origLog = console.log
-      if (isTgCmd) {
+      if (isTgCmd || isAttachCmd) {
         tgOut = ''
         console.log = (...args) => { tgOut += args.map(String).join(' ') + '\n'; origLog(...args) }
       }
@@ -1596,33 +1669,16 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
             }
             sessionId = list[idx].id
           }
-          const loaded = await sessionManager.load(sessionId)
-          if (!loaded) {
-            console.log(`❌ Session not found: ${sessionId}`)
+          const r = await loadSessionById(sessionId)
+          if (!r.ok) {
+            console.log(`❌ ${r.error}`)
             break
           }
-          session.id = loaded.id
-          session.title = loaded.title
-          session.messages = loaded.messages
-          session.state = loaded.state || {}
-          engine.state.messages = loaded.messages.map(m => ({
-            role: m.role,
-            content: m.content,
-            toolCalls: m.toolCalls,
-            toolCallId: m.toolCallId,
-          }))
-          engine.state.turnCount = loaded.state?.turnCount || 0
-          if (engine.tokenBudget && loaded.state?.budgetUsed != null) {
-            engine.tokenBudget.used = loaded.state.budgetUsed
-          }
-          console.log(`✅ Resumed session: ${loaded.title} (${loaded.id})`)
-          // 认领并落盘：老会话可能没有 cwd，load() 已补成当前目录，这里持久化，
-          // 让它此后能参与「按目录自动续接」的候选集（也顺带把它顶到最新）。
-          try { await sessionManager.save(loaded) } catch { /* 落盘失败不影响本次续接 */ }
+          console.log(`✅ Resumed session: ${r.title} (${r.id})`)
           // 跨目录加载：不自动切目录（意外切走太危险），只提示一条可执行的出路。
-          if (loaded.cwd && loaded.cwd !== process.cwd()) {
-            console.log(`ℹ️  该会话属于 ${loaded.cwd}；当前目录是 ${process.cwd()}（未自动切换）`)
-            console.log(`   想在那个目录继续：/cd ${loaded.cwd} --keep（换目录但保留刚加载的上下文）`)
+          if (r.cwd && r.cwd !== process.cwd()) {
+            console.log(`ℹ️  该会话属于 ${r.cwd}；当前目录是 ${process.cwd()}（未自动切换）`)
+            console.log(`   想在那个目录继续：/cd ${r.cwd} --keep（换目录但保留刚加载的上下文）`)
           }
           console.log(`\n💡 Tip: Use /sessions to list, /resume <id> to switch.`)
           break
@@ -1910,10 +1966,13 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
           console.log(`Unknown command: /${cmd}. Type /help for available commands.`)
       }
       } finally {
-        // 恢复 console.log 并把命令输出回发到 Telegram
-        if (isTgCmd) {
+        // 恢复 console.log，并把命令输出回发到来消息的那个视图
+        if (isTgCmd || isAttachCmd) {
           console.log = origLog
-          if (tgOut.trim()) await sendTelegram(tgOut.trim(), tgChatId || null)
+          if (tgOut.trim()) {
+            if (isTgCmd) await sendTelegram(tgOut.trim(), tgChatId || null)
+            else attachHub?.echo(tgOut.trim())
+          }
         }
       }
       showPrompt()
@@ -2107,11 +2166,26 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
   // 新项目里工具会被静默拒绝。onConfirmTool 只在 permissionChecker 判定"需要确认"时被调用
   // （见 query-engine.js)，非 ask 模式下根本不会触发，因此无条件注册是安全的。
   {
-    engine.config.onConfirmTool = async (toolName, input) => {
+    engine.config.onConfirmTool = async (toolName, input, meta = {}) => {
       // 如果已经启用会话全局自动允许，直接通过
       if (engine.permissionChecker.sessionAllowAll) return true
 
       const snippet = JSON.stringify(input).slice(0, 120) || '(no params)'
+      const confirmTimeoutMs = config.get('scheduler')?.confirmTimeoutMs ?? 60000
+
+      // P0：有 attach 的 controller 在线 → 交给远程视图应答。
+      // 确认请求本身已由内核 emit('confirm/request') 广播给所有视图，
+      // 这里只等"第一个应答"（先答先赢）。
+      // 为什么不同时开终端 rl.question 竞速：readline 的 question 无法安全取消，
+      // 未被消费的回调会把用户下一条正常输入吃掉。因此策略明确——谁在线谁答。
+      if (meta.confirmId && attachHub?.hasController()) {
+        const r = await attachHub.waitConfirm(meta.confirmId, { timeoutMs: confirmTimeoutMs })
+        if (r) {
+          if (r.raw === 'a') engine.permissionChecker.allowAllForSession()
+          return { answer: r.answer, by: r.by }
+        }
+        // 超时无人应答 → 继续走下面的本地/远程兜底逻辑
+      }
 
       // Telegram 远程模式：把权限确认推送到 Telegram，等待远程用户回复 y/n/a
       if (currentSource === 'telegram' && tgListener?.bot) {
@@ -2120,7 +2194,7 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
         return new Promise((resolve) => {
           // 确认超时未决 → 自动拒绝(设计 §17.5.1:放弃而非放行,失败可重试,卡死才致命)
           // 超时由 config scheduler.confirmTimeoutMs 控制(默认 60s;凌晨无人确认不永久卡死)
-          const timeout = config.get('scheduler')?.confirmTimeoutMs ?? 60000
+          const timeout = confirmTimeoutMs
           const timer = setTimeout(() => {
             if (pendingConfirm === resolve) pendingConfirm = null
             resolve(false)

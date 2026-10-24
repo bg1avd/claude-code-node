@@ -1,5 +1,84 @@
 # CHANGELOG
 
+## 4.1.0
+
+> 新能力：**一个内核、N 个视图**。终端、Telegram、`cc-node attach` 现在共享同一个引擎、
+> 同一份上下文、同一个正在跑的回合。无破坏性变更，老接入方式全部继续可用。
+
+### ✨ 内核事件总线（`src/core/event-bus.js`）
+
+主循环此前只有一个出口 `config.onDelta`，被硬编码成"写终端 + 推 Telegram"，
+每接一个新界面就要再塞一段 if。现在内核把「发生了什么」发布成可订阅的事件：
+
+```
+turn/start → stream → tool/call → tool/result → confirm/request → turn/end → status
+```
+
+- 事件带**单调递增 seq**，客户端重连按 seq 补齐
+- `stream` 不进 replay 环形缓冲（每回合数千条会把结构性事件挤掉）；
+  改为在中途接入时补一条 `turn/snapshot`（当前已生成文本）
+- **订阅者异常隔离**：某个视图渲染报错，内核照常跑
+- 兼容：`onDelta` 与 `{type:'user_input'}`→`{type:'reply'}` 老协议不受影响
+
+### ✨ `cc-node attach`：接入正在运行的那个内核
+
+```bash
+cc-node            # 终端 A：内核
+cc-node attach     # 终端 B：同一份上下文（可输入 / Ctrl+C 中断）
+cc-node attach --viewer        # 只读围观
+cc-node attach --since <seq>   # 断线重连，补齐结构性事件
+```
+
+- 内核未运行时**明确报错退出，绝不自动 spawn**（进程必须可见，否则退出时梦境会丢）
+- 拒绝 `--stdio` 那套"另起一个实例"的假共享
+- 交互命令：`/sessions` 列表 · `/resume <id>` 切换 · `/history [n]` 补正文 · `/abort` · `/quit`
+
+### ✨ socket 协议升级（`src/core/attach-hub.js`）
+
+- 新增 `attach` / `input` / `abort` / `confirm` / `session_list` / **`session_load`** / **`turn_history`**
+- **回合串行**：忙时返回 `queued`，`turn/end` 后按 FIFO 自动执行（不丢消息）
+- **确认先答先赢**：一条确认请求只有一个正确答案，第一个应答生效，
+  其余视图收到 `confirm/resolved`（`by` 字段说明是谁答的；`a` 表示本会话全部允许）
+- `viewer` 严格只读：`input`/`abort`/`confirm`/`session_load` 一律拒绝；
+  `turn_history` / `session_list` 允许（只读操作）
+- **视图崩了不带崩内核**：写 socket 失败就摘掉该客户端
+- 分包/粘包/超长行护栏（8MB 单行上限）
+
+### ✨ 会话切换（`session_load`）
+
+远程视图可以切历史会话了，且与终端 `/resume` **共用同一个函数**
+（`loadSessionById`），不会出现"终端切了、远程还停在旧会话"的分裂。
+
+- 回合进行中拒绝切换（避免上下文被换掉后继续跑）
+- 切换成功广播 `session/loaded`，所有视图刷新显示；终端也打印一行提示
+- 终端 `/resume` 的原有行为（索引解析、跨目录提示、认领落盘）全部保留
+
+### ✨ 正文补全（`turn_history` + 回合归档）
+
+`stream` 事件量太大不进环形缓冲，所以重连后原本只能看到结构性事件。现在补齐两层：
+
+| 场景 | 机制 |
+|:--|:--|
+| 回合**进行中**接入 | `turn/snapshot`：当前累积正文 + reasoning |
+| 回合**已结束** | `turn_history`：服务端保留最近 **20** 个回合的完整正文（含 reasoning / 中断 / 出错标记） |
+| `sinceSeq` 已滚出缓冲 | 显式发 `notice` **告知缺口**，不再假装补全 |
+
+`attach` 里用 `/history [n]` 拉取。
+
+### 🐛 修复
+
+- **事件流时间线错乱**：`stream` 合批窗口 16ms，而结构性事件立即发送，
+  导致客户端先收到 `turn/end`、后收到正文。现在发结构性事件前会强制 flush 增量。
+  （真机端到端验证时抓到，已加回归测试）
+- **`EventBus.emit` 字段越权**：payload 里的 `type`/`seq` 会覆盖内核权威字段。
+  改为先铺 payload、后写权威字段。
+
+### 🧪 测试
+
+新增 50 条：`event-bus.test.js`(13)、`query-engine-events.test.js`(5)、
+`attach-hub.test.js`(28)、`attach-socket.integration.test.js`(4)。
+全套 **602** 条通过。
+
 ## 4.0.0
 
 > **这是一个 major 版本**，因为有两处**破坏性行为变更**（不是功能多少的问题）：
