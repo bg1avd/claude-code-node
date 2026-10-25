@@ -17,6 +17,10 @@ import { writeFileSync, unlinkSync, existsSync, mkdirSync, readFileSync, chmodSy
 import { join, resolve, basename } from 'path'
 import { QueryEngine, QueryEngineConfig } from './query-engine.js'
 import { AttachHub } from './attach-hub.js'
+// 命令元信息（协议下发 + 忙时白名单）单独成模块，见 commands.js
+import { buildCommandList, BUSY_SAFE_COMMANDS } from './commands.js'
+// 会话消息分页游标（接入反馈 P2-3）：抽成独立模块才测得到真实实现
+import { sliceMessagesForPage } from './message-paging.js'
 import { createDefaultRegistry } from '../tools/index.js'
 import { loadMcpToolsFromConfig, closeMcpTools } from '../mcp/loadTools.js'
 import { loadCustomTools } from '../tools/loadCustomTools.js'
@@ -377,6 +381,7 @@ const DETAILED_HELP = {
   exit:    "/exit\n  Exit cc-node. Same as Ctrl+C or /quit.",
   quit:    "/quit\n  Exit cc-node. Same as Ctrl+C or /exit.",
 }
+
 
 // ============================================================
 // 参数解析
@@ -947,20 +952,15 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
       // 用 read() 而不是 load()：拉历史只是"看"，绝不能把内核当前会话切走
       const data = await sessionManager.read(id)
       if (!data) return { sessionId: id, messages: [], total: 0, error: `会话不存在: ${id}` }
-      const all = Array.isArray(data.messages) ? data.messages : []
-      let end = all.length
-      if (before) {
-        const idx = all.findIndex((m, i) => m?.timestamp === before)
-        if (idx >= 0) end = idx
-      }
-      const n = Math.max(1, Math.min(Number(limit) || 200, 2000))
-      const slice = all.slice(Math.max(0, end - n), end)
+      const page = sliceMessagesForPage(data.messages, { before, limit })
       return {
         sessionId: data.id,
         title: data.title,
-        messages: slice,
-        total: all.length,
-        truncated: end - n > 0,
+        messages: page.messages,
+        total: Array.isArray(data.messages) ? data.messages.length : 0,
+        truncated: page.truncated,
+        // 绝对定位游标（接入反馈 P2-3）：客户端原样回传即可，永不受时间戳撞车影响
+        nextBefore: page.nextBefore,
       }
     },
     // "我现在在跟谁说话" —— attach 握手时一次性给全（审计 P1-4）
@@ -987,6 +987,9 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
         nextRun: task.dueAt ?? null,
       }))
     },
+    // 命令清单（接入反馈 P2-1）：让 App 的命令面板永远和内核同步，
+    // 不必把 HELP_TEXT 抄一份到桥里、内核加命令就发版
+    getCommands: () => buildCommandList(),
     log: verbose ? (m) => console.error(m) : () => {},
   })
 
@@ -1450,6 +1453,23 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
       }
       try {
       const [cmd, ...rest] = trimmed.slice(1).split(' ')
+
+      // 忙时命令白名单（接入反馈 P1）。
+      //
+      // 背景：attach 的命令现在**不再排队**（attach-hub 里 `/` 开头直接放行），
+      // 于是命令会在"内核仍在跑回合"时到达这里。只读命令和 /stop 无所谓，
+      // 但 /clear、/cd、/compact、/model 这类会改动上下文或配置的命令，
+      // 在回合跑到一半时执行会把正在跑的那轮搞坏（例如上下文被换掉后
+      // 引擎还在往里追加消息）。
+      //
+      // 白名单的语义是"忙时也能执行"，其余一律**明确拒绝**并告知原因，
+      // 而不是像以前那样静默排队 —— 用户至少知道发生了什么、下一步做什么。
+      if (engine.state.isRunning && !BUSY_SAFE_COMMANDS.has(cmd)) {
+        console.log(`⏸️  内核正在运行，已拒绝「/${cmd}」：它会改动当前上下文/配置。\n   先 /stop 再执行，或等这轮跑完。`)
+        showPrompt()
+        return
+      }
+
       switch (cmd) {
         case 'help':
           if (rest[0]) {
@@ -2067,7 +2087,16 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
           console.log = origLog
           if (tgOut.trim()) {
             if (isTgCmd) await sendTelegram(tgOut.trim(), tgChatId || null)
-            else attachHub?.echo(tgOut.trim())
+            // reqId：让客户端把这段输出挂到**触发它的那条命令**下面（接入反馈 P2-2）。
+            // 之前不带 reqId，两条命令连着发、或输出与 AI 正文交错时只能靠"最近一条"
+            // 猜，一定会串台。
+            // done：这条命令的输出到此结束。没有正文也要发（纯副作用命令），
+            // 否则客户端的气泡永远停在"执行中"。
+            else attachHub?.echo(tgOut.trim(), { reqId: opts.reqId ?? null, done: true })
+          } else if (isAttachCmd) {
+            // 命令执行了但没有任何 console 输出（例如 /stop 在没有运行任务时）
+            // —— 仍要告诉客户端"这条命令处理完了"，同样带 reqId。
+            attachHub?.echo('', { reqId: opts.reqId ?? null, done: true })
           }
         }
       }

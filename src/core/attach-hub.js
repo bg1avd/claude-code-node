@@ -32,16 +32,18 @@
  *   { type:'session_messages', sessionId?:string, limit?:number, before?:string }
  *   { type:'turn_history', limit?:number }
  *   { type:'scheduler_list' }
+ *   { type:'command_list' }
  *   { type:'ping' }
  *   { type:'user_input', text }          // 阶段 1 兼容
  *
  * 服务端 → 客户端：EventBus 事件原样转发（NDJSON），另有
  *   { type:'attached', pid, role, running, session, sessionTitle, cwd, model,
- *     permissionMode, confirmable, lastSeq, historyAvailable, replaySize, maxLine }
+ *     permissionMode, confirmable, lastSeq, historyAvailable, replaySize, maxLine, queued }
  *   { type:'sessions', list }
- *   { type:'session/messages', sessionId, messages, total, truncated }
- *   { type:'scheduler/list', tasks }
- *   { type:'command/output', text }
+ *   { type:'session/messages', sessionId, messages, total, truncated, nextBefore }
+ *   { type:'scheduler/list', available, tasks }
+ *   { type:'commands', supported, list }
+ *   { type:'command/output', text, reqId, done }
  *   { type:'error', text }
  *   { type:'queued', position, clientReqId }
  */
@@ -69,6 +71,17 @@ const MAX_LINE = 8 * 1024 * 1024
 const MAX_OUTBUF = 8 * 1024 * 1024
 /** 排队输入撞上"宿主又忙了"时的重试间隔 */
 const RETRY_MS = 300
+/**
+ * 重试上限（≈ 10 分钟）。
+ *
+ * 为什么必须有上限：无上限的重试是"排队死信"的镜像问题 —— 消息既不执行、
+ * 也不报错，客户端只能干等（正是审计 P0-1 那一类事故）。到了上限就把队列
+ * 里的消息逐条回一个 error，让用户知道"要重发"，而不是永远安静。
+ *
+ * 10 分钟的依据：单回合跑十几分钟是可能的（长任务），但超过这个量级基本是
+ * 内核卡住了，继续等没有意义。
+ */
+const RETRY_MAX_TRIES = Math.ceil((10 * 60 * 1000) / RETRY_MS)
 
 export class AttachHub {
   /**
@@ -83,11 +96,12 @@ export class AttachHub {
    * @param {(q:{sessionId?:string,limit?:number,before?:string})=>Promise<object>} [opts.onSessionMessages]
    * @param {()=>object} [opts.getContext] 当前运行上下文：cwd / model / permissionMode / sessionTitle / sessionId
    * @param {()=>object[]} [opts.getSchedules] 定时任务列表（供 scheduler_list）
+   * @param {()=>object[]} [opts.getCommands] 命令清单（供 command_list，接入反馈 P2-1）
    * @param {(msg:string)=>void} [opts.log]
    */
   constructor({
     bus, engine, sessionManager, onSubmit, onAbort, onLoadSession,
-    onNewSession, onSessionMessages, getContext, getSchedules, log = () => {},
+    onNewSession, onSessionMessages, getContext, getSchedules, getCommands, log = () => {},
   }) {
     this.bus = bus
     this.engine = engine
@@ -99,6 +113,7 @@ export class AttachHub {
     this.onSessionMessages = onSessionMessages || null
     this.getContext = getContext || (() => ({}))
     this.getSchedules = getSchedules || null
+    this.getCommands = getCommands || null
     this.log = log
 
     /** @type {Set<object>} */
@@ -109,6 +124,8 @@ export class AttachHub {
     this._pendingConfirms = new Map()
     this._drainTimer = null
     this._retryTimer = null
+    /** 连续重试次数（成功消化一条就归零，见 _scheduleRetry） */
+    this._retryTries = 0
     this._disposed = false
 
     this._unsub = this.bus.subscribe((ev) => this._onBusEvent(ev), { name: 'attach-hub' })
@@ -289,6 +306,12 @@ export class AttachHub {
         this._sendSchedules(client, msg)
         return
 
+      // 命令清单（接入反馈 P2-1）：接入方不该去读源码里的 HELP_TEXT 再硬编码，
+      // 内核加一条命令就要跟着发一次版。这里由宿主给出机器可读清单。
+      case 'command_list':
+        this._sendCommands(client)
+        return
+
       // 阶段 1 兼容：老客户端（cc-notify / 已有桥）发 user_input 时**不会** attach，
       // 也不认事件流。它期待的是 {type:'reply', text}。这条路径必须原样保留，
       // 否则升级内核会静默打断所有既有接入方。
@@ -416,8 +439,24 @@ export class AttachHub {
       return
     }
     const clientReqId = typeof reqId === 'string' && reqId ? reqId : null
-    // 回合串行：忙就排队，空闲立刻执行
-    if (this._isBusy() || this.queue.length > 0) {
+
+    /**
+     * 斜杠命令不参与回合排队（接入反馈 P1）。
+     *
+     * Telegram 侧的命令是在**忙检查之前**分流的（`_handleCommand` 先跑），
+     * 所以 AI 正在生成时手机发 `/status` 立即有回复，而 attach 侧却要等整个
+     * 回合跑完 —— 同一个内核两种行为，用户感受是"看着正在思考，什么命令都
+     * 发不进去"。命令本身几乎不耗时（读状态 / 切配置 / 中止回合），排队
+     * 没有任何收益。
+     *
+     * 但"哪条命令能在忙时执行"属于**内核的命令语义**，不该硬编码在 hub 里，
+     * 否则以后加命令要改两处、迟早漂移。所以这里只做"命令不排队"这一件事，
+     * 真正的安全边界交给宿主（`processInputLine` 里的忙时白名单）。
+     */
+    const isCommand = /^\s*\//.test(text)
+
+    // 回合串行：忙就排队，空闲立刻执行（命令除外，见上）
+    if (!isCommand && (this._isBusy() || this.queue.length > 0)) {
       if (this.queue.length >= MAX_QUEUE) {
         this._send(client, { type: 'error', text: `队列已满（${MAX_QUEUE} 条），请稍后再发` })
         return
@@ -426,10 +465,10 @@ export class AttachHub {
       this._send(client, { type: 'queued', position: this.queue.length, clientReqId })
       return
     }
-    this._runInput(text, images, clientReqId, client)
+    this._runInput(text, images, clientReqId, client, { isCommand })
   }
 
-  async _runInput(text, images, reqId, origin = null) {
+  async _runInput(text, images, reqId, origin = null, opts = {}) {
     try {
       // reqId 透传（审计 P1-5）：客户端自己的消息 ID 会一路带到 turn/start.reqId，
       // 否则客户端收到 queued / turn/start 时无法判断"这是不是我那条"，两条连续
@@ -439,7 +478,10 @@ export class AttachHub {
       // 竞态：hub 判定空闲，但宿主（终端）刚好开了新回合。
       // 旧行为是 processInputLine 直接 return → 消息凭空消失，客户端零反馈。
       // 现在放回队首，等内核真正空闲再执行。
-      if (e?.code === 'CC_NODE_BUSY') {
+      //
+      // 命令例外：命令从不排队（见 _handleInput），放回队列会让它排在一堆
+      // 对话输入后面，"立即执行"的承诺又破了。命令失败就直接回错。
+      if (e?.code === 'CC_NODE_BUSY' && !opts.isCommand) {
         this.queue.unshift({ text, images: Array.isArray(images) ? images : [], reqId, client: origin })
         this._scheduleRetry()
         return
@@ -529,14 +571,32 @@ export class AttachHub {
    *
    * 为什么不走 EventBus：命令输出是"对某次请求的应答"，不是内核的全局事实。
    * 进 replay 的话，客户端重连会被一堆旧命令输出淹掉。
+   *
+   * @param {string} text
+   * @param {object} [meta]
+   * @param {string|null} [meta.reqId] 触发这条输出的命令对应的 clientReqId
+   *   （接入反馈 P2-2）。一次命令的输出现在是一整段，但客户端仍需要知道
+   *   "它属于哪条命令"——两条命令连着发、或输出与 AI 正文交错时会串台。
+   * @param {boolean} [meta.done] 这条命令的输出到此结束。即便没有正文
+   *   （命令无输出 / 只有副作用）也会发，客户端据此收尾气泡。
    */
-  echo(text) {
+  echo(text, meta = {}) {
     const body = String(text ?? '')
-    if (!body) return
+    const done = !!meta.done
+    if (!body && !done) return
     for (const c of this.clients) {
       if (c.closed) continue
-      if (c.legacy) this._send(c, { type: 'reply', text: body })
-      else if (c.attached) this._send(c, { type: 'command/output', text: body })
+      if (c.legacy) {
+        // legacy 只认 reply/error：命令输出降级成 reply，且不能因为 done 发空消息
+        if (body) this._send(c, { type: 'reply', text: body })
+      } else if (c.attached) {
+        this._send(c, {
+          type: 'command/output',
+          text: body,
+          reqId: meta.reqId ?? null,
+          done,
+        })
+      }
     }
   }
 
@@ -689,10 +749,36 @@ export class AttachHub {
 
   _scheduleRetry() {
     if (this._disposed || this._retryTimer) return
+    if (++this._retryTries > RETRY_MAX_TRIES) {
+      this._abandonQueue(`内核持续繁忙超过 ${Math.round(RETRY_MAX_TRIES * RETRY_MS / 60000)} 分钟`)
+      return
+    }
     this._retryTimer = setTimeout(() => {
       this._retryTimer = null
       this._drainQueue()
     }, RETRY_MS)
+  }
+
+  /**
+   * 放弃整条队列 —— 每条都回 error，绝不静默丢弃。
+   *
+   * 这不是"失败处理"的边角料：客户端已经把消息发出去了、界面在等结果，
+   * 默默清空队列等于骗它。宁可报错让用户重发。
+   */
+  _abandonQueue(reason) {
+    const dropped = this.queue.splice(0)
+    this._retryTries = 0
+    if (!dropped.length) return
+    this.log(`[attach] 放弃 ${dropped.length} 条排队输入：${reason}`)
+    for (const item of dropped) {
+      if (item?.client && !item.client.closed) {
+        this._send(item.client, {
+          type: 'error',
+          text: `排队消息未被执行（${reason}），请稍后重发`,
+          reqId: item.reqId ?? null,
+        })
+      }
+    }
   }
 
   _drainQueue() {
@@ -705,6 +791,7 @@ export class AttachHub {
       return
     }
     const next = this.queue.shift()
+    this._retryTries = 0   // 成功消化一条 → 重试计数归零（下一个回合重新算）
     // 让出事件循环：turn/end 的广播要先把"结束态"送到视图，再开下一回合
     Promise.resolve(this._runInput(next.text, next.images, next.reqId, next.client))
       .finally(() => {
@@ -757,10 +844,34 @@ export class AttachHub {
           messages: Array.isArray(r?.messages) ? r.messages : [],
           total: r?.total ?? 0,
           truncated: !!r?.truncated,
+          nextBefore: r?.nextBefore ?? null,
           error: r?.error || null,
         })
       })
       .catch((e) => this._send(client, { type: 'error', text: `读取会话消息失败: ${e?.message || e}` }))
+  }
+
+  /**
+   * 下发命令清单（接入反馈 P2-1）。
+   *
+   * 宿主没提供 getCommands 时回 supported:false —— 和 scheduler 一样，
+   * 不能假装"支持但列表为空"，那会让客户端画出空面板。
+   */
+  _sendCommands(client) {
+    if (!this.getCommands) {
+      this._send(client, { type: 'commands', supported: false, list: [] })
+      return
+    }
+    Promise.resolve()
+      .then(() => this.getCommands())
+      .then((list) => {
+        this._send(client, {
+          type: 'commands',
+          supported: Array.isArray(list),
+          list: Array.isArray(list) ? list : [],
+        })
+      })
+      .catch((e) => this._send(client, { type: 'error', text: `读取命令清单失败: ${e?.message || e}` }))
   }
 
   /** 定时任务列表（审计 P2-7：文档承诺"客户端可见"，协议层必须有对应消息） */

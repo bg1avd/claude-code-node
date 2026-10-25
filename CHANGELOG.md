@@ -1,5 +1,61 @@
 # CHANGELOG
 
+## 4.1.2
+
+> 修复接入方（cc-node-mobile）v4.1.1 实机两周后反馈的 **1 个 P1 + 3 个 P2 + 1 处文档时序**。
+> 全部逐条复现后修复，无破坏性变更；`command/output` 只增字段，旧客户端不受影响。
+
+### 🟠 P1：attach 的斜杠命令在「内核忙」时被排队（与 Telegram 不一致）
+
+同一个内核、同一条 `/status`：Telegram 立即有回复，手机端却要等整个回合跑完 ——
+用户感受是"看着正在思考，什么命令都发不进去"；更糟的是 AI 卡住时 `/stop` 也进不来。
+
+- **命令不再参与回合排队**（`attach-hub`）：`/` 开头的输入直接交给宿主，不入队、不占队列位。
+  hub 只负责"命令不排队"，不硬编码命令语义 —— 否则以后加命令要改两处、迟早漂移。
+- **安全边界放在内核**（`cli.js`）：新增忙时白名单。忙时立即执行：`/help` `/status` `/session`
+  `/sessions` `/cost` `/api` `/tools` `/config` `/budget` `/window` `/models` `/keys` `/stop`；
+  会改动上下文/配置的（`/clear` `/cd` `/resume` `/compact` `/model` `/allow` …）**明确拒绝**并说明原因。
+- 白名单是**白名单而非黑名单**：新命令默认"忙时拒绝"，忘记归类的代价只是等一会儿，而不是把回合搞坏。
+- 实测：忙时 `/status` **49ms** 返回（反馈方实测 5 秒内无任何输出）；忙时 `/stop` 50ms 生效并正确中止回合。
+- 顺带修掉一个自己埋的坑：`_scheduleRetry` 原本**永不放弃**（宿主一直忙就无限重试、不报错）——
+  这是"排队死信"的镜像问题。现在 10 分钟后退队并逐条回 `error`，绝不静默丢弃。
+
+### 🟡 P2-1：新增「命令清单」协议
+
+`{type:'command_list'}` → `{type:'commands', supported, list[]}`，每条含
+`cmd / desc / needsArg / options / danger / busySafe / secret / aliases`。
+
+接入方不必再把 `HELP_TEXT` 抄进桥里、内核加命令就跟着发版。数据源独立成
+`src/core/commands.js`（零依赖，可直接测），并用一条**源码扫描测试**校验它与 `cli.js`
+的 `switch (cmd)` 不漂移：漏一条、多一条都会红。
+
+### 🟡 P2-2：`command/output` 带 `reqId` 与 `done`
+
+一次命令输出现在标明"属于哪条命令、到此结束"。两条命令连着发、或输出与 AI 正文
+交错时不再串台；纯副作用命令（无正文）也会收到一条 `done`，客户端气泡不会永远转圈。
+legacy 客户端行为不变（只收有正文的 `reply`）。
+
+### 🟡 P2-3：`session_messages` 分页游标改为绝对定位
+
+旧实现 `findIndex(m => m.timestamp === before)` 只取第一个匹配，而 user/assistant
+可能同毫秒落盘（实测差 4~6ms，迁移/批量导入的旧会话可能完全相同）→ 撞车时重复或漏一条。
+
+- 新增 `nextBefore: {index, timestamp}`，原样回传即可精确翻页
+- 同时接受数字下标与 `{index}`（绝对定位优先）
+- 旧的时间戳字符串游标**保持原语义**（不引入新意外），文档明确"要精确请用 `nextBefore`"
+- 逻辑抽出为 `src/core/message-paging.js`，测试直接打真实实现（不再测影子代码）
+
+### 📄 文档
+
+- `BRIDGE_MIGRATION.md` 补：**`turn/end` 一定早于 `status{idle}`**（客户端不该在
+  `turn/end` 时刻读运行状态）、`attached.running` 是**快照**（变化看 `status`）、
+  命令不排队与 `busySafe` 语义、`command_list` 章节（六点六）、`nextBefore` 用法
+
+### 测试
+
+`645 / 645` 通过（新增 17 条，`attach-busy-commands.test.js`）。
+Node 20（与 CI 一致）与 Node 24 双跑。
+
 ## 4.1.1
 
 > 修复 v4.1.0 socket 协议里 **4 个 P0 / 7 个 P1 / 7 个 P2** 缺陷。
