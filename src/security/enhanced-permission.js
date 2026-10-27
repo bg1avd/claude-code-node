@@ -27,13 +27,16 @@ export const PermissionDecision = {
  * 工具权限规则
  */
 export class PermissionRule {
-  constructor({ tool, pattern, decision, reason, expiresAt = null }) {
+  constructor({ tool, pattern, decision, reason, expiresAt = null, sessionScoped = false }) {
     this.tool = tool // 工具名或 '*'（所有工具）
     this.pattern = pattern // 匹配模式（glob 或 regex 字符串）
     this.decision = decision // allow / deny / ask
     this.reason = reason // 规则原因
     this.createdAt = Date.now()
     this.expiresAt = expiresAt // 过期时间（会话级规则）
+    // 会话级标记：只在本进程有效，`/allow reset` 可以撤销。
+    // 不能用 reason 文本去猜（文案会变），也不能靠 expiresAt（会话级规则不过期）。
+    this.sessionScoped = sessionScoped
   }
 
   /** 检查规则是否已过期 */
@@ -103,6 +106,7 @@ export class EnhancedPermissionChecker {
       decision: PermissionDecision.ALLOW,
       reason: '用户会话级授权',
       expiresAt: null, // 会话级不过期，但可以手动清除
+      sessionScoped: true,
     })
   }
 
@@ -124,6 +128,10 @@ export class EnhancedPermissionChecker {
   // 重置会话允许状态
   resetSessionAllow() {
     this.sessionAllowAll = false
+    // 会话级规则必须一并撤销 —— `/allow reset` 的语义是「回到逐个确认」。
+    // 旧实现只清 sessionAllowAll，于是 `/allow Bash` 之后 `/allow reset` 形同虚设：
+    // 提示写着已恢复 ask，实际 Bash 依然免确认（真实报障）。
+    this.rules = this.rules.filter(r => !r.sessionScoped)
   }
 
   // 允许指定工具（会话级规则）
@@ -133,6 +141,7 @@ export class EnhancedPermissionChecker {
       pattern,
       decision: PermissionDecision.ALLOW,
       reason: '用户手动允许',
+      sessionScoped: true, // 只在本进程有效，/allow reset 撤销，不写配置
     })
   }
 
@@ -172,7 +181,13 @@ export class EnhancedPermissionChecker {
     // 2. 规则匹配
     this.cleanupRules()
     for (const rule of this.rules) {
-      if (rule.tool === toolName || rule.tool === '*') {
+      // 工具名比较**忽略大小写**：用户可能写 `/allow bash`，工具注册名是 `Bash`。
+      // 忽略大小写只会放宽"用户显式授权的同一工具"，不会放宽到别的工具。
+      const sameTool = rule.tool === '*' || (
+        typeof rule.tool === 'string' && typeof toolName === 'string'
+        && rule.tool.toLowerCase() === toolName.toLowerCase()
+      )
+      if (sameTool) {
         if (rule.matches(this._extractPattern(toolName, input))) {
           if (rule.decision === PermissionDecision.DENY) {
             this._log(toolName, input, false, `规则拒绝：${rule.reason}`)

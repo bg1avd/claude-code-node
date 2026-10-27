@@ -161,6 +161,10 @@ export class CostTracker {
     }
     lines.push(`   ───────────────────────────────`)
     lines.push(`   Total:         $${cost.total.toFixed(4)}`)
+    // 诚实标注：这张表有三个失真来源（缓存未单独计价 / 不分峰谷 / 价格表是快照），
+    // 日常多轮对话普遍偏高 5~12 倍。真实账单以厂商后台为准，原因见 README 与 /help cost。
+    lines.push(`   ⚠️  估算值（通常偏高）：缓存命中未单独计价 + 不分峰谷 + 价格表为快照`)
+    lines.push(`      真实费用请以厂商后台为准；原因见 /help cost`)
     return lines.join('\n')
   }
 

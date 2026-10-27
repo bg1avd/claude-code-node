@@ -302,6 +302,8 @@ Commands:
   /window [N]    — Show/set context window (e.g. /window 128k, /window auto)
   /max-turns [N] — Tool-loop turn limit (0 = unlimited, DEFAULT; e.g. /max-turns 20)
   /thinking [auto|off|on] [effort] — 思考深度（按厂商翻译；立即生效并持久化）
+      effort = none|minimal|low|medium|high|xhigh|max   例：/thinking effort high
+      （改档位必须带 effort 关键字，/thinking high 会被拒绝；详见 /help thinking）
   /channel CMD   — Manage notification channels (list|send|test)
   /cost          — Show API cost report
   /compact       — Manually compact conversation context
@@ -362,13 +364,13 @@ const DETAILED_HELP = {
 
   window:  "/window [N|auto|reset]\n  Show or set the LLM context window (max tokens allowed in conversation).\n  This is the hard ceiling for auto-compression — context will never exceed it.\n\n  Subcommands:\n    (no arg)   — Show current window + its source (manual/probe/table/fallback) + usage\n    /window 128k — Manually set window (persisted to config). Accepts K/M suffix:\n                  64k, 128k, 200k, 1m, or a raw number like 131072.\n    /window auto  — Clear manual override, return to auto-detection (next message re-detects).\n    /window reset — Clear manual override AND re-detect now.\n\n  Manual setting takes priority over auto-detection and survives restart.\n  Auto-detection itself is NOT persisted (re-runs at each startup).\n\n  Examples:\n    /window\n    /window 128k\n    /window 64k\n    /window auto\n    /window reset",
 
-  thinking: "/thinking [auto|off|on] [effort]\n  \u601d\u8003\u6df1\u5ea6\u63a7\u5236\u3002\u5404\u5bb6\u867d\u90fd\u79f0 'OpenAI \u517c\u5bb9'\uff0c\u4f46'\u600e\u4e48\u8bbe\u7f6e\u601d\u8003\u6df1\u5ea6'\u5404\u4e0d\u76f8\u540c\uff0c\n  \u672c\u547d\u4ee4\u4f1a\u6309\u4f60\u5f53\u524d\u7684 apiBase/model \u8bc6\u522b\u5382\u5546\uff0c\u7ffb\u8bd1\u6210\u5bf9\u65b9\u771f\u6b63\u63a5\u53d7\u7684\u53c2\u6570\u3002\n\n  \u6a21\u5f0f:\n    auto  \u2014 \u6309\u63d0\u4f9b\u5546\u9ed8\u8ba4\uff08DeepSeek \u9ed8\u8ba4\u5173\u601d\u8003\uff1b\u5176\u4ed6\u4e0d\u5e72\u9884\uff09\n    off   \u2014 \u660e\u786e\u5173\u95ed\u601d\u8003\n    on    \u2014 \u660e\u786e\u5f00\u542f\uff0c\u6df1\u5ea6\u53d6 effort\n\n  effort \u53d6\u503c: none|minimal|low|medium|high|xhigh|max\n    \u4f1a\u6309\u5382\u5546\u5141\u8bb8\u7684\u96c6\u5408\u88c1\u526a\uff08\u5982 Kimi \u53ea\u8ba4 low/high/max \u2192 \u8bf7\u6c42 medium \u5b9e\u9645\u53d6 high\uff09\u3002\n\n  \u5b9e\u4f8b:\n    /thinking            \u2014 \u67e5\u770b\u5f53\u524d\u8bbe\u7f6e + \u5b9e\u9645\u4f1a\u53d1\u9001\u7684\u53c2\u6570\n    /thinking off        \u2014 \u5173\u95ed\u601d\u8003\n    /thinking on high    \u2014 \u5f00\u542f\u5e76\u7528 high\n    /thinking effort low \u2014 \u53ea\u6539\u6df1\u5ea6\n\n  \u6539\u52a8\u7acb\u5373\u751f\u6548\uff08\u65e0\u9700\u91cd\u542f\uff09\u5e76\u6301\u4e45\u5316\u3002\n  \u82e5\u670d\u52a1\u7aef\u4e0d\u63a5\u53d7\u601d\u8003\u53c2\u6570\uff08400\uff09\uff0c\u4f1a\u81ea\u52a8\u5265\u79bb\u53c2\u6570\u91cd\u8bd5\u4e00\u6b21\uff08\u4e0d\u4f1a\u56e0\u6b64\u4e0d\u53ef\u7528\uff09\u3002",
+  thinking: "/thinking [auto|off|on] [effort]\n  思考深度控制。各家虽都称 'OpenAI 兼容'，但「怎么设置思考深度」各不相同，\n  本命令会按你当前的 apiBase/model 识别厂商，翻译成对方真正接受的参数。\n\n  三种写法:\n    /thinking                  查看当前设置 + 实际会发送的参数\n    /thinking <mode>           切换模式（auto | off | on）\n    /thinking <mode> <effort>  切模式并指定档位   例：/thinking on high\n    /thinking effort <effort>  只改档位，模式不变   例：/thinking effort max\n\n  ⚠️  /thinking high 这种「裸档位」不生效（会提示用法错误）。\n      档位要么跟在模式后面，要么用 effort 关键字。\n  ⚠️  DeepSeek 在 auto 模式下默认「关闭」思考：只设 effort 不会开启思考，\n      必须 /thinking on <档位>（或先 /thinking on）。\n      判断是否真开了，看上面输出的 Request 行：出现 「disabled」 就是没开。\n\n  模式:\n    auto  — 按提供商默认（DeepSeek 默认关思考；其他不干预）\n    off   — 明确关闭思考\n    on    — 明确开启，档位取 effort（未指定时默认 medium）\n\n  effort 取值（由浅到深）:\n    none | minimal | low | medium | high | xhigh | max\n    实际档位按厂商允许的集合裁剪，不会报错：\n      DeepSeek  low|medium|high     （请求 max    → 实际 high）\n      Kimi      low|high|max        （请求 medium → 实际 high）\n      OpenAI    全部七档\n      GLM       仅开关，无档位\n    完整对照见 src/core/thinking-adapter.js 头部注释。\n\n  改动立即生效（无需重启）并持久化到用户级配置。\n  若服务端不接受思考参数（400），会自动剥离参数重试一次（不会因此不可用）。",
 
   'max-turns': "/max-turns [N]\n  Tool-loop turn limit for a SINGLE user message.\n\n  DEFAULT IS 0 = UNLIMITED. A fixed turn cap is a crude safety net: it cannot\n  tell 'working hard' from 'going in circles', and it cuts off legitimate long\n  tasks. So the real brakes are:\n    1) no-progress detection — same tool with the SAME arguments (or identical\n       results) for 3 rounds in a row -> nudge the model to change strategy;\n       5 rounds in a row -> stop and tell you why\n    2) /stop — you decide, any time\n    3) wrap-up guidance (only when N > 0) — near the limit the model is told to\n       stop calling tools and summarize\n\n  Set N > 0 only if you want a hard ceiling (e.g. /max-turns 20).\n  Changes take effect IMMEDIATELY (no restart) and are persisted to config.\n\n  Examples:\n    /max-turns        — show current setting\n    /max-turns 0      — unlimited (default)\n    /max-turns 20     — hard cap at 20 rounds, wrap-up hint from round 17",
 
   channel: "/channel <list|send|test>\n  Manage notification channels.\n\n  Subcommands:\n    list       — List all configured notification channels\n    send <msg> — Send a message via all channels\n    test       — Send a test message to verify channels\n\n  Requires channel environment variables to be set at startup.",
 
-  cost:    "/cost\n  Show API cost report.\n  Displays total tokens used and estimated cost in USD.\n  Supports pricing for: DeepSeek, OpenAI, Qwen, GLM, Kimi.",
+  cost:    "/cost\n  显示当前会话的 token 用量与费用「估算」（不是精确账单）。\n  支持内置价格表：DeepSeek / OpenAI / Qwen / GLM / Kimi。\n\n  ⚠️  这是估算值，通常偏高，不要用于报账：\n    · 缓存命中未单独计价 —— 各厂商字段名不统一，命中部分被按「未命中价」计算\n      （DeepSeek 命中 0.04 元/百万 vs 未命中 2 元/百万，差约 50 倍）\n    · 不分峰谷 —— DeepSeek 空闲时段（含周末/法定节假日）实际半价，这里按高峰价算\n    · 价格表是发版时的快照，厂商调价后不会自动更新（2026 年 DeepSeek 已多轮调价）\n    · DeepSeek 以人民币计价，这里按固定汇率折成美元显示\n    多轮对话（缓存命中率高）常见偏高 5~12 倍。真实费用请以厂商后台为准。\n\n  统计口径：当前会话累加（不是从第一天开始）；重载会话后可能归零。\n  详细说明见 README「费用估算（/cost）—— 为什么它只是估算」。",
 
   compact: "/compact\n  Manually trigger context compression.\n  Compresses the conversation history to fit within the token budget.\n  Keeps recent turns intact, compresses older ones.\n\n  Typically triggered automatically at 80% budget usage.",
 
@@ -1590,7 +1592,7 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
             })
             console.log('── 思考深度 ──────────────────────────────')
             for (const line of describeThinking(info)) console.log('  ' + line)
-            console.log('  （改动立即生效并持久化；/thinking off|auto|on [effort]）')
+            console.log('  （改动立即生效并持久化；改档位用 /thinking effort <档位>）')
           }
           const a1 = (rest[0] || '').trim().toLowerCase()
           const a2 = (rest[1] || '').trim().toLowerCase()
@@ -1602,7 +1604,15 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
             break
           }
           if (!['auto', 'off', 'on'].includes(a1)) {
-            console.log(`❌ Usage: /thinking [auto|off|on] [effort]   ·   /thinking effort <${EFFORT_LADDER.join('|')}>`)
+            // 「裸档位」（/thinking high）是最自然的写法，但档位不能单独当模式用。
+            // 只丢一条 Usage 会让人以为"这命令不支持调等级"，所以这里明确指路。
+            if (EFFORT_LADDER.includes(a1)) {
+              console.log(`❌ 档位不能单独使用：/thinking ${a1} 无效`)
+              console.log(`   只改档位  →  /thinking effort ${a1}`)
+              console.log(`   开启并指定 →  /thinking on ${a1}`)
+            } else {
+              console.log(`❌ Usage: /thinking [auto|off|on] [effort]   ·   /thinking effort <${EFFORT_LADDER.join('|')}>`)
+            }
             break
           }
           const patch = { mode: a1 }
@@ -1937,17 +1947,27 @@ Custom tools are machine-level and auto-loaded: put a reusable tool at ~/.cc-nod
           break
         }
         case 'allow': {
-          const arg = rest.join(' ').toLowerCase()
+          // 注意：只对「关键字」做大小写归一，**工具名必须保留原样**。
+          // 旧实现把整个参数 toLowerCase，于是 `/allow Bash` 存成 "bash"，
+          // 而工具的注册名是 "Bash" —— 规则永远匹配不上，单个工具放行形同虚设
+          // （只有 `/allow all` 和 `/allow *` 侥幸有效）。
+          const rawArg = rest.join(' ').trim()
+          const arg = rawArg.toLowerCase()
           if (arg === 'all') {
             engine.permissionChecker.allowAllForSession()
-            console.log('✅ All tools allowed for the rest of this session')
+            console.log('✅ 本次会话已放行全部工具（不再逐个确认）')
+            // 说清作用域：这一步只改运行中的会话，不改配置文件，
+            // 所以 /status 里的「权限模式」仍显示 ask —— 这是正常的，不是没生效。
+            console.log('   ⓘ 仅当前进程生效，不写入配置；重启后回到启动时的权限模式。')
+            console.log('     查看是否生效：/status（「权限模式」后面会标出本次会话的放行情况）')
           } else if (arg === 'reset') {
             engine.permissionChecker.resetSessionAllow()
-            console.log('✅ Session permission reset to normal (ask mode)')
+            console.log('✅ 已撤销本次会话的放行，恢复为逐个确认')
           } else {
-            const tool = arg || '*'
+            const tool = rawArg || '*'
             engine.permissionChecker.allow(tool)
-            console.log(`✅ Tool "${tool}" allowed for this session`)
+            const shown = tool === '*' ? '全部工具' : tool
+            console.log(`✅ 本次会话已放行「${shown}」（/allow reset 可撤销；重启后失效）`)
           }
           break
         }

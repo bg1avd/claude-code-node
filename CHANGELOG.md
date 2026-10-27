@@ -1,6 +1,81 @@
 # CHANGELOG
 
+## 4.1.3
+
+> 三个会话级权限的真 bug + 两处帮助文档。无破坏性变更，无依赖变化。
+
+### 🔴 `/allow <tool>` 从来没生效过（大小写不匹配）
+
+`cli.js` 把整个参数 `toLowerCase()`，于是 `/allow Bash` 存成规则 `tool: "bash"`，
+而工具注册名是 `Bash` —— 规则匹配用严格相等，**永远匹配不上**。提示照样打印
+`✅ Tool "bash" allowed`，用户完全看不出失效。只有 `/allow all` 和 `/allow *` 侥幸有效。
+
+- 修复：只对**关键字**（`all` / `reset`）做大小写归一，工具名保留原样。
+- 同时让两侧匹配都**忽略大小写**（`/allow bash` 也能放行 `Bash`）——
+  只放宽"用户显式授权的同一个工具"，不会波及其他工具。
+
+### 🔴 `/allow reset` 撤销不掉 `/allow <tool>`
+
+两套 `PermissionChecker` 的 `resetSessionAllow()` 原来都只清 `sessionAllowAll`，
+不清规则/集合。于是 `/allow Bash` 之后 `/allow reset`，提示写着「已恢复逐个确认」，
+**实际 Bash 依然免确认**。
+
+- `EnhancedPermissionChecker`：给规则加 `sessionScoped` 标记（不用 reason 文案去猜，
+  也不能靠 `expiresAt` —— 会话级规则不过期），reset 时按标记过滤。
+- 简化版 `PermissionChecker`：reset 时清空 `alwaysAllow`。
+- **只删会话级规则**：从 `permissions.json` 加载的持久规则必须保留（有专门测试兜住）。
+
+### 🟡 `/status` 不显示会话级放行
+
+`/allow all` 之后 `/status` 仍显示 `ask` —— 因为 `/allow` 系列改的是运行时
+`sessionAllowAll` / 会话规则，**不写配置**，而 `/status` 只读 `config.permissionMode`。
+用户据此判断"没生效"（真实报障）。
+
+- `/status` 现在标注：`ask · 本次会话已放行「全部工具」（/allow reset 取消；重启后失效）`
+- `/allow all` 的输出补上作用域说明：仅当前进程、不写配置、重启失效、用 `/status` 查看。
+- **顺带记录一个坑**：项目里有**两套** `PermissionChecker` 实现，engine 用的是
+  `src/security/enhanced-permission.js`（`rules` + `sessionScoped`），另一套用
+  `alwaysAllow` 集合。`/status` 现在两种都读，避免以后再按"想当然的那套"写。
+
+### 📝 帮助：`/thinking` 调不了档位（看起来像没这个功能）
+
+命令本身是好的，但两个坑让用户以为它不支持：
+
+1. **`/thinking high`（裸档位）被拒绝** —— 最自然的写法只换来一条 Usage 错误。
+   现在明确指路：`/thinking effort high` 或 `/thinking on high`。
+2. **DeepSeek 在 `auto` 模式下默认关闭思考** —— 只设 `effort` 不会开启，`/thinking
+   effort high` 看着成功但 Request 里仍是 `{"type":"disabled"}`。
+
+`/help` 主列表与 `/help thinking` 详情都已重写，含七档取值、各厂商裁剪规则、
+以及"怎么判断是否真开了（看 Request 行有没有 disabled）"。
+
+### 📝 文档：`/cost` 为什么只是估算
+
+`/cost` 的数字**确实偏高**，原因写进 README 与 `/help cost`：
+
+| 失真来源 | 偏差 |
+|:--|:--|
+| 缓存命中未单独计价（Anthropic `cache_read_input_tokens` vs DeepSeek `prompt_cache_hit_tokens`，内核只读前者） | 命中价差约 **50 倍** |
+| 不分峰谷（DeepSeek 空闲时段半价，内核固定按高峰价） | 空闲时段 **×2** |
+| 价格表是发版快照 | 厂商调价后累积偏差 |
+| 美元显示 / 人民币计价 | 汇率浮动 |
+
+多轮对话（前缀复用多、命中率高）常见**偏高 5–12 倍**；只有"高峰时段 + 单轮短对话"
+时基本吻合。`/cost` 输出末尾现在也直接标注这一点，不必去翻文档。
+
+同时记录统计口径：**按会话累加**（不是从第一天开始）；退出时只回填最近 50 条调用；
+重载会话时该回填路径存在字段名不匹配（存 `inputTokens`、读 `input_tokens`），**可能归零**。
+
+> 本轮**只记录不修复**。要做准需要持续维护数据（各厂商缓存字段、峰谷时段、调价），
+> 维护成本随接入厂商线性增长 —— 明确标注为估算，比维护一份随时过期的"精确"表更可靠。
+
+### 测试
+
+新增 `src/__tests__/permission-session-scope.test.js`（12 条），覆盖上述三个权限缺陷，
+含"reset 不能误删持久规则"与"放行 Bash 不连带放行 Write"。全套 **657/657**。
+
 ## 4.1.2
+
 
 > 修复接入方（cc-node-mobile）v4.1.1 实机两周后反馈的 **1 个 P1 + 3 个 P2 + 1 处文档时序**。
 > 全部逐条复现后修复，无破坏性变更；`command/output` 只增字段，旧客户端不受影响。

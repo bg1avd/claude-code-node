@@ -47,7 +47,10 @@ export const COMMAND_SPEC = [
   { cmd: '/model', desc: '切换模型（立即生效）', needsArg: true },
   { cmd: '/api-base', desc: '切换 API Base（仅本次会话）', needsArg: true },
   { cmd: '/api-key', desc: '切换 API Key（仅本次会话）', needsArg: true, secret: true },
-  { cmd: '/thinking', desc: '思考深度/模式', needsArg: false, options: ['auto', 'off', 'on'] },
+  // options 只列模式：客户端把它当"模式选择器"渲染。档位（effort）是第二个参数，
+  // 不能混进 options（否则客户端会把 high 当成一种 mode 发过来）。
+  // 档位取值见 `/help thinking`，形如 `/thinking effort high`。
+  { cmd: '/thinking', desc: '思考深度（模式 auto|off|on + effort 档位）', needsArg: false, options: ['auto', 'off', 'on'] },
   { cmd: '/max-turns', desc: '工具循环轮数上限（0 = 不限）', needsArg: false },
   { cmd: '/resume', desc: '加载某个已存会话（可用 /sessions 里的序号）', needsArg: true },
   { cmd: '/dream', desc: '梦境（跨会话长期记忆）', needsArg: false, options: ['save', 'clear'] },

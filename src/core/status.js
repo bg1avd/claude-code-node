@@ -121,6 +121,34 @@ export function buildStatus({
   let _permText = _perm.mode
   if (!_perm.valid) _permText += `  ⚠️ 非法值 ${JSON.stringify(_perm.provided)}，按 ${_perm.mode} 处理（合法值：${PERMISSION_MODES_HELP}）`
   else if (_perm.legacy) _permText += `  （旧写法 ${JSON.stringify(_perm.provided)} → ${_perm.mode}）`
+  // 会话级放行（`/allow all`、`/allow <tool>`、确认时按 `a`）只作用于当前进程，
+  // **不写入配置** —— 所以 config.permissionMode 永远是启动时那个值。
+  // 不在这里显式列出，用户敲完 `/allow all` 再看 /status 会以为没生效（真实报障）。
+  if (_perm.mode !== 'all') {
+    const pc = engine?.permissionChecker
+    if (pc) {
+      if (pc.sessionAllowAll) {
+        _permText += '  ·  本次会话已放行「全部工具」（/allow reset 取消；重启后失效）'
+      } else {
+        // 注意：项目里有**两套** PermissionChecker 实现，engine 用的是
+        // EnhancedPermissionChecker（rules + sessionScoped），另一套用 alwaysAllow 集合。
+        // 这里两种都读 —— 之前只读 alwaysAllow，导致 REPL 里 `/allow Bash` 之后
+        // /status 什么都不显示（真实报障）。别再按"想当然"的那一套写。
+        const names = []
+        if (Array.isArray(pc.rules)) {
+          for (const r of pc.rules) {
+            if (r.sessionScoped && !r.isExpired) names.push(r.tool === '*' ? '全部工具' : r.tool)
+          }
+        } else if (pc.alwaysAllow?.size) {
+          for (const t of pc.alwaysAllow) names.push(t === '*' ? '全部工具' : t)
+        }
+        const uniq = [...new Set(names)]
+        if (uniq.length) {
+          _permText += `  ·  本次会话已放行「${uniq.join('、')}」（/allow reset 取消；重启后失效）`
+        }
+      }
+    }
+  }
   L.push(`  权限模式  : ${_permText}${mark(config, 'permissionMode', _perm.mode)}`)
   if (cfg.smallModel) L.push('  小模型模式: 开启 (每轮清空 LLM 端缓存)')
 
