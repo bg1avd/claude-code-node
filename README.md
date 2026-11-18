@@ -191,6 +191,120 @@ printf '{"jsonrpc":"2.0","id":1,"method":"initialize"}\n' | cc-node --stdio
 [![npm version](https://img.shields.io/npm/v/@raolin2025/claude-code-node.svg)](https://www.npmjs.com/package/@raolin2025/claude-code-node) [![GitHub](https://img.shields.io/badge/GitHub-bg1avd%2Fclaude--code--node-blue)](https://github.com/bg1avd/claude-code-node) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ---
 
+## 🗂️ 多实例并行（一个进程干一件事）
+
+一个 cc-node 进程只有**一份上下文**，所以「同时干两件不相干的事」要么用 `/cd` 串行切，
+要么——直接开**多个独立实例**。
+
+关键点：cc-node 的运行时数据全部落在 **`~/.cc-node/`**（socket、会话、定时任务、梦境）。
+把它指到不同目录，两个实例就完全互不干扰。
+
+| 数据 | 隔离后的效果 |
+|:--|:--|
+| `repl.sock` | 各自 `cc-node attach` 不会连错进程 |
+| `sessions/` | 两边的 `/resume` 各看各的历史 |
+| `schedule.json` | ⚠️ 各跑各的——**同一个定时任务不会被执行两次** |
+| `dreams/` | 各自的记忆沉淀，不互相污染 |
+| `~/.claude-code/config.json` | 各一份，模型 / API Key 可分开 |
+
+**目录（项目）维度的隔离本来就是对的**：每个实例读自己目录的
+`.claude-code/config.json`（身份、工具、权限、MCP 全跟着走）。
+
+### Linux / macOS
+
+在 shell 里临时改 `HOME`，**只影响当前这个终端窗口**：
+
+```bash
+# 终端 A —— 量化项目
+export HOME="$HOME/.cc-node-quant"      # 用 $HOME 原值，别写成 ~ 会循环
+cd ~/work/quant
+cc-node
+
+# 终端 B —— 另一个项目（另开一个窗口）
+export HOME="$HOME/.cc-node-dev"
+cd ~/work/webapp
+cc-node
+```
+
+想双击即开，就写成脚本（放在 `~/bin/quant.sh`，`chmod +x`）：
+
+```bash
+#!/usr/bin/env bash
+export HOME="$HOME/.cc-node-quant"
+cd ~/work/quant || exit 1
+exec cc-node "$@"
+```
+
+> ⚠️ 用 `export HOME="$HOME/..."` 而不是 `export HOME="~/.cc-node-quant"`：
+> `~` 在部分写法下展开成**已经被改过的** `HOME`，会变成 `~/.cc-node-x/.cc-node-x`。
+> 变量要一次赋值成功，不要在同一行既改又用。
+
+### Windows
+
+Windows 上 Node 的"用户目录"以 **`USERPROFILE`** 为准，`HOME` 不一定被采信。
+**两个都设**，双保险：
+
+```bat
+@echo off
+REM 量化实例 —— 保存为 start-quant.cmd
+set HOME=%USERPROFILE%\.cc-node-quant
+set USERPROFILE=%USERPROFILE%\.cc-node-quant
+cd /d D:\work\quant
+cc-node %*
+```
+
+```bat
+@echo off
+REM 开发实例 —— 保存为 start-dev.cmd
+set HOME=%USERPROFILE%\.cc-node-dev
+set USERPROFILE=%USERPROFILE%\.cc-node-dev
+cd /d D:\work\webapp
+cc-node %*
+```
+
+PowerShell 里同样可用（`$env:` 只在当前窗口有效）：
+
+```powershell
+$env:HOME        = "$env:USERPROFILE\.cc-node-quant"
+$env:USERPROFILE = "$env:USERPROFILE\.cc-node-quant"
+Set-Location D:\work\quant
+cc-node
+```
+
+> `set` / `$env:` 的作用域是**当前窗口及其子进程**，关掉窗口即恢复，不会改系统环境变量。
+> 快捷键：给每个 `.cmd` 建一个桌面快捷方式，双击就是独立实例。
+
+### 首次启动会"空一份"
+
+新的 `CC_NODE_HOME` 目录是空的：
+
+- 没有用户级配置 → 需要重新填 API Key，或从旧的 `~/.cc-node` / `~/.claude-code` 复制一份改
+- 没有历史会话 → `/resume` 里是空列表
+- 没有定时任务 → 需要**在新实例里重建**
+
+**原目录保持不动**，互不影响。
+
+### 怎么验证真的隔离了
+
+```bash
+# Linux
+HOME="$HOME/.cc-node-quant" node --input-type=module -e "
+import { SOCK_PATH } from 'claude-code-node/src/core/paths.js'; console.log(SOCK_PATH)
+"
+```
+
+看输出路径里是不是带 `\.cc-node-quant` —— 带上了就说明生效。
+Windows 上同理（把 `HOME=` 换成 `set HOME=` 形式）。
+
+### 什么时候该用哪种
+
+| 方案 | 适合 | 代价 |
+|:--|:--|:--|
+| 单实例 + `/cd` | 一个人轮流做不同的活 | 切换时上下文清空，不能并行 |
+| **多实例 + 独立 HOME** | 真并行（一边盯盘一边写代码） | N 个 Node 进程，各约 100–200MB 内存 |
+
+---
+
 ## 🧠 上下文窗口感知（自动压缩）
 
 cc-node 会自动感知当前所用模型的**上下文窗口长度**，并在接近上限时**自动压缩**对话历史，
